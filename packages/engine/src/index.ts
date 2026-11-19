@@ -5,3 +5,8 @@ export * from './secrets.ts';
 export * from './settings-store.ts';
 export * from './rpc/index.ts';
 export * from './play/script.ts';
+export { foldState, plotProgress, type StoryState } from './play/state.ts';
+export { analyzeRun, type RunReport, runTranscript } from './play/observer/report.ts';
+export { EVENT_CARDS, QUALITY, similarity } from './play/observer/quality.ts';
+export { overBudget } from './play/observer/runner.ts';
+export { totalCost } from './play/runtime.ts';

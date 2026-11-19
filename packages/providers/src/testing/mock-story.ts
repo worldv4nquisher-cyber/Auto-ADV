@@ -93,7 +93,9 @@ function directorPlan(user: string, count: number): string {
     : card
       ? `用事件卡打破僵局：${card}`
       : `（模拟导演 #${count}）${present[0] ?? '众人'}和${present[1] ?? '自己'}围绕灯塔的线索交换情报，气氛逐渐紧张。`;
-  const speakers = present.slice(0, 2).map((name, i) => ({ name, intent: i ? '回应，但有所保留' : '抛出新线索' }));
+  // 轮流让不同的人开口
+  const order = [...present.slice(count % Math.max(1, present.length)), ...present.slice(0, count % Math.max(1, present.length))];
+  const speakers = order.slice(0, 2).map((name, i) => ({ name, intent: i ? '回应，但有所保留' : '抛出新线索' }));
   return JSON.stringify({
     plan,
     location,
@@ -239,25 +241,22 @@ export function storyReply(info: MockRequestInfo): string | undefined {
     return `前情提要：主角回到雾港，与在场的人谈起了灯塔。（模拟摘要 #${info.count}）`;
   }
 
-  // 观察模式：合并模式的编剧（一次写出整拍）
+  // 观察模式：合并模式的编剧（一次写出整拍）。每拍大约两次请求，按拍数轮换素材
   if (system.includes('演员兼旁白') && system.includes('没有玩家')) {
     const present = namesUnder(system, '在场角色');
-    const plan = /［导演安排］(.+)/.exec(lastUser)?.[1] ?? '';
-    const a = present[0] ?? '林夕';
-    const b = present[1] ?? a;
+    const n = Math.floor(info.count / 2);
+    const a = present[n % Math.max(1, present.length)] ?? '林夕';
+    const b = present[(n + 1) % Math.max(1, present.length)] ?? a;
     return [
-      pick(NARRATION, info.count),
-      `【${a}】（${pick(ACTIONS, info.count)}）${pick(LINES, info.count)}`,
-      `【${b}】（${pick(ACTIONS, info.count + 3)}）${pick(LINES, info.count + 5)}`,
-      plan ? `（${plan.slice(0, 30)}）` : '',
-    ]
-      .filter(Boolean)
-      .join('\n');
+      pick(NARRATION, n),
+      `【${a}】（${pick(ACTIONS, n)}）${pick(LINES, n)}`,
+      `【${b}】（${pick(ACTIONS, n + 3)}）${pick(LINES, n + 5)}`,
+    ].join('\n');
   }
 
   // 观察模式：分演模式的旁白和演员
   if (system.startsWith('你是互动故事的旁白')) {
-    return `${pick(NARRATION, info.count)}\n${pick(NARRATION, info.count + 4)}`;
+    return pick(NARRATION, Math.floor(info.count / 3));
   }
   const actor = /^你是演员，在一部互动故事里扮演「(.+?)」/.exec(system)?.[1];
   if (actor) {

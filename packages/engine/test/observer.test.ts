@@ -117,10 +117,10 @@ describe('观察模式', () => {
     expect(b1?.beat?.done).toEqual(['b_01_01_01']);
     expect(b2?.beat?.done).toEqual(['b_01_01_02']);
     expect(typeof b2?.beat?.similarity).toBe('number');
-    expect(b1?.segments?.filter((s) => s.kind === 'line').map((s) => s.kind === 'line' && s.characterId)).toEqual([
-      'char_01',
-      'char_02',
-    ]);
+    // 台词都对应到了在场的角色
+    const speakers = b1?.segments?.flatMap((s) => (s.kind === 'line' ? [s.characterId] : [])) ?? [];
+    expect(speakers.length).toBeGreaterThan(0);
+    for (const id of speakers) expect(['char_01', 'char_02', 'char_03']).toContain(id);
     expect(v.plot.done).toEqual(['b_01_01_01', 'b_01_01_02']);
 
     // 实时推送：开始一拍、导演、编剧、流式内容、完成
