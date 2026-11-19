@@ -7,7 +7,7 @@
 - **模型可插拔**：OpenAI 兼容接口（DeepSeek、通义千问、Kimi、OpenAI、Ollama……）优先，之后加入 Claude、Gemini 原生接口，以及可选的生图、生视频、音乐和语音模型。
 - **同人模式**：从已有作品学习，生成衍生世界。
 
-> 当前进度：**M0 骨架**。可以接入模型、做能力探测、配置职责路由、在调试台对话、查看每次调用的完整日志和花费。一键创世在 M1。
+> 当前进度：**M1 首个可玩版**。输入一句话（或者什么都不写），一键生成世界简报、世界观、角色、地点、设定集和开场，然后走进去和角色们聊天：可以重抽、切换分支、编辑、回退、存档读档，对话变长后会自动整理前情提要。观察模式在 M2。
 
 ## 文档
 
@@ -31,7 +31,7 @@ pnpm build        # 构建
 pnpm dist:win     # 打 Windows 安装包，输出在 apps/desktop/release/
 ```
 
-没有 API Key 时可以启动一个本地模拟服务来调试：
+没有 API Key 时可以启动一个本地模拟服务来调试（它认得创世和对话请求，会返回固定的示例内容，能把整个流程走通）：
 
 ```bash
 pnpm cli mock-server
@@ -43,6 +43,8 @@ pnpm cli mock-server
 ```bash
 pnpm cli probe --base-url https://api.deepseek.com/v1 --key sk-... --model deepseek-chat
 pnpm cli chat  --base-url https://api.deepseek.com/v1 --key sk-... --model deepseek-chat "你好"
+# 不开界面跑一遍一键创世，打印生成的世界、调用次数和用量（调提示词用）
+pnpm cli genesis --base-url https://api.deepseek.com/v1 --key sk-... --model deepseek-chat --probe "雾中的灯塔"
 ```
 
 端到端测试会真正启动应用并走一遍完整流程（需要先 `pnpm build`；Linux 无显示环境用 `xvfb-run -a`）：
@@ -58,5 +60,5 @@ apps/desktop      Electron 应用：主进程、预加载脚本、引擎进程�
 apps/cli          命令行工具
 packages/schema   原生格式与设置的 Zod 定义
 packages/providers 模型接入层：OpenAI 兼容客户端、能力探测、计费、模拟服务
-packages/engine   核心引擎：设置与密钥、调用日志（SQLite）、RPC
+packages/engine   核心引擎：模型网关、世界文件夹、创世管线、对话运行时（事件树、记忆）、调用日志、RPC
 ```

@@ -133,7 +133,7 @@ auto-adv/
 
 依赖方向是单向的：`schema` ← `providers` ← `engine` ← `apps/*`；`compat` 只依赖 `schema`，核心不依赖它。
 
-目前（M0）已有 `schema`、`providers`、`engine`、`desktop`、`cli`；`compat` 和 `player` 在用到时加入。各包直接导出 TypeScript 源码，桌面端由 electron-vite 打包，命令行工具由 Node 直接运行（Node 22.18+ 原生支持 TypeScript）。
+目前（M1）已有 `schema`、`providers`、`engine`、`desktop`、`cli`；`compat` 和 `player` 在用到时加入。各包直接导出 TypeScript 源码，桌面端由 electron-vite 打包，命令行工具由 Node 直接运行（Node 22.18+ 原生支持 TypeScript）。
 
 ## 5. 原生格式：世界包
 
@@ -537,3 +537,31 @@ interface SpeechModel    { speak(text, voice, emotion?) }
 | 立绘不一致 | 定妆照 + 参考图派生；进阶用 LoRA |
 | 本地小模型结构化输出不稳 | 合并模式 + 文本格式解析 + 自动修复重试 |
 | 范围太大做不完 | 严格按路线图分阶段，每个阶段结束都有能玩的东西 |
+
+## 14. M1 实现备注
+
+M1 落地时的具体做法，和上面设计不一致的地方以这里为准。
+
+**世界文件夹**：`<数据目录>/worlds/<世界 id>/`，M1 实际写入 `world.json`、`brief.json`、`style/style.json`、`setting/worldview.md`、`setting/lore/lore_NN.json`、`characters/char_NN/character.json`、`locations/loc_NN.json`、`story/opening.json`、`playthroughs/play.db`。实体 id 按生成顺序编号，主角固定是 `char_01`。
+
+**创世管线**（`engine/src/genesis`）：M1 只做文本部分，依赖图是
+
+```
+简报 → 世界观 → 角色 ┬→ 设定集
+              → 地点 ┴→ 开场
+```
+
+同一层的步骤并行。每一步完成立即落盘，状态记在 `world.json` 的 `genesis.steps` 里：中途关掉应用或某一步失败，下次可以从断点续跑；也可以指定从某一步起重新生成（下游一起重算）。剧情骨架、数值系统、风格指南里的画风和音乐留到 M2 / M3 / M4。
+
+**结构化输出**（`engine/src/llm/structured.ts`）：按能力探测结果选 `json_schema` → `json_object` → 纯提示词；提示词里总是给一个带说明的示例（比 JSON Schema 更容易被各家模型理解）。解析时去掉思考标签和代码块、容忍结尾逗号；模型输出的结构故意写得宽松（列表写成字符串、数字写成字符串都接受）。校验失败把错误反馈给模型重试，最多 2 次。
+
+**对话回复格式**：不用 JSON，用流式友好的文本格式——旁白直接写，台词写成 `【角色名】（动作）台词`，也兼容 `角色名：台词`、Markdown 强调、引号包住的台词。替主角写的台词会被丢掉。解析器是纯函数，界面也直接用它（编辑回复时转回文本）。
+
+**自由对话 = 合并模式**：一次调用写出整段回复，在场角色都可以开口（单角色和群聊是同一套逻辑，区别只在场景里有几个人）。不在场的角色开口视为登场，自动加入场景。
+
+**事件树**（`play.db`）：`events` 表用 `parent` 指针组成一棵树，事件类型有开场、玩家输入、角色回复、换场景。当前位置是周目的 `head_id`；存档只是指向某个事件的指针；重抽 = 在同一个父节点下生成兄弟节点；回退 = 移动 `head_id`；删除会连同后代、挂在上面的摘要和存档一起删。
+
+**上下文与记忆**：系统提示（规则 → 世界 → 角色 → 场景 → 前情提要）→ 摘要之后的历史 → 最后一条用户消息（关键词触发的设定 + 玩家行动）。前情提要是滚动的：摘要之后的原文超过 24 条或 1.6 万字时，书记把较旧的部分并入前情提要（保留最近 10 条原文），摘要挂在它覆盖到的最后一个事件上，所以回退、换分支后自动用对应位置的摘要。设定集触发：常驻条目总是带上，关键词条目在最近 4 条内容或本次输入里出现关键词时带上，按优先级裁剪到 3000 字以内。
+
+**调用日志**：每次调用除了职责，还记一个更细的用途标记（如 `genesis.cast`、`play.reply`、`play.memory`），回复事件记着产生它的调用 id。
+
