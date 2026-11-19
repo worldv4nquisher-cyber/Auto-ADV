@@ -2,7 +2,7 @@ import type { CallDetail, CallSummary, UsageSummary } from '@auto-adv/engine/api
 import { useCallback, useEffect, useState } from 'react';
 import { Badge, Button, Card, cx, Empty, PageHeader, Spinner, useToast } from '../components/ui.tsx';
 import { engine, errorMessage } from '../lib/engine.ts';
-import { formatCost, formatMs, formatTime, formatTokens, roleName } from '../lib/format.ts';
+import { formatCost, formatMs, formatTime, formatTokens, roleName, tagName } from '../lib/format.ts';
 
 const PAGE = 100;
 
@@ -115,7 +115,10 @@ export function LogsPage() {
                     )}
                   >
                     <td className="py-2 pr-3 pl-8 whitespace-nowrap text-muted tabular-nums">{formatTime(c.ts)}</td>
-                    <td className="px-3 whitespace-nowrap">{roleName(c.role)}</td>
+                    <td className="px-3 whitespace-nowrap" title={tagName(c.tag)}>
+                      {roleName(c.role)}
+                      {c.tag && <span className="ml-1.5 text-xs text-faint">{tagName(c.tag).split(' · ').at(-1)}</span>}
+                    </td>
                     <td className="max-w-48 truncate px-3 font-mono text-xs" title={`${c.endpointName} / ${c.model}`}>
                       {c.model}
                     </td>
@@ -191,7 +194,10 @@ function CallDetailPanel({ id, onClose }: { id: string; onClose: () => void }) {
           <>
             <div className="grid grid-cols-[6rem_1fr] gap-y-1.5">
               <span className="text-faint">职责</span>
-              <span>{roleName(detail.role)}</span>
+              <span>
+                {roleName(detail.role)}
+                {detail.tag && <span className="ml-2 text-muted">{tagName(detail.tag)}</span>}
+              </span>
               <span className="text-faint">接入点</span>
               <span>{detail.endpointName}</span>
               <span className="text-faint">模型</span>
