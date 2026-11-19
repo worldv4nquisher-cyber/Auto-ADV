@@ -5,6 +5,7 @@ import {
   Location,
   LoreEntry,
   migrate,
+  PlotOutline,
   StoryOpening,
   StyleGuide,
   WorldBrief,
@@ -22,6 +23,7 @@ export interface WorldData {
   characters: Character[];
   locations: Location[];
   lore: LoreEntry[];
+  plot: PlotOutline | null;
   opening: StoryOpening | null;
 }
 
@@ -143,7 +145,7 @@ export class WorldStore {
   // ───────────── 内容 ─────────────
 
   async load(id: string): Promise<WorldData> {
-    const [manifest, brief, style, worldview, characters, locations, lore, opening] = await Promise.all([
+    const [manifest, brief, style, worldview, characters, locations, lore, plot, opening] = await Promise.all([
       this.getManifest(id),
       this.read(this.file(id, 'brief.json'), WorldBrief),
       this.read(this.file(id, 'style', 'style.json'), StyleGuide),
@@ -151,11 +153,12 @@ export class WorldStore {
       this.readDir(this.file(id, 'characters'), Character, 'character.json'),
       this.readDir(this.file(id, 'locations'), Location),
       this.readDir(this.file(id, 'setting', 'lore'), LoreEntry),
+      this.read(this.file(id, 'plot', 'outline.json'), PlotOutline),
       this.read(this.file(id, 'story', 'opening.json'), StoryOpening),
     ]);
     // 角色按创建顺序（id 里带序号），主角排第一
     characters.sort((a, b) => Number(b.role === 'protagonist') - Number(a.role === 'protagonist'));
-    return { manifest, brief, style, worldview, characters, locations, lore, opening };
+    return { manifest, brief, style, worldview, characters, locations, lore, plot, opening };
   }
 
   async readWorldview(id: string): Promise<string> {
@@ -177,6 +180,10 @@ export class WorldStore {
 
   writeWorldview(id: string, text: string) {
     return writeFileAtomic(this.file(id, 'setting', 'worldview.md'), text.endsWith('\n') ? text : `${text}\n`);
+  }
+
+  writePlot(id: string, plot: PlotOutline) {
+    return writeFileAtomic(this.file(id, 'plot', 'outline.json'), json(PlotOutline.parse(plot)));
   }
 
   writeOpening(id: string, opening: StoryOpening) {

@@ -12,7 +12,9 @@ import type {
   GenesisStepState,
   Location,
   LoreEntry,
+  ObserverSettings,
   PlayMode,
+  PlotOutline,
   RoleId,
   RoleRoute,
   StoryOpening,
@@ -160,6 +162,7 @@ export interface WorldDetail {
   characters: Character[];
   locations: Location[];
   lore: LoreEntry[];
+  plot: PlotOutline | null;
   opening: StoryOpening | null;
 }
 
@@ -207,17 +210,43 @@ export interface SceneState {
   presentCharacterIds: string[];
 }
 
+/** 观察模式里一拍的导演记录。 */
+export interface BeatMeta {
+  /** 导演对这一拍的安排（可以作为"导演笔记"给观众看）。 */
+  plan: string;
+  strategy: ObserverSettings['strategy'];
+  /** 时间推进后的时间描述。 */
+  time?: string;
+  /** 这一拍完成的骨架节拍 id。 */
+  done?: string[];
+  /** 这一拍揭示的秘密：谁的秘密，告诉了谁。 */
+  reveals?: { characterId: string; to: string[] }[];
+  /** 防崩坏触发时抽到的事件卡。 */
+  card?: string;
+  /** 被引擎驳回的导演动作和理由。 */
+  rejected?: string[];
+  /** 骨架走完后，这一拍续写出的新篇章。 */
+  arc?: PlotOutline['acts'][number];
+  /** 与之前内容的最高相似度（0～1），用于检测重复。 */
+  similarity?: number;
+}
+
 /**
  * 事件树上的一个节点。
- * opening：开场（树根）；player：玩家的一次输入；ai：模型的一次回复；scene：玩家手动换场景。
+ * opening：开场（树根）；player：玩家的一次输入；ai：模型的一次回复（观察模式里是一拍）；scene：玩家手动换场景；
+ * directive：观众给导演的指令；whisper：观众对某个角色的悄悄话。
  */
 export interface PlayEvent {
   id: string;
   parentId: string | null;
-  kind: 'opening' | 'player' | 'ai' | 'scene';
+  kind: 'opening' | 'player' | 'ai' | 'scene' | 'directive' | 'whisper';
   createdAt: number;
-  /** player 的输入原文。 */
+  /** player / directive / whisper 的原文。 */
   text?: string;
+  /** player：说话的角色（接管时可能不是主角）；whisper：听到悄悄话的角色。 */
+  characterId?: string;
+  /** 观察模式下一拍的导演记录。 */
+  beat?: BeatMeta;
   /** opening / ai 的内容。 */
   segments?: Segment[];
   /** 这个事件之后的场景（opening / scene 必有；ai 只在有角色登场时有）。 */
@@ -233,12 +262,24 @@ export interface PathEvent extends PlayEvent {
   siblingIndex: number;
 }
 
+export interface PlayUsage {
+  calls: number;
+  inputTokens: number;
+  outputTokens: number;
+  /** 按币种累计的花费（没配价格的调用不计入）。 */
+  costs: Record<string, number>;
+}
+
 export interface PlaythroughInfo {
   id: string;
   worldId: string;
   title: string;
   mode: PlayMode;
   protagonistId: string | null;
+  /** 玩家当前控制的角色：自由对话里是主角；观察模式里接管了谁就是谁，没接管为 null。 */
+  controlledId: string | null;
+  observer: ObserverSettings | null;
+  usage: PlayUsage;
   createdAt: number;
   updatedAt: number;
   headId: string;
@@ -254,6 +295,36 @@ export interface SaveInfo {
   createdAt: number;
 }
 
+export interface PlotProgress {
+  /** 世界的骨架加上游玩中续写的篇章。 */
+  outline: PlotOutline | null;
+  done: string[];
+  currentChapterId: string | null;
+  /** 故事里的当前时间（导演推进过时间才有）。 */
+  time: string | null;
+}
+
+export interface ObserverStatus {
+  /** 用户希望它在跑（按了播放）。 */
+  running: boolean;
+  /**
+   * idle：没在跑；generating：正在生成一拍；buffered：领先观众太多，等观众看；
+   * throttled：触发了频率限制，稍后继续；backoff：上一拍失败，稍后重试。
+   */
+  activity: 'idle' | 'generating' | 'buffered' | 'throttled' | 'backoff';
+  /** 自动停下的原因。 */
+  stopReason: 'budget' | 'errors' | 'takeover' | null;
+  lastError: string | null;
+  failures: number;
+  /** 观众读到了哪个事件。 */
+  readId: string;
+  /** 已生成但观众还没看的拍数。 */
+  ahead: number;
+  /** 正在生成时收到、等下一拍开始时写入的导演指令和悄悄话。 */
+  queued: number;
+  budget: { cost: number; tokens: number };
+}
+
 export interface PlayView {
   playthrough: PlaythroughInfo;
   /** 从开场到当前位置的事件。 */
@@ -262,6 +333,9 @@ export interface PlayView {
   /** 当前位置可用的场景摘要（前情提要）。 */
   memory: { text: string; coveredEvents: number } | null;
   saves: SaveInfo[];
+  plot: PlotProgress;
+  /** 观察模式的运行状态；自由对话为 null。 */
+  observer: ObserverStatus | null;
 }
 
 export interface PlayRef {
@@ -275,6 +349,24 @@ export interface SendParams extends PlayRef {
   /** 接在哪个事件后面，默认当前位置。用于"编辑后重发"。 */
   parentId?: string;
 }
+
+export interface StartPlaythroughParams {
+  worldId: string;
+  title?: string;
+  mode?: PlayMode;
+  observer?: Partial<ObserverSettings>;
+}
+
+/** 观察模式的实时推送。 */
+export type ObserverChunk =
+  | { type: 'status'; status: ObserverStatus }
+  /** 开始生成新的一拍（parentId 是它接在哪个事件后面）。 */
+  | { type: 'beat-start'; parentId: string }
+  | { type: 'phase'; phase: 'arc' | 'director' | 'narrator' | 'actor' | 'writer' | 'memory'; name?: string }
+  /** 正在生成的这一拍第 index 段的最新内容。 */
+  | { type: 'seg'; index: number; seg: Segment }
+  /** 一拍完成（或有其他事件写进了树，比如导演指令）。 */
+  | { type: 'event'; event: PathEvent };
 
 export type PlayChunk =
   | { type: 'phase'; phase: 'memory' | 'thinking' | 'writing' }
@@ -305,7 +397,7 @@ export type EngineContract = {
   runGenesis: Streaming<{ worldId: string; from?: GenesisStepId }, GenesisChunk, WorldSummary>;
 
   listPlaythroughs: Unary<{ worldId: string }, PlaythroughInfo[]>;
-  startPlaythrough: Unary<{ worldId: string; title?: string }, PlayView>;
+  startPlaythrough: Unary<StartPlaythroughParams, PlayView>;
   getPlaythrough: Unary<PlayRef, PlayView>;
   deletePlaythrough: Unary<PlayRef, void>;
   send: Streaming<SendParams, PlayChunk, PlayView>;
@@ -322,6 +414,20 @@ export type EngineContract = {
   saveSlot: Unary<PlayRef & { name?: string }, PlayView>;
   loadSave: Unary<PlayRef & { saveId: string }, PlayView>;
   deleteSave: Unary<PlayRef & { saveId: string }, PlayView>;
+
+  /** 观察模式：播放 / 暂停。 */
+  observerControl: Unary<PlayRef & { action: 'play' | 'pause' }, PlayView>;
+  observerSettings: Unary<PlayRef & { settings: Partial<ObserverSettings> }, PlayView>;
+  /** 观众读到了哪里（推进阅读位置，生成器据此决定要不要继续生成）。 */
+  observerRead: Unary<PlayRef & { eventId: string }, ObserverStatus>;
+  /** 订阅实时进度；取消订阅即结束。 */
+  observerWatch: Streaming<PlayRef, ObserverChunk, void>;
+  /** 给导演的指令，下一拍生效。 */
+  directive: Unary<PlayRef & { text: string }, PlayView>;
+  /** 对某个角色说悄悄话（只有他自己听得到）。 */
+  whisper: Unary<PlayRef & { characterId: string; text: string }, PlayView>;
+  /** 接管某个角色（null 表示交还给 AI）。接管期间自动暂停，用 send 以该角色身份行动。 */
+  takeover: Unary<PlayRef & { characterId: string | null }, PlayView>;
 };
 
 /**

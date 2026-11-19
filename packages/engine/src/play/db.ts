@@ -1,8 +1,20 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { PlayMode } from '@auto-adv/schema';
-import type { PlayEvent, SaveInfo } from '../api.ts';
+import type { ObserverSettings, PlayMode } from '@auto-adv/schema';
+import type { PlayEvent, PlayUsage, SaveInfo } from '../api.ts';
+
+/** 周目的附加数据（JSON 列，加字段不用改表）。 */
+export interface PlaythroughData {
+  observer?: ObserverSettings;
+  /** 观察模式下玩家接管的角色。 */
+  controlledId?: string | null;
+  /** 观察模式下观众读到的位置。 */
+  readId?: string;
+  usage?: PlayUsage;
+  /** 生成中途收到、还没写进事件树的导演指令和悄悄话。 */
+  pending?: { kind: 'directive' | 'whisper'; text: string; characterId?: string; createdAt: number }[];
+}
 
 export interface PlaythroughRow {
   id: string;
@@ -12,6 +24,15 @@ export interface PlaythroughRow {
   headId: string;
   createdAt: number;
   updatedAt: number;
+  data: PlaythroughData;
+}
+
+export interface SummaryRow {
+  eventId: string;
+  text: string;
+  covered: number;
+  /** 各角色视角的记忆：角色 id → 这个角色知道 / 记得的事。 */
+  characters: Record<string, string>;
 }
 
 interface EventRow {
@@ -23,7 +44,7 @@ interface EventRow {
   created_at: number;
 }
 
-type EventData = Pick<PlayEvent, 'text' | 'segments' | 'scene' | 'edited'>;
+type EventData = Pick<PlayEvent, 'text' | 'segments' | 'scene' | 'edited' | 'characterId' | 'beat'>;
 
 function toEvent(r: EventRow): PlayEvent {
   const data = JSON.parse(r.data) as EventData;
@@ -35,11 +56,13 @@ function dataOf(e: PlayEvent): string {
   if (e.text !== undefined) d.text = e.text;
   if (e.segments !== undefined) d.segments = e.segments;
   if (e.scene !== undefined) d.scene = e.scene;
+  if (e.characterId !== undefined) d.characterId = e.characterId;
+  if (e.beat !== undefined) d.beat = e.beat;
   if (e.edited) d.edited = true;
   return JSON.stringify(d);
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /**
  * 一个世界的所有周目：<world>/playthroughs/play.db。
@@ -90,6 +113,13 @@ export class PlayDb {
           preview TEXT NOT NULL,
           created_at INTEGER NOT NULL
         );
+        PRAGMA user_version = 1;
+      `);
+    }
+    if ((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 2) {
+      this.db.exec(`
+        ALTER TABLE playthroughs ADD COLUMN data TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE summaries ADD COLUMN chars TEXT NOT NULL DEFAULT '{}';
         PRAGMA user_version = ${SCHEMA_VERSION};
       `);
     }
@@ -105,9 +135,9 @@ export class PlayDb {
     this.tx(() => {
       this.db
         .prepare(
-          'INSERT INTO playthroughs (id, title, mode, protagonist_id, head_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO playthroughs (id, title, mode, protagonist_id, head_id, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         )
-        .run(pt.id, pt.title, pt.mode, pt.protagonistId, pt.headId, pt.createdAt, pt.updatedAt);
+        .run(pt.id, pt.title, pt.mode, pt.protagonistId, pt.headId, pt.createdAt, pt.updatedAt, JSON.stringify(pt.data));
       this.insertEvent(pt.id, root);
     });
   }
@@ -132,7 +162,15 @@ export class PlayDb {
       headId: r.head_id as string,
       createdAt: r.created_at as number,
       updatedAt: r.updated_at as number,
+      data: JSON.parse((r.data as string | undefined) ?? '{}') as PlaythroughData,
     };
+  }
+
+  /** 读-改-写周目附加数据。 */
+  updateData(pt: string, fn: (d: PlaythroughData) => PlaythroughData): PlaythroughData {
+    const next = fn(this.getPlaythrough(pt).data);
+    this.db.prepare('UPDATE playthroughs SET data = ? WHERE id = ?').run(JSON.stringify(next), pt);
+    return next;
   }
 
   setHead(pt: string, headId: string): void {
@@ -245,15 +283,23 @@ export class PlayDb {
   // ───────────── 摘要 ─────────────
 
   /** 路径上最靠后的一份摘要。 */
-  latestSummary(pt: string, pathIds: string[]): { eventId: string; text: string; covered: number } | null {
+  latestSummary(pt: string, pathIds: string[]): SummaryRow | null {
     if (!pathIds.length) return null;
-    const found = new Map<string, { text: string; covered: number }>();
+    const found = new Map<string, Omit<SummaryRow, 'eventId'>>();
     for (let i = 0; i < pathIds.length; i += 500) {
       const batch = pathIds.slice(i, i + 500);
       const rows = this.db
-        .prepare(`SELECT event_id, text, covered FROM summaries WHERE pt = ? AND event_id IN (${batch.map(() => '?').join(',')})`)
-        .all(pt, ...batch) as { event_id: string; text: string; covered: number }[];
-      for (const r of rows) found.set(r.event_id, { text: r.text, covered: r.covered });
+        .prepare(
+          `SELECT event_id, text, covered, chars FROM summaries WHERE pt = ? AND event_id IN (${batch.map(() => '?').join(',')})`,
+        )
+        .all(pt, ...batch) as { event_id: string; text: string; covered: number; chars: string }[];
+      for (const r of rows) {
+        found.set(r.event_id, {
+          text: r.text,
+          covered: r.covered,
+          characters: JSON.parse(r.chars || '{}') as Record<string, string>,
+        });
+      }
     }
     for (let i = pathIds.length - 1; i >= 0; i--) {
       const s = found.get(pathIds[i] as string);
@@ -262,10 +308,10 @@ export class PlayDb {
     return null;
   }
 
-  putSummary(pt: string, eventId: string, text: string, covered: number): void {
+  putSummary(pt: string, s: SummaryRow): void {
     this.db
-      .prepare('INSERT OR REPLACE INTO summaries (event_id, pt, text, covered, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(eventId, pt, text, covered, Date.now());
+      .prepare('INSERT OR REPLACE INTO summaries (event_id, pt, text, covered, chars, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(s.eventId, pt, s.text, s.covered, JSON.stringify(s.characters), Date.now());
   }
 
   // ───────────── 存档 ─────────────

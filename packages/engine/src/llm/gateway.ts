@@ -29,6 +29,9 @@ export interface ModelHandle {
   lastCallId(): string | null;
 }
 
+/** 计量回调：每次 HTTP 调用拿到用量后调用一次（重试、校验失败重来的每一次都算）。 */
+export type Meter = (usage: Usage, cost: number | null, currency: string) => void;
+
 export interface RunOptions {
   signal?: AbortSignal;
   onText?: (delta: string) => void;
@@ -55,7 +58,7 @@ export class ModelGateway {
   }
 
   /** 按职责取模型；该职责没配置时用「默认」。 */
-  async forRole(role: RoleId, tag: string | null = null): Promise<ModelHandle> {
+  async forRole(role: RoleId, tag: string | null = null, meter?: Meter): Promise<ModelHandle> {
     const s = await this.o.settings.get();
     const route = s.roles[role] ?? s.roles.default;
     if (!route) {
@@ -63,7 +66,7 @@ export class ModelGateway {
     }
     const endpoint = s.endpoints.find((e) => e.id === route.endpointId);
     if (!endpoint) throw new Error('职责路由指向的接入点已被删除，请重新配置');
-    return this.make(endpoint, route.model, role, tag, route);
+    return this.make(endpoint, route.model, role, tag, route, meter);
   }
 
   async forTarget(target: ChatTarget, tag: string | null = null): Promise<ModelHandle> {
@@ -87,6 +90,7 @@ export class ModelGateway {
     role: string,
     tag: string | null,
     route: RoleRoute | undefined,
+    meter?: Meter,
   ): Promise<ModelHandle> {
     if (!model) throw new Error('没有指定模型');
     const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
@@ -100,6 +104,14 @@ export class ModelGateway {
       onExchange: (rec) => {
         const id = this.log(rec, endpoint, model, role, tag);
         if (id) lastCallId = id;
+        const usage = rec.result?.usage;
+        if (meter && usage) {
+          try {
+            meter(usage, computeCost(usage, endpoint.pricing[model]), endpoint.currency);
+          } catch (err) {
+            console.error('[engine] 计量失败：', err);
+          }
+        }
       },
     });
     return {

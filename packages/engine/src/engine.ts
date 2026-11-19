@@ -11,6 +11,7 @@ import type {
   CreateWorldParams,
   EndpointView,
   GenesisChunk,
+  ObserverChunk,
   WorldDetail,
   WorldSummary,
   EngineContract,
@@ -302,7 +303,7 @@ export class Engine {
       runGenesis: (p, ctx) => this.runGenesis(p.worldId, p.from, ctx),
 
       listPlaythroughs: (p) => this.play.list(p.worldId),
-      startPlaythrough: (p) => this.play.start(p.worldId, p.title),
+      startPlaythrough: (p) => this.play.start(p),
       getPlaythrough: (p) => this.play.view(p),
       deletePlaythrough: (p) => this.play.delete(p),
       send: (p, ctx) => fromCallback((emit) => this.play.send(p, emit, ctx.signal)),
@@ -315,6 +316,15 @@ export class Engine {
       saveSlot: (p) => this.play.save(p, p.name),
       loadSave: (p) => this.play.load(p, p.saveId),
       deleteSave: (p) => this.play.deleteSave(p, p.saveId),
+
+      observerControl: (p) => this.play.observerControl(p, p.action),
+      observerSettings: (p) => this.play.observerSettings(p, p.settings),
+      observerRead: (p) => this.play.observerRead(p, p.eventId),
+      observerWatch: (p, ctx) =>
+        fromCallback<ObserverChunk, void>((emit) => this.play.observerWatch(p, emit, ctx.signal)),
+      directive: (p) => this.play.note(p, 'directive', p.text),
+      whisper: (p) => this.play.note(p, 'whisper', p.text, p.characterId),
+      takeover: (p) => this.play.takeover(p, p.characterId),
     };
   }
 }
