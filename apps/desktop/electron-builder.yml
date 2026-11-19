@@ -1,0 +1,32 @@
+# 打包配置。所有依赖都已经被 electron-vite 打进 out/，安装包里不需要 node_modules。
+appId: com.autoadv.app
+productName: Auto-ADV
+executableName: Auto-ADV
+copyright: Copyright © 2026 Auto-ADV
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+asar: true
+npmRebuild: false
+publish: null
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ${productName}-${version}-Setup-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Auto-ADV
+  artifactName: ${productName}-${version}-Setup-${arch}.${ext}
+mac:
+  target: dmg
+  category: public.app-category.games
+linux:
+  target: AppImage
+  category: Game

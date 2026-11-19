@@ -9,7 +9,9 @@
 3. **"Auto" 尽早出现。** 观察模式是核心卖点，排在第二个可玩阶段，而不是最后。
 4. 不写时间估计：先做完 M0 / M1，用真实速度再估后面的。
 
-## M0 骨架
+## M0 骨架 ✅
+
+> 已完成：见下方清单。附带一个模拟 OpenAI 兼容服务（`pnpm cli mock-server`），没有 API Key 也能开发调试；CI 在 Windows 上自动打安装包并跑端到端测试。
 
 - 开发与打包以 **Windows** 为首要目标（路径处理、原生模块 better-sqlite3 的预编译、密钥加密都先在 Windows 上验证）
 - pnpm monorepo、Electron 应用壳、引擎进程（utilityProcess）、界面与引擎之间的类型安全 RPC

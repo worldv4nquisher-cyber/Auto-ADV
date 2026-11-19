@@ -1,0 +1,16 @@
+{
+  "name": "@auto-adv/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Auto-ADV 命令行工具：不开界面直接测试模型接入、跑模拟服务",
+  "bin": {
+    "auto-adv": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@auto-adv/providers": "workspace:*"
+  }
+}

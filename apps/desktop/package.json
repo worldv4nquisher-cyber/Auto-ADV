@@ -1,0 +1,34 @@
+{
+  "name": "@auto-adv/desktop",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Auto-ADV 桌面应用",
+  "author": "Auto-ADV",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "dist:win": "electron-vite build && electron-builder --win --publish never",
+    "dist:dir": "electron-vite build && electron-builder --dir --publish never",
+    "e2e": "node e2e/smoke.e2e.mts"
+  },
+  "devDependencies": {
+    "@auto-adv/engine": "workspace:*",
+    "@auto-adv/providers": "workspace:*",
+    "@auto-adv/schema": "workspace:*",
+    "@tailwindcss/vite": "4.3.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "electron": "44.10.2",
+    "electron-builder": "26.18.1",
+    "electron-vite": "6.0.0",
+    "playwright-core": "1.64.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwindcss": "4.3.4",
+    "vite": "8.3.5"
+  }
+}

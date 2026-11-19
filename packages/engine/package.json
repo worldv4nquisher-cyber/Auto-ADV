@@ -1,0 +1,19 @@
+{
+  "name": "@auto-adv/engine",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Auto-ADV 核心引擎（纯 TypeScript，不依赖 Electron）",
+  "exports": {
+    ".": "./src/index.ts",
+    "./api": "./src/api.ts",
+    "./rpc": "./src/rpc/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@auto-adv/providers": "workspace:*",
+    "@auto-adv/schema": "workspace:*"
+  }
+}

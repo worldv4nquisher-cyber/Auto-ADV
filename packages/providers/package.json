@@ -1,0 +1,17 @@
+{
+  "name": "@auto-adv/providers",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Auto-ADV 模型接入层：OpenAI 兼容接口、能力探测、计费",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/mock-server.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@auto-adv/schema": "workspace:*"
+  }
+}

@@ -1,0 +1,8 @@
+packages:
+  - apps/*
+  - packages/*
+
+# Electron 44 起不再在安装时下载二进制，首次运行时按需下载；
+# electron-winstaller 是 Squirrel 安装器用的，我们用 NSIS，不需要它的构建脚本。
+ignoredBuiltDependencies:
+  - electron-winstaller
