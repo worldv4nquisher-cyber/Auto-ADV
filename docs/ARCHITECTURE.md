@@ -1,7 +1,15 @@
-# Auto-ADV 架构设计（讨论稿 v0.1）
+# Auto-ADV 架构设计（v0.2）
 
-> 状态：讨论稿。目的是在大规模写代码之前把方向对齐，文中所有结论都可以推翻。
+> 状态：主体方向已确认（见下方"已确认的决定"），细节仍可调整。
 > 路线图见 [ROADMAP.md](./ROADMAP.md)。
+
+## 已确认的决定（2026-11-19）
+
+| 项 | 决定 |
+|---|---|
+| 技术栈 | Electron + TypeScript 全栈（第 3 节） |
+| 首发平台 | **Windows**；macOS / Linux 之后再做 |
+| 优先接入的模型 | **OpenAI 兼容格式**；先把这一种接口做扎实，提示词也先针对它调；Anthropic、Gemini 原生接口后续按需加入 |
 
 ## 0. 一句话定位
 
@@ -15,7 +23,8 @@ Auto-ADV 是一个桌面端的 **AI 视觉小说引擎 + 播放器**：一键生
 | 2 | 一键创建世界 | 像 Minecraft 新建世界：默认全自动；"更多选项"里方方面面都可以自定义，但都是可选的 |
 | 3 | 游玩模式 | 自由对话（类 SillyTavern）、剧情 ADV（分支 / 存档 / 数值）、**观察模式**（AI 之间持续自主演出，无需人工干预，这是 "Auto" 的核心） |
 | 4 | 数据格式 | 以自有原生格式为核心；SillyTavern 角色卡 / 世界书导入是锦上添花 |
-| 5 | 模型 | 文本模型（OpenAI 兼容、Claude、本地 Ollama 等）全都支持；生图、生视频按需接入 |
+| 5 | 模型 | 文本模型（OpenAI 兼容、Claude、本地 Ollama 等）全都支持，**OpenAI 兼容格式优先**；生图、生视频按需接入 |
+| 7 | 平台 | **Windows 首发** |
 | 6 | 同人模式 | 从已有作品学习，生成衍生世界 |
 
 ## 2. 设计原则
@@ -467,12 +476,14 @@ interface SpeechModel    { speak(text, voice, emotion?) }
 
 | 类型 | 适配器 |
 |---|---|
-| 文本 | OpenAI 兼容（一次覆盖 OpenAI、DeepSeek、通义千问、Kimi、OpenRouter、LM Studio、vLLM 等）、Anthropic Claude、Google Gemini、Ollama |
+| 文本 | **OpenAI 兼容（首要，M0 就做）**：一次覆盖 OpenAI、DeepSeek、通义千问、Kimi、OpenRouter、Ollama（`/v1` 接口）、LM Studio、vLLM 等。Anthropic Claude、Google Gemini 原生接口后续按需加入 |
 | 嵌入 | OpenAI 兼容、Ollama 本地 |
 | 图像 | OpenAI 图像接口、Gemini、ComfyUI（工作流模板，本地最灵活）、SD WebUI / Forge |
 | 视频 | ComfyUI 工作流、云端 API |
 | 音乐 | 云端 API、ComfyUI、本地曲库 |
 | 语音 | OpenAI TTS、本地 GPT-SoVITS / CosyVoice 等 HTTP 服务 |
+
+**OpenAI 兼容不等于能力一致。** 同样是 `/v1/chat/completions`，各家对结构化输出（`json_schema` / 只有 `json_object` / 都不支持）、工具调用、流式返回用量、提示词缓存、`seed` 参数的支持差别很大。所以每个接入点都有一份能力配置：添加时自动发几条探测请求填好，用户也可以手动覆盖；引擎按能力选择 7.4 里的降级路径（工具调用 → JSON 结构化输出 → 文本格式解析 + 修复重试）。
 
 另外提供一个**通用 HTTP 适配器**：用户填请求模板和响应字段路径，不写代码就能接新服务。新出的生图、生视频、音乐服务很多，这个能省掉大量适配工作。
 
