@@ -7,13 +7,15 @@
   "exports": {
     ".": "./src/index.ts",
     "./api": "./src/api.ts",
-    "./rpc": "./src/rpc/index.ts"
+    "./rpc": "./src/rpc/index.ts",
+    "./script": "./src/play/script.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
     "@auto-adv/providers": "workspace:*",
-    "@auto-adv/schema": "workspace:*"
+    "@auto-adv/schema": "workspace:*",
+    "zod": "4.6.7"
   }
 }

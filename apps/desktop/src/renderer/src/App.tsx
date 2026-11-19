@@ -3,11 +3,16 @@ import { type ReactNode, useEffect, useState } from 'react';
 import { cx } from './components/ui.tsx';
 import { engine, onConnectionChange } from './lib/engine.ts';
 import { formatCost } from './lib/format.ts';
+import { useRouter } from './lib/router.tsx';
+import { CreateWorldPage } from './pages/CreateWorld.tsx';
 import { HomePage } from './pages/Home.tsx';
 import { LogsPage } from './pages/Logs.tsx';
+import { PlayPage } from './pages/Play.tsx';
 import { PlaygroundPage } from './pages/Playground.tsx';
 import { SettingsPage } from './pages/Settings.tsx';
+import { WorldPage } from './pages/World.tsx';
 
+/** 侧栏上的一级页面。 */
 export type PageId = 'home' | 'playground' | 'logs' | 'settings';
 
 const NAV: { id: PageId; label: string; icon: ReactNode }[] = [
@@ -18,7 +23,10 @@ const NAV: { id: PageId; label: string; icon: ReactNode }[] = [
 ];
 
 export function App() {
-  const [page, setPage] = useState<PageId>('home');
+  const { route, navigate } = useRouter();
+  // 世界相关的页面都算在「世界」下面
+  const page: PageId = ['create', 'world', 'play'].includes(route.page) ? 'home' : (route.page as PageId);
+  const setPage = (p: PageId) => navigate({ page: p });
   const [ping, setPing] = useState<PingResult | null>(null);
   const [connected, setConnected] = useState<boolean | null>(null);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -93,10 +101,15 @@ export function App() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 overflow-hidden">
-        {page === 'home' && <HomePage onNavigate={setPage} />}
-        {page === 'playground' && <PlaygroundPage onNavigate={setPage} />}
-        {page === 'logs' && <LogsPage />}
-        {page === 'settings' && <SettingsPage />}
+        {route.page === 'home' && <HomePage />}
+        {route.page === 'create' && <CreateWorldPage />}
+        {route.page === 'world' && <WorldPage key={route.worldId} worldId={route.worldId} />}
+        {route.page === 'play' && (
+          <PlayPage key={route.playthroughId} worldId={route.worldId} playthroughId={route.playthroughId} />
+        )}
+        {route.page === 'playground' && <PlaygroundPage onNavigate={setPage} />}
+        {route.page === 'logs' && <LogsPage />}
+        {route.page === 'settings' && <SettingsPage />}
       </main>
     </div>
   );

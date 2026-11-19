@@ -1,12 +1,14 @@
 import {
   type ButtonHTMLAttributes,
   createContext,
+  type HTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
   useCallback,
   useContext,
+  useEffect,
   useState,
 } from 'react';
 
@@ -90,8 +92,12 @@ export function Field({
   );
 }
 
-export function Card({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cx('rounded-xl border border-line bg-panel', className)}>{children}</div>;
+export function Card({ children, className, ...rest }: HTMLAttributes<HTMLDivElement> & { 'data-testid'?: string }) {
+  return (
+    <div className={cx('rounded-xl border border-line bg-panel', className)} {...rest}>
+      {children}
+    </div>
+  );
 }
 
 type BadgeTone = 'neutral' | 'ok' | 'warn' | 'err' | 'accent';
@@ -213,4 +219,100 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
 export function useToast() {
   return useContext(ToastContext);
+}
+
+/** 需要点两次的危险操作（不用系统弹窗，避免打断）。 */
+export function ConfirmButton({
+  onConfirm,
+  children,
+  confirmText = '确认？',
+  size = 'sm',
+  variant = 'danger',
+  disabled,
+  title,
+  testId,
+}: {
+  onConfirm: () => void;
+  children: ReactNode;
+  confirmText?: string;
+  size?: 'sm' | 'md';
+  variant?: ButtonVariant;
+  disabled?: boolean;
+  title?: string;
+  testId?: string;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <Button
+      size={size}
+      variant={armed ? 'danger' : variant}
+      disabled={disabled}
+      title={title}
+      data-testid={testId}
+      className={armed ? 'border-err/40 bg-err/10' : undefined}
+      onClick={() => {
+        if (armed) {
+          setArmed(false);
+          onConfirm();
+        } else setArmed(true);
+      }}
+    >
+      {armed ? confirmText : children}
+    </Button>
+  );
+}
+
+/** 极简 Markdown：标题、列表、段落、粗体。世界观正文够用了。 */
+export function Markdown({ text, className }: { text: string; className?: string }) {
+  const blocks: ReactNode[] = [];
+  let list: string[] = [];
+  const inline = (s: string) =>
+    s.split(/(\*\*[^*]+\*\*)/g).map((part, i) =>
+      part.startsWith('**') && part.endsWith('**') ? (
+        <strong key={i} className="font-semibold text-fg">
+          {part.slice(2, -2)}
+        </strong>
+      ) : (
+        part
+      ),
+    );
+  const flush = () => {
+    if (!list.length) return;
+    const items = list;
+    list = [];
+    blocks.push(
+      <ul key={`l${blocks.length}`} className="list-disc space-y-1 pl-5">
+        {items.map((it, i) => (
+          <li key={i}>{inline(it)}</li>
+        ))}
+      </ul>,
+    );
+  };
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    const li = /^[-*•]\s+(.*)$/.exec(line) ?? /^\d+[.、]\s*(.*)$/.exec(line);
+    if (li) {
+      list.push(li[1] ?? '');
+      continue;
+    }
+    flush();
+    if (!line) continue;
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (h) {
+      blocks.push(
+        <h3 key={blocks.length} className="mt-5 mb-1 text-sm font-semibold text-fg first:mt-0">
+          {h[2]}
+        </h3>,
+      );
+    } else {
+      blocks.push(<p key={blocks.length}>{inline(line)}</p>);
+    }
+  }
+  flush();
+  return <div className={cx('space-y-2 text-sm leading-relaxed text-muted', className)}>{blocks}</div>;
 }

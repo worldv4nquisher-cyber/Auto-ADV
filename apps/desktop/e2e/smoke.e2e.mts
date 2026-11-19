@@ -1,13 +1,14 @@
 /**
- * 端到端冒烟测试：真正启动 Electron 应用，连一个本地模拟的 OpenAI 兼容服务，走一遍 M0 的完整流程：
- * 添加接入点 → 拉取模型 → 能力探测 → 设置职责路由 → 调试台对话 → 查看调用日志。
+ * 端到端冒烟测试：真正启动 Electron 应用，连一个本地模拟的 OpenAI 兼容服务，走一遍完整流程：
+ * 添加接入点 → 拉取模型 → 能力探测 → 设置职责路由 → 调试台对话 → 查看调用日志（M0）
+ * → 一键创世 → 开始周目 → 对话 → 重抽 / 切换分支 → 存档 → 继续 → 读档（M1）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
  * 设置 E2E_APP_PATH=打包后的可执行文件 可以测试安装包里的应用（例如 release/win-unpacked/Auto-ADV.exe）。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { startMockServer } from '@auto-adv/providers/testing';
@@ -118,6 +119,69 @@ try {
   const encrypted = !secretsFile.includes(API_KEY);
   step(`密钥保存方式：${encrypted ? '系统加密' : '明文（当前系统不支持加密）'}`);
   if (process.platform === 'win32') assert.ok(encrypted, 'Windows 上密钥必须加密保存');
+
+  // ── 一键创世
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="new-world"]');
+  await page.fill('[data-testid="seed"]', '雾中的灯塔');
+  await page.click('button:has-text("悬疑推理")');
+  await shot(page, '07-create-world');
+  await page.click('[data-testid="create-world"]');
+  await page.waitForSelector('[data-testid="genesis-steps"]');
+  await page.waitForSelector('[data-step="worldview"][data-status="running"], [data-step="worldview"][data-status="done"]', {
+    timeout: 30_000,
+  });
+  await shot(page, '08-genesis-running');
+  await page.waitForSelector('[data-step="opening"][data-status="done"]', { timeout: 60_000 });
+  await page.waitForSelector('[data-testid="start-play"]:not([disabled])');
+  await page.waitForSelector('text=雾港谜灯');
+  step('一键创世完成：雾港谜灯');
+  await page.click('button:has-text("角色") >> nth=0');
+  await page.waitForSelector('text=主角（你）');
+  await shot(page, '09-world-characters');
+  await page.click('button:has-text("概览")');
+
+  // ── 游玩：对话、重抽、分支
+  await page.click('[data-testid="start-play"]');
+  await page.waitForSelector('[data-testid="play-event"][data-kind="opening"]');
+  await page.fill('[data-testid="play-input"]', '灯塔是谁点亮的？');
+  await page.click('[data-testid="play-send"]');
+  await page.waitForSelector('[data-testid="play-event"][data-kind="ai"]', { timeout: 30_000 });
+  await page.waitForSelector('[data-testid="play-streaming"]', { state: 'detached' });
+  const replyText = (await page.textContent('[data-testid="play-event"][data-kind="ai"]')) ?? '';
+  assert.ok(replyText.includes('灯塔是谁点亮的？'), `回复应回应玩家，实际：${replyText}`);
+  step('对话成功');
+
+  await page.hover('[data-testid="play-event"][data-kind="ai"]');
+  await page.click('[data-testid="regenerate"]');
+  await page.waitForSelector('[data-testid="pager-label"]:has-text("2/2")', { timeout: 30_000 });
+  await page.click('[data-testid="pager-prev"]');
+  await page.waitForSelector('[data-testid="pager-label"]:has-text("1/2")');
+  step('重抽出新分支，并能切回原来的回复');
+
+  // ── 存档 → 继续 → 读档
+  await page.click('[data-testid="save-slot"]');
+  await page.waitForSelector('[data-testid="save"]');
+  await page.click('[data-testid="play-send"]'); // 输入为空 = 继续
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="play-event"][data-kind="ai"]').length === 2,
+    undefined,
+    { timeout: 30_000 },
+  );
+  await page.waitForSelector('[data-testid="play-streaming"]', { state: 'detached' });
+  await shot(page, '10-play');
+  await page.click('[data-testid="load-save"]');
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="play-event"][data-kind="ai"]').length === 1,
+  );
+  step('存档、继续、读档正常');
+
+  // ── 世界文件夹
+  const worlds = await readdir(path.join(dataDir, 'worlds'));
+  assert.equal(worlds.length, 1);
+  const worldJson = JSON.parse(await readFile(path.join(dataDir, 'worlds', worlds[0] as string, 'world.json'), 'utf8'));
+  assert.equal(worldJson.status, 'ready');
+  step(`世界文件夹已写入：worlds/${worlds[0]}`);
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

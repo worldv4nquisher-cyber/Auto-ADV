@@ -2,21 +2,34 @@ import { z } from 'zod';
 import { EntityMeta, Id, KnownBy } from './common.ts';
 import { FORMAT_VERSION } from './version.ts';
 
+/** 创世管线中某一步的状态。 */
+export const GenesisStepState = z.object({
+  status: z.enum(['pending', 'running', 'done', 'failed']),
+  error: z.string().optional(),
+  updatedAt: z.string().optional(),
+});
+export type GenesisStepState = z.infer<typeof GenesisStepState>;
+
 /** world.json：世界清单。 */
 export const WorldManifest = z.object({
   formatVersion: z.number().int().default(FORMAT_VERSION),
   id: z.string().min(1),
   title: z.string().min(1),
+  /** 一句话简介，世界列表里显示。 */
+  logline: z.string().default(''),
+  /** generating：创世进行中或被中断；failed：某一步失败，可以续跑；ready：可以游玩。 */
+  status: z.enum(['generating', 'ready', 'failed']).default('ready'),
   createdAt: z.string(),
   updatedAt: z.string(),
-  /** 创世时用的种子文本与预设，便于复现和重抽。 */
+  /** 创世时用的种子文本与选项，便于复现、续跑和重抽。 */
   genesis: z
     .object({
       seed: z.string().default(''),
       preset: z.string().optional(),
       options: z.record(z.string(), z.unknown()).default({}),
+      steps: z.record(z.string(), GenesisStepState).default({}),
     })
-    .default({ seed: '', options: {} }),
+    .default({ seed: '', options: {}, steps: {} }),
   /** 生成过程中用到的模型，仅作记录。 */
   models: z.array(z.string()).default([]),
 });
@@ -30,6 +43,7 @@ export const WorldBrief = z.object({
   formatVersion: z.number().int().default(FORMAT_VERSION),
   genre: z.string(),
   tone: z.string(),
+  logline: z.string().default(''),
   era: z.string().default(''),
   themes: z.array(z.string()).default([]),
   rating: z.enum(['all', 'teen', 'mature']).default('teen'),
@@ -49,6 +63,8 @@ export const Character = z.object({
   name: z.string().min(1),
   aliases: z.array(z.string()).default([]),
   role: CharacterRole.default('npc'),
+  gender: z.string().default(''),
+  age: z.string().default(''),
   summary: z.string().default(''),
   appearance: z
     .object({
@@ -175,3 +191,14 @@ export const AssetRecord = z.object({
   createdAt: z.string(),
 });
 export type AssetRecord = z.infer<typeof AssetRecord>;
+
+/** story/opening.json：第一个周目的开场。 */
+export const StoryOpening = z.object({
+  formatVersion: z.number().int().default(FORMAT_VERSION),
+  locationId: Id.optional(),
+  presentCharacterIds: z.array(Id).default([]),
+  narration: z.string(),
+  lines: z.array(z.object({ characterId: Id, text: z.string() })).default([]),
+  _meta: EntityMeta.default({ locked: [] }),
+});
+export type StoryOpening = z.infer<typeof StoryOpening>;

@@ -1,0 +1,183 @@
+import type { GenesisOptions } from '@auto-adv/engine/api';
+import { GENESIS_PRESETS, GENESIS_STEPS, type GenesisPresetId, ROLE_LABELS } from '@auto-adv/schema';
+import { useState } from 'react';
+import { Button, Card, cx, Field, Input, PageHeader, Select, Textarea, useToast } from '../components/ui.tsx';
+import { errorMessage } from '../lib/engine.ts';
+import { useGenesis } from '../lib/genesis.tsx';
+import { useRouter } from '../lib/router.tsx';
+import { useSettings } from '../lib/settings.tsx';
+
+export function CreateWorldPage() {
+  const { navigate } = useRouter();
+  const { settings } = useSettings();
+  const genesis = useGenesis();
+  const toast = useToast();
+  const [seed, setSeed] = useState('');
+  const [title, setTitle] = useState('');
+  const [preset, setPreset] = useState<GenesisPresetId>('random');
+  const [more, setMore] = useState(false);
+  const [opts, setOpts] = useState<GenesisOptions>({ characterCount: 3, rating: 'teen' });
+  const [busy, setBusy] = useState(false);
+
+  const route = settings?.roles.worldgen ?? settings?.roles.default;
+  const routeName = route
+    ? `${settings?.endpoints.find((e) => e.id === route.endpointId)?.name ?? '?'} / ${route.model}`
+    : null;
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      const worldId = await genesis.create({ seed, title: title.trim() || undefined, preset, options: opts });
+      navigate({ page: 'world', worldId });
+    } catch (err) {
+      toast('err', errorMessage(err));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex h-full flex-col">
+      <PageHeader
+        title="新建世界"
+        subtitle="写一句灵感，或者什么都不写，交给 AI。"
+        actions={
+          <Button variant="ghost" onClick={() => navigate({ page: 'home' })}>
+            返回
+          </Button>
+        }
+      />
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto grid max-w-5xl grid-cols-[1fr_280px] gap-6 px-8 py-8">
+          <div className="space-y-5">
+            <Field label="灵感（可以留空）">
+              <Textarea
+                data-testid="seed"
+                rows={4}
+                value={seed}
+                onChange={(e) => setSeed(e.target.value)}
+                placeholder="例如：一座只在雨天出现的图书馆，管理员是个不会说谎的少女"
+                autoFocus
+              />
+            </Field>
+
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted">题材</span>
+              <div className="flex flex-wrap gap-2">
+                {GENESIS_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => setPreset(p.id)}
+                    className={cx(
+                      'h-8 rounded-lg border px-3 text-sm transition-colors',
+                      preset === p.id
+                        ? 'border-accent bg-accent-soft text-fg'
+                        : 'border-line text-muted hover:border-line-strong hover:text-fg',
+                    )}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <Field label="世界名（可以留空，自动起名）">
+              <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="自动起名" />
+            </Field>
+
+            <Card>
+              <button
+                type="button"
+                className="flex w-full items-center justify-between px-5 py-3 text-sm text-muted hover:text-fg"
+                onClick={() => setMore((m) => !m)}
+              >
+                <span>更多世界选项</span>
+                <span>{more ? '收起' : '展开'}</span>
+              </button>
+              {more && (
+                <div className="grid grid-cols-2 gap-4 border-t border-line px-5 py-5">
+                  <Field label="主角名字" hint="你在故事里扮演的角色；留空自动生成">
+                    <Input
+                      value={opts.protagonistName ?? ''}
+                      onChange={(e) => setOpts({ ...opts, protagonistName: e.target.value || undefined })}
+                      placeholder="自动生成"
+                    />
+                  </Field>
+                  <Field label="其他角色数量">
+                    <Select
+                      value={opts.characterCount ?? 3}
+                      onChange={(e) => setOpts({ ...opts, characterCount: Number(e.target.value) })}
+                    >
+                      {[1, 2, 3, 4, 5, 6].map((n) => (
+                        <option key={n} value={n}>
+                          {n} 个
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label="主角设定" className="col-span-2">
+                    <Input
+                      value={opts.protagonistDescription ?? ''}
+                      onChange={(e) => setOpts({ ...opts, protagonistDescription: e.target.value || undefined })}
+                      placeholder="例如：刚转学来的高二学生，有一台旧相机"
+                    />
+                  </Field>
+                  <Field label="内容分级">
+                    <Select
+                      value={opts.rating ?? 'teen'}
+                      onChange={(e) => setOpts({ ...opts, rating: e.target.value as GenesisOptions['rating'] })}
+                    >
+                      <option value="all">全年龄</option>
+                      <option value="teen">青少年</option>
+                      <option value="mature">成人向</option>
+                    </Select>
+                  </Field>
+                  <div />
+                  <Field label="其他要求" className="col-span-2">
+                    <Textarea
+                      rows={2}
+                      value={opts.notes ?? ''}
+                      onChange={(e) => setOpts({ ...opts, notes: e.target.value || undefined })}
+                      placeholder="例如：不要超自然元素；角色名用日式名字"
+                    />
+                  </Field>
+                </div>
+              )}
+            </Card>
+
+            <div className="flex items-center gap-3">
+              <Button variant="primary" data-testid="create-world" loading={busy} disabled={!route} onClick={create}>
+                创建世界
+              </Button>
+              {!route && <span className="text-xs text-err">还没有给「默认」职责指定模型</span>}
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <Card className="p-5">
+              <div className="text-xs font-medium text-muted">将会生成</div>
+              <ol className="mt-3 space-y-2">
+                {GENESIS_STEPS.map((s, i) => (
+                  <li key={s.id} className="flex gap-2 text-sm">
+                    <span className="w-4 text-faint">{i + 1}</span>
+                    <span>
+                      {s.name}
+                      <span className="ml-1.5 text-xs text-faint">{s.hint}</span>
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </Card>
+            {routeName && (
+              <p className="px-1 text-xs leading-relaxed text-faint">
+                使用模型：{routeName}
+                <br />
+                （{settings?.roles.worldgen ? ROLE_LABELS.worldgen.name : `${ROLE_LABELS.default.name}职责`}，可在设置 → 职责路由里修改）
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

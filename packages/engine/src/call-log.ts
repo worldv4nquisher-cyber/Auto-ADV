@@ -8,6 +8,8 @@ import type { CallDetail, CallSummary, UsageSummary } from './api.ts';
 export interface CallInsert {
   ts: number;
   role: string;
+  /** 更细的用途标记，例如 "genesis:cast"、"play:reply"。 */
+  tag: string | null;
   endpointId: string;
   endpointName: string;
   model: string;
@@ -28,7 +30,7 @@ export interface CallInsert {
   toolCalls: ToolCall[];
 }
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** 调用日志，存在 SQLite 里（Node / Electron 自带的 node:sqlite，不需要编译原生模块）。 */
 export class CallLog {
@@ -73,8 +75,11 @@ export class CallLog {
           tool_calls_json TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS calls_ts ON calls (ts DESC);
-        PRAGMA user_version = ${SCHEMA_VERSION};
+        PRAGMA user_version = 1;
       `);
+    }
+    if ((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 2) {
+      this.db.exec(`ALTER TABLE calls ADD COLUMN tag TEXT; PRAGMA user_version = ${SCHEMA_VERSION};`);
     }
   }
 
@@ -82,10 +87,10 @@ export class CallLog {
     const id = randomUUID();
     this.db
       .prepare(
-        `INSERT INTO calls (id, ts, role, endpoint_id, endpoint_name, model, kind, status, http_status, url, attempt,
+        `INSERT INTO calls (id, ts, role, tag, endpoint_id, endpoint_name, model, kind, status, http_status, url, attempt,
           latency_ms, ttft_ms, input_tokens, output_tokens, cached_tokens, reasoning_tokens, estimated, cost, currency,
           error, request_json, response_text, reasoning, tool_calls_json)
-         VALUES (:id, :ts, :role, :endpoint_id, :endpoint_name, :model, :kind, :status, :http_status, :url, :attempt,
+         VALUES (:id, :ts, :role, :tag, :endpoint_id, :endpoint_name, :model, :kind, :status, :http_status, :url, :attempt,
           :latency_ms, :ttft_ms, :input_tokens, :output_tokens, :cached_tokens, :reasoning_tokens, :estimated, :cost,
           :currency, :error, :request_json, :response_text, :reasoning, :tool_calls_json)`,
       )
@@ -93,6 +98,7 @@ export class CallLog {
         id,
         ts: c.ts,
         role: c.role,
+        tag: c.tag,
         endpoint_id: c.endpointId,
         endpoint_name: c.endpointName,
         model: c.model,
@@ -182,6 +188,7 @@ interface Row {
   id: string;
   ts: number;
   role: string;
+  tag: string | null;
   endpoint_id: string;
   endpoint_name: string;
   model: string;
@@ -212,6 +219,7 @@ function toSummary(r: Row): CallSummary {
     id: r.id,
     ts: r.ts,
     role: r.role,
+    tag: r.tag,
     endpointId: r.endpoint_id,
     endpointName: r.endpoint_name,
     model: r.model,

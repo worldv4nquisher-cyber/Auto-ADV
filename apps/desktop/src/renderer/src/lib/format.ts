@@ -34,6 +34,23 @@ const EXTRA_ROLE_NAMES: Record<string, string> = {
   probe: '能力探测',
 };
 
+const TAG_NAMES: Record<string, string> = {
+  'genesis.brief': '创世 · 简报',
+  'genesis.worldview': '创世 · 世界观',
+  'genesis.cast': '创世 · 角色',
+  'genesis.locations': '创世 · 地点',
+  'genesis.lore': '创世 · 设定集',
+  'genesis.opening': '创世 · 开场',
+  'play.reply': '对话 · 回复',
+  'play.memory': '对话 · 前情提要',
+};
+
+/** 调用用途的显示名。 */
+export function tagName(tag: string | null): string {
+  if (!tag) return '';
+  return TAG_NAMES[tag] ?? tag;
+}
+
 export function roleName(role: string): string {
   return ROLE_LABELS[role as RoleId]?.name ?? EXTRA_ROLE_NAMES[role] ?? role;
 }

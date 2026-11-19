@@ -1,21 +1,18 @@
 import path from 'node:path';
 import {
-  type ChatResult,
-  computeCost,
-  type ExchangeRecord,
   type FetchLike,
   normalizeBaseURL,
   OpenAICompatibleClient,
-  type ParamFix,
   probeCapabilities,
-  type RequestOptions,
-  requestOptionsFor,
   type StreamEvent,
 } from '@auto-adv/providers';
-import { type AppSettings, type Capabilities, type Endpoint, ROLE_LABELS, RoleId } from '@auto-adv/schema';
+import { type AppSettings, type Capabilities, type Endpoint, type GenesisStepId, RoleId } from '@auto-adv/schema';
 import type {
-  ChatTarget,
+  CreateWorldParams,
   EndpointView,
+  GenesisChunk,
+  WorldDetail,
+  WorldSummary,
   EngineContract,
   FetchModelsParams,
   PlaygroundChatParams,
@@ -25,12 +22,16 @@ import type {
   SettingsView,
 } from './api.ts';
 import { CallLog } from './call-log.ts';
+import { GenesisRunner } from './genesis/pipeline.ts';
+import { ModelGateway } from './llm/gateway.ts';
+import { PlayService } from './play/runtime.ts';
+import { assertWorldId, type WorldData, WorldStore } from './world/store.ts';
 import type { CallContext, Handlers } from './rpc/index.ts';
 import { endpointKeyId, type SecretStore } from './secrets.ts';
 import { SettingsStore } from './settings-store.ts';
 import { fromCallback, shortId } from './util.ts';
 
-export const ENGINE_VERSION = '0.0.1';
+export const ENGINE_VERSION = '0.1.0';
 
 export interface EngineOptions {
   /** 数据目录：settings.json、secrets.json、logs.db 都在这里。 */
@@ -44,14 +45,6 @@ export interface EngineOptions {
   timeoutMs?: number;
 }
 
-interface CallScope {
-  role: string;
-  endpoint: Endpoint;
-  model: string;
-  /** 最后一条日志的 id。 */
-  lastCallId: string | null;
-}
-
 /** 核心引擎。M0 提供：模型接入点管理、职责路由、能力探测、调试对话、调用日志。 */
 export class Engine {
   readonly dataDir: string;
@@ -60,8 +53,10 @@ export class Engine {
   private readonly fetchImpl: FetchLike | undefined;
   private readonly timeoutMs: number | undefined;
   readonly calls: CallLog;
-  /** 运行中发现的参数修正（还没做能力探测的模型也能受益）。 */
-  private readonly runtimeFixes = new Map<string, Set<ParamFix>>();
+  readonly gateway: ModelGateway;
+  readonly worlds: WorldStore;
+  readonly genesis: GenesisRunner;
+  readonly play: PlayService;
 
   constructor(opts: EngineOptions) {
     this.dataDir = opts.dataDir;
@@ -70,9 +65,21 @@ export class Engine {
     this.fetchImpl = opts.fetch;
     this.timeoutMs = opts.timeoutMs;
     this.calls = new CallLog(opts.callLogFile ?? path.join(opts.dataDir, 'logs.db'));
+    this.gateway = new ModelGateway({
+      settings: this.settings,
+      secrets: this.secrets,
+      calls: this.calls,
+      fetch: this.fetchImpl,
+      timeoutMs: this.timeoutMs,
+    });
+    this.worlds = new WorldStore(path.join(opts.dataDir, 'worlds'));
+    this.genesis = new GenesisRunner(this.worlds, this.gateway);
+    this.play = new PlayService(this.worlds, this.gateway);
   }
 
   close(): void {
+    this.genesis.abortAll();
+    this.play.dispose();
     this.calls.close();
   }
 
@@ -152,149 +159,40 @@ export class Engine {
 
   // ───────────── 模型调用 ─────────────
 
-  private makeClient(endpoint: Endpoint, apiKey: string | undefined, scope: CallScope): OpenAICompatibleClient {
-    return new OpenAICompatibleClient({
-      baseURL: endpoint.baseURL,
-      apiKey,
-      headers: endpoint.headers,
-      fetch: this.fetchImpl,
-      timeoutMs: this.timeoutMs,
-      onExchange: (rec) => this.logExchange(rec, scope),
-    });
-  }
-
-  private logExchange(rec: ExchangeRecord, scope: CallScope): void {
-    const result = rec.result;
-    const usage = result?.usage ?? null;
-    const pricing = scope.endpoint.pricing[scope.model];
-    try {
-      scope.lastCallId = this.calls.insert({
-        ts: rec.startedAt,
-        role: scope.role,
-        endpointId: scope.endpoint.id,
-        endpointName: scope.endpoint.name,
-        model: scope.model,
-        kind: rec.kind,
-        status: rec.status,
-        httpStatus: rec.httpStatus,
-        url: rec.url,
-        attempt: rec.attempt,
-        latencyMs: rec.latencyMs,
-        ttftMs: rec.ttftMs,
-        usage,
-        cost: usage ? computeCost(usage, pricing) : null,
-        currency: scope.endpoint.currency,
-        error: rec.error,
-        request: rec.request,
-        responseText: result?.text ?? rec.partialText,
-        reasoning: result?.reasoning ?? '',
-        toolCalls: result?.toolCalls ?? [],
-      });
-    } catch (err) {
-      console.error('[engine] 写调用日志失败：', err);
-    }
-  }
-
-  private fixKey(endpointId: string, model: string) {
-    return `${endpointId}\u0000${model}`;
-  }
-
-  private optionsFor(endpoint: Endpoint, model: string, signal?: AbortSignal): RequestOptions {
-    const opts: RequestOptions = { ...requestOptionsFor(endpoint.capabilities[model]), signal };
-    for (const fix of this.runtimeFixes.get(this.fixKey(endpoint.id, model)) ?? []) {
-      if (fix === 'useMaxCompletionTokens') opts.useMaxCompletionTokens = true;
-      if (fix === 'noTemperature') opts.noTemperature = true;
-      if (fix === 'noStreamUsage') opts.streamUsage = false;
-    }
-    return opts;
-  }
-
-  private async rememberFixes(endpoint: Endpoint, model: string, result: ChatResult): Promise<void> {
-    if (!result.fixes.length) return;
-    const key = this.fixKey(endpoint.id, model);
-    const set = this.runtimeFixes.get(key) ?? new Set<ParamFix>();
-    result.fixes.forEach((f) => set.add(f));
-    this.runtimeFixes.set(key, set);
-    if (!endpoint.capabilities[model]) return;
-    await this.settings.update((s) => ({
-      ...s,
-      endpoints: s.endpoints.map((e) => {
-        const caps = e.id === endpoint.id ? e.capabilities[model] : undefined;
-        if (!caps) return e;
-        const updated: Capabilities = {
-          ...caps,
-          useMaxCompletionTokens: caps.useMaxCompletionTokens || set.has('useMaxCompletionTokens'),
-          noTemperature: caps.noTemperature || set.has('noTemperature'),
-          streamUsage: caps.streamUsage && !set.has('noStreamUsage'),
-        };
-        return { ...e, capabilities: { ...e.capabilities, [model]: updated } };
-      }),
-    }));
-  }
-
-  private async resolveTarget(target: ChatTarget) {
-    const s = await this.settings.get();
-    if ('role' in target) {
-      const route = s.roles[target.role] ?? s.roles.default;
-      if (!route) {
-        const name = ROLE_LABELS[target.role].name;
-        throw new Error(`还没有给「${name}」或「默认」职责指定模型，请到 设置 → 职责路由 配置`);
-      }
-      const endpoint = s.endpoints.find((e) => e.id === route.endpointId);
-      if (!endpoint) throw new Error('职责路由指向的接入点已被删除，请重新配置');
-      return { endpoint, model: route.model, route, role: target.role as string };
-    }
-    const endpoint = s.endpoints.find((e) => e.id === target.endpointId);
-    if (!endpoint) throw new Error('接入点不存在，可能已被删除');
-    return { endpoint, model: target.model, route: undefined, role: 'playground' };
-  }
-
   /** 调试台对话：流式产出增量，返回完整结果和费用。 */
-  async *chat(p: PlaygroundChatParams, ctx: CallContext): AsyncGenerator<StreamEvent, PlaygroundResult, void> {
-    const { endpoint, model, route, role } = await this.resolveTarget(p.target);
-    if (!model) throw new Error('没有指定模型');
-    const apiKey = await this.secrets.get(endpointKeyId(endpoint.id));
-    const scope: CallScope = { role, endpoint, model, lastCallId: null };
-    const client = this.makeClient(endpoint, apiKey, scope);
-    const req = {
-      model,
-      messages: p.messages,
-      temperature: p.temperature ?? route?.temperature,
-      maxTokens: p.maxTokens ?? route?.maxTokens,
-    };
-    const opts = this.optionsFor(endpoint, model, ctx.signal);
-    const caps = endpoint.capabilities[model];
-    let result: ChatResult;
-    if (p.stream === false || (caps && !caps.streaming)) {
-      result = await client.chat(req, opts);
-      if (result.reasoning) yield { type: 'reasoning', delta: result.reasoning };
-      if (result.text) yield { type: 'text', delta: result.text };
-    } else {
-      result = yield* client.chatStream(req, opts);
-    }
-    await this.rememberFixes(endpoint, model, result);
-    return {
-      callId: scope.lastCallId,
-      text: result.text,
-      reasoning: result.reasoning,
-      usage: result.usage,
-      cost: computeCost(result.usage, endpoint.pricing[model]),
-      currency: endpoint.currency,
-      latencyMs: result.latencyMs,
-      ttftMs: result.ttftMs,
-      model: result.model ?? model,
-      endpointName: endpoint.name,
-    };
+  chat(p: PlaygroundChatParams, ctx: CallContext): AsyncGenerator<StreamEvent, PlaygroundResult, void> {
+    return fromCallback<StreamEvent, PlaygroundResult>(async (emit) => {
+      const h = await this.gateway.forTarget(p.target, 'playground');
+      const result = await this.gateway.run(
+        h,
+        { messages: p.messages, temperature: p.temperature, maxTokens: p.maxTokens },
+        {
+          signal: ctx.signal,
+          stream: p.stream,
+          onText: (delta) => emit({ type: 'text', delta }),
+          onReasoning: (delta) => emit({ type: 'reasoning', delta }),
+        },
+      );
+      return {
+        callId: h.lastCallId(),
+        text: result.text,
+        reasoning: result.reasoning,
+        usage: result.usage,
+        cost: this.gateway.cost(h, result.usage),
+        currency: h.endpoint.currency,
+        latencyMs: result.latencyMs,
+        ttftMs: result.ttftMs,
+        model: result.model ?? h.model,
+        endpointName: h.endpoint.name,
+      };
+    });
   }
 
   /** 能力探测：逐项产出进度，完成后把结果存进接入点。 */
   probe(endpointId: string, model: string, ctx: CallContext): AsyncGenerator<ProbeChunk, Capabilities, void> {
     return fromCallback<ProbeChunk, Capabilities>(async (emit) => {
-      const endpoint = await this.getEndpoint(endpointId);
-      const apiKey = await this.secrets.get(endpointKeyId(endpoint.id));
-      const scope: CallScope = { role: 'probe', endpoint, model, lastCallId: null };
-      const client = this.makeClient(endpoint, apiKey, scope);
-      const caps = await probeCapabilities(client, model, {
+      const h = await this.gateway.forEndpoint(endpointId, model, 'probe', 'probe');
+      const caps = await probeCapabilities(h.client, model, {
         signal: ctx.signal,
         onStep: (step, ok, note) => emit({ step, ok, note }),
       });
@@ -311,7 +209,7 @@ export class Engine {
             : e,
         ),
       }));
-      this.runtimeFixes.delete(this.fixKey(endpointId, model));
+      this.gateway.clearFixes(endpointId, model);
       return caps;
     });
   }
@@ -332,6 +230,55 @@ export class Engine {
     return client.listModels();
   }
 
+  // ───────────── 世界 ─────────────
+
+  private summarize(d: WorldData | (Pick<WorldData, 'manifest'> & Partial<WorldData>)): WorldSummary {
+    const m = d.manifest;
+    return {
+      id: m.id,
+      title: m.title,
+      logline: m.logline,
+      genre: d.brief?.genre ?? '',
+      status: m.status,
+      createdAt: m.createdAt,
+      updatedAt: m.updatedAt,
+      characterCount: d.characters?.length ?? 0,
+      steps: m.genesis.steps,
+      running: this.genesis.isRunning(m.id),
+    };
+  }
+
+  async listWorlds(): Promise<WorldSummary[]> {
+    const manifests = await this.worlds.list();
+    return Promise.all(manifests.map(async (m) => this.summarize(await this.worlds.load(m.id))));
+  }
+
+  async getWorld(id: string): Promise<WorldDetail> {
+    const d = await this.worlds.load(id);
+    return { ...d, summary: this.summarize(d) };
+  }
+
+  async deleteWorld(id: string): Promise<void> {
+    assertWorldId(id);
+    await this.genesis.stop(id);
+    await this.play.closeWorld(id);
+    await this.worlds.delete(id);
+  }
+
+  createWorld(p: CreateWorldParams, ctx: CallContext): AsyncGenerator<GenesisChunk, WorldSummary, void> {
+    return fromCallback(async (emit) => {
+      const m = await this.genesis.create(p, emit, ctx.signal);
+      return this.summarize(await this.worlds.load(m.id));
+    });
+  }
+
+  runGenesis(worldId: string, from: GenesisStepId | undefined, ctx: CallContext) {
+    return fromCallback<GenesisChunk, WorldSummary>(async (emit) => {
+      await this.genesis.run(worldId, from, emit, ctx.signal);
+      return this.summarize(await this.worlds.load(worldId));
+    });
+  }
+
   /** 所有 RPC 处理函数。 */
   handlers(): Handlers<EngineContract> {
     return {
@@ -347,6 +294,27 @@ export class Engine {
       getCall: (p) => this.calls.get(p.id),
       clearCalls: () => this.calls.clear(),
       usageSummary: () => this.calls.summary(),
+
+      listWorlds: () => this.listWorlds(),
+      getWorld: (p) => this.getWorld(p.id),
+      deleteWorld: (p) => this.deleteWorld(p.id),
+      createWorld: (p, ctx) => this.createWorld(p, ctx),
+      runGenesis: (p, ctx) => this.runGenesis(p.worldId, p.from, ctx),
+
+      listPlaythroughs: (p) => this.play.list(p.worldId),
+      startPlaythrough: (p) => this.play.start(p.worldId, p.title),
+      getPlaythrough: (p) => this.play.view(p),
+      deletePlaythrough: (p) => this.play.delete(p),
+      send: (p, ctx) => fromCallback((emit) => this.play.send(p, emit, ctx.signal)),
+      regenerate: (p, ctx) => fromCallback((emit) => this.play.regenerate(p, p.eventId, emit, ctx.signal)),
+      editEvent: (p) => this.play.edit(p, p.eventId, p.text, p.segments),
+      switchBranch: (p) => this.play.switchBranch(p, p.eventId),
+      rewind: (p) => this.play.rewind(p, p.eventId),
+      deleteBranch: (p) => this.play.deleteBranch(p, p.eventId),
+      setScene: (p) => this.play.setScene(p, { locationId: p.locationId, presentCharacterIds: p.presentCharacterIds }),
+      saveSlot: (p) => this.play.save(p, p.name),
+      loadSave: (p) => this.play.load(p, p.saveId),
+      deleteSave: (p) => this.play.deleteSave(p, p.saveId),
     };
   }
 }

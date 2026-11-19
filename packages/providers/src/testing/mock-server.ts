@@ -1,5 +1,8 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { type MockMessage, type MockRequestInfo, schemaNameOf, storyReply } from './mock-story.ts';
+
+export type { MockRequestInfo } from './mock-story.ts';
 
 /**
  * 一个本地的模拟 OpenAI 兼容服务，用于测试和没有 API Key 时的开发调试。
@@ -25,8 +28,10 @@ export interface MockServerOptions {
   chunkDelayMs?: number;
   /** 在正文前输出的推理内容（模拟 DeepSeek 的 reasoning_content）。 */
   reasoning?: string;
-  /** 自定义回复。 */
-  reply?: (lastUserMessage: string) => string;
+  /** 自定义回复；返回 undefined 时走内置逻辑（故事模型 → 默认回复）。 */
+  reply?: (lastUserMessage: string, info: MockRequestInfo) => string | undefined;
+  /** 内置的故事模型（认出创世和游玩请求并返回固定内容），默认开启。 */
+  story?: boolean;
   /** 绑定的主机，默认 127.0.0.1。 */
   host?: string;
   port?: number;
@@ -40,10 +45,7 @@ export interface MockServer {
   close(): Promise<void>;
 }
 
-interface WireMessage {
-  role: string;
-  content: string;
-}
+type WireMessage = MockMessage;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -72,6 +74,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
     jsonObject: true,
     tools: true,
     chunkDelayMs: 5,
+    story: true,
     models: ['mock-chat', 'mock-reasoner'],
     ...options,
   };
@@ -116,16 +119,20 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
       const rf = body.response_format as { type?: string } | undefined;
       const wantsTool = opts.tools && Array.isArray(body.tools) && body.tools.length > 0;
 
+      const info: MockRequestInfo = { messages, schemaName: schemaNameOf(body, messages), count: chatCount };
+      const custom = opts.reply?.(lastUser, info) ?? (opts.story ? storyReply(info) : undefined);
       let text = '';
       let toolCall: { id: string; name: string; arguments: string } | null = null;
       if (wantsTool) {
         toolCall = { id: 'call_mock_1', name: 'get_weather', arguments: JSON.stringify({ city: '北京' }) };
+      } else if (custom !== undefined) {
+        text = custom;
       } else if (rf?.type === 'json_schema' && opts.jsonSchema) {
         text = JSON.stringify({ answer: '2' });
       } else if (rf?.type === 'json_object' && opts.jsonObject) {
         text = JSON.stringify({ answer: '2' });
       } else {
-        text = (opts.reply ?? defaultReply)(lastUser);
+        text = defaultReply(lastUser);
       }
       const reasoning = opts.reasoning ?? '';
       const model = String(body.model ?? 'mock-chat');
@@ -184,7 +191,8 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
           });
         }
       }
-      for (const piece of chunk(text, 2)) {
+      // 长文本分成大约 200 片，避免测试太慢
+      for (const piece of chunk(text, Math.max(2, Math.ceil([...text].length / 200)))) {
         await send({ ...base, choices: [{ index: 0, delta: { content: piece }, finish_reason: null }] });
       }
       await send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: finish }] });

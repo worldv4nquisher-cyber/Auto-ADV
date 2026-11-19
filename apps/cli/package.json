@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit -p ."
   },
   "dependencies": {
-    "@auto-adv/providers": "workspace:*"
+    "@auto-adv/providers": "workspace:*",
+    "@auto-adv/engine": "workspace:*"
   }
 }
