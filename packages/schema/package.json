@@ -1,0 +1,16 @@
+{
+  "name": "@auto-adv/schema",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Auto-ADV 原生格式与配置的 Zod 定义",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  }
+}
