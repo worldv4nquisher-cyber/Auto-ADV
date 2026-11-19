@@ -46,12 +46,12 @@ Auto-ADV 是一个桌面端的 **AI 视觉小说引擎 + 播放器**：一键生
 | 桌面壳 | **Electron** | 见 3.2 |
 | 语言 | **TypeScript 全栈** | 前端、引擎、工具链一种语言；LLM 应用生态第一梯队 |
 | 工程结构 | pnpm workspace monorepo + electron-vite | 引擎、模型层、格式定义拆成独立包，界面只是其中一个使用者 |
-| 界面 | React + Tailwind CSS + shadcn/ui，状态管理用 Zustand | 生态成熟，组件现成，适合大量表单（创世选项、编辑器） |
+| 界面 | React + Tailwind CSS | 生态成熟。M0 先用自己写的少量基础组件；创世选项、编辑器等表单变多后再引入 shadcn/ui，跨页面状态变复杂时再上 Zustand |
 | VN 舞台 | 先用 DOM/CSS + Motion 动画；需要粒子、着色器、Live2D 时换 PixiJS | 先快后强；舞台接口抽象好，渲染层可替换 |
 | 音频 | Web Audio（Howler.js） | BGM 淡入淡出、音效、语音分轨混音 |
-| 模型接入 | Vercel AI SDK 做底层 + 自己的 Provider 接口包一层 | 一套 API 覆盖 OpenAI / Anthropic / Gemini / OpenAI 兼容 / Ollama，自带流式、工具调用、结构化输出；外面包一层避免被锁定 |
+| 模型接入 | 自己的 Provider 接口；OpenAI 兼容适配器直接基于 fetch 手写 | 各家"兼容"接口有很多小差异（DeepSeek 的 `reasoning_content`、有的不认 `stream_options`、推理模型要 `max_completion_tokens`），自己写才能完整记录原始请求响应、逐项探测和自动修正。以后接 Anthropic / Gemini 原生接口时再按需选官方 SDK 或 AI SDK，放在同一个接口后面 |
 | 数据定义 | Zod | 同一份 schema 同时用于：原生格式校验、LLM 结构化输出、进程间通信的类型 |
-| 存储 | 世界定义用文件夹（JSON / MD）；运行数据用 SQLite（better-sqlite3）；向量检索用 sqlite-vec | 不需要额外数据库服务，单文件，可以随世界一起打包 |
+| 存储 | 世界定义用文件夹（JSON / MD）；运行数据用 SQLite（Node / Electron 自带的 `node:sqlite`）；向量检索用 sqlite-vec 扩展 | 不需要额外数据库服务，单文件，可以随世界一起打包；内置模块不用编译原生代码，Windows 上打包省掉一大类问题 |
 | 密钥 | Electron safeStorage（系统钥匙串加密） | API Key 不明文落盘，也绝不写进世界包 |
 | 测试 | Vitest + LLM 调用录制回放 | 引擎测试可重复、不花钱 |
 
@@ -72,7 +72,7 @@ Auto-ADV 是一个桌面端的 **AI 视觉小说引擎 + 播放器**：一键生
 
 ### 3.3 不用重型 Agent 框架
 
-LangChain / LangGraph 这类通用框架抽象层厚，而我们的循环是领域特定的（导演 / 演员 / 书记），需要精细控制上下文怎么拼、缓存怎么命中、钱怎么花。所以自己写一层薄的编排，底层只用 AI SDK 做模型适配。
+LangChain / LangGraph 这类通用框架抽象层厚，而我们的循环是领域特定的（导演 / 演员 / 书记），需要精细控制上下文怎么拼、缓存怎么命中、钱怎么花。所以自己写一层薄的编排，模型适配也自己掌控（见 9.2）。
 
 ## 4. 总体架构
 
@@ -112,7 +112,8 @@ flowchart LR
 - **界面进程**：只负责显示和交互，不直接调用模型。
 - **主进程**：窗口、菜单、文件对话框、密钥加解密。
 - **引擎进程**：所有生成、游戏循环、数据库读写都在这里，用 Electron 的 `utilityProcess` 跑。好处是观察模式长时间运行也不会卡界面；同一份引擎代码也能被命令行工具直接加载。
-- 界面与引擎之间用类型安全的 RPC 通信，并支持流式订阅（台词逐字出现、素材生成进度）。
+- 界面与引擎之间用类型安全的 RPC 通信，并支持流式订阅（台词逐字出现、素材生成进度）。主进程只负责把一条 MessagePort 交给双方，之后界面和引擎直接通信。
+- 引擎联网用 Electron 的 `net.fetch`（Chromium 网络栈），自动遵循系统代理设置，开着代理软件就能访问海外模型服务。
 
 **代码组织**
 
@@ -131,6 +132,8 @@ auto-adv/
 ```
 
 依赖方向是单向的：`schema` ← `providers` ← `engine` ← `apps/*`；`compat` 只依赖 `schema`，核心不依赖它。
+
+目前（M0）已有 `schema`、`providers`、`engine`、`desktop`、`cli`；`compat` 和 `player` 在用到时加入。各包直接导出 TypeScript 源码，桌面端由 electron-vite 打包，命令行工具由 Node 直接运行（Node 22.18+ 原生支持 TypeScript）。
 
 ## 5. 原生格式：世界包
 
