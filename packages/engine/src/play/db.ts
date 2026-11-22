@@ -69,7 +69,7 @@ function dataOf(e: PlayEvent): string {
   return JSON.stringify(d);
 }
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /** 跨周目解锁的东西：结局、CG、走过的幕（16.8）。 */
 export type UnlockKind = 'ending' | 'cg' | 'scene';
@@ -153,8 +153,14 @@ export class PlayDb {
           event_id TEXT NOT NULL,
           PRIMARY KEY (kind, id)
         );
-        PRAGMA user_version = ${SCHEMA_VERSION};
+        PRAGMA user_version = 3;
       `);
+    }
+    if ((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 4) {
+      // 存档的附加信息：剧情 ADV 舞台播到哪一步、缩略图
+      const cols = this.db.prepare('PRAGMA table_info(saves)').all() as { name: string }[];
+      if (!cols.some((c) => c.name === 'data')) this.db.exec(`ALTER TABLE saves ADD COLUMN data TEXT NOT NULL DEFAULT '{}';`);
+      this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`);
     }
   }
 
@@ -389,19 +395,25 @@ export class PlayDb {
       string,
       unknown
     >[];
-    return rows.map((r) => ({
-      id: r.id as string,
-      name: r.name as string,
-      eventId: r.event_id as string,
-      preview: r.preview as string,
-      createdAt: r.created_at as number,
-    }));
+    return rows.map((r) => {
+      const data = JSON.parse((r.data as string) || '{}') as Pick<SaveInfo, 'at' | 'thumb'>;
+      return {
+        id: r.id as string,
+        name: r.name as string,
+        eventId: r.event_id as string,
+        preview: r.preview as string,
+        createdAt: r.created_at as number,
+        ...(data.at ? { at: data.at } : {}),
+        ...(data.thumb ? { thumb: data.thumb } : {}),
+      };
+    });
   }
 
   addSave(pt: string, s: SaveInfo): void {
+    const data = JSON.stringify({ ...(s.at ? { at: s.at } : {}), ...(s.thumb ? { thumb: s.thumb } : {}) });
     this.db
-      .prepare('INSERT INTO saves (id, pt, name, event_id, preview, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(s.id, pt, s.name, s.eventId, s.preview, s.createdAt);
+      .prepare('INSERT INTO saves (id, pt, name, event_id, preview, created_at, data) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(s.id, pt, s.name, s.eventId, s.preview, s.createdAt, data);
   }
 
   getSave(pt: string, id: string): SaveInfo {

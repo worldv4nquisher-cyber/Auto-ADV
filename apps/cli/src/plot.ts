@@ -142,7 +142,9 @@ export async function advCommand(arg: string | undefined, o: PlotCliOptions): Pr
       });
     };
 
-    const print = (events: PlayEvent[]) => {
+    /** 打印新事件；CG 打印出来就算显示过了（跨周目解锁在第一次显示时记）。返回新解锁的 CG 数。 */
+    const print = (events: PlayEvent[]): number => {
+      let cgs = 0;
       for (const e of events) {
         if (e.kind === 'choice' && e.choice) console.log(`  ▶ 你选了：${e.choice.label}`);
         if (e.kind === 'check' && e.check) {
@@ -163,6 +165,7 @@ export async function advCommand(arg: string | undefined, o: PlotCliOptions): Pr
         for (const c of e.stage ?? []) {
           const line = stageLine(c, charName);
           if (line) console.log(`  ${line}`);
+          if (c.op === 'cg' && session.markShown(pt, e.id, c.id)) cgs++;
         }
         for (const p of m.points ?? []) console.log(`  ✓ 要点：${scene?.points.find((x) => x.id === p)?.text ?? p}`);
         for (const v of m.vars ?? []) console.log(`  ＊ ${varLabel(v.var)}：${String(v.from)} → ${String(v.to)}`);
@@ -174,6 +177,7 @@ export async function advCommand(arg: string | undefined, o: PlotCliOptions): Pr
         if (m.exit) console.log(`  → 前往「${sceneOf(m.exit.to)?.title ?? m.exit.to}」（${EXIT_REASONS[m.exit.by]}）`);
         if (m.menu) printMenu(m.menu);
       }
+      return cgs;
     };
 
     const pick = async (menu: PlotMenu): Promise<number> => {
@@ -202,8 +206,7 @@ export async function advCommand(arg: string | undefined, o: PlotCliOptions): Pr
       }
       const r = state.menu ? session.choose(pt, await pick(state.menu)) : session.next(pt);
       if (r.events[0]?.kind === 'choice') picks.push((r.events[0].choice?.index ?? 0) + 1);
-      print(r.events);
-      unlocked += r.unlocked.length;
+      unlocked += r.unlocked.length + print(r.events);
       state = r.state;
     }
     rl?.close();
