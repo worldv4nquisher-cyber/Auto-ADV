@@ -54,6 +54,7 @@
 ## M3 剧情 ADV 模式
 
 > 设计见 [ARCHITECTURE.md 第 16 节](./ARCHITECTURE.md#16-m3-设计剧情-adv-模式)。先做简单版：先用手写剧本在命令行和舞台上跑通，再接 AI 生成。
+> 第 1 步已完成（剧情图、条件、结构检查、进度折叠、数值上限和检定、跨周目进度、旧骨架迁移、`.adv` 剧本）：`pnpm cli check-plot` / `pnpm cli adv` 可以在命令行把示例世界 `examples/worlds/old_library` 玩到 4 个结局。具体做法见 [ARCHITECTURE.md 第 17 节](./ARCHITECTURE.md#17-m3-实现备注)。下一步是 VN 舞台。
 
 - 剧情图：用"幕 + 出口"代替篇章 / 章节 / 节拍骨架，由引擎按出口和条件判断换幕；三种模式共用；旧世界自动迁移
 - 结构化的出口 / 结局条件（不用字符串表达式），开玩前做结构检查（`pnpm cli check-plot`）
