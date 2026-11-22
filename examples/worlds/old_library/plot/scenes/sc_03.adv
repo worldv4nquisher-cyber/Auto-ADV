@@ -1,0 +1,15 @@
+# 第三幕：无名之书
+bg archive_inner fade
+bgm mystery
+show lin neutral center
+narrate "书库深处的书桌上，压着一本没有书名的书，和一张泛黄的字条。"
+point sc_03_1
+narrate "字条上是林夕姐姐的笔迹：「潮水回来的那天，我也会回来。」"
+choice
+  "把字条念给她听" -> set flags.told_truth true; set affinity.char_lin +8
+    show lin sad center
+    lin "……她还活着。她一直在等潮水。"
+  "先把字条藏起来，怕她难过"
+    lin "你手里拿的是什么？……算了。"
+point sc_03_2
+narrate "窗外传来潮水上涨的声音。"

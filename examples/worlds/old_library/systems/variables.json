@@ -1,0 +1,9 @@
+{
+  "formatVersion": 0,
+  "variables": [
+    { "id": "affinity.char_lin", "label": "林夕的好感", "type": "number", "initial": 30, "min": 0, "max": 100, "category": "relationship" },
+    { "id": "attr.wit", "label": "机智", "type": "number", "initial": 1, "min": -2, "max": 5, "category": "attribute" },
+    { "id": "flags.door_open", "label": "旧书库的门打开了", "type": "boolean", "initial": false, "visible": false },
+    { "id": "flags.told_truth", "label": "把字条的事告诉了林夕", "type": "boolean", "initial": false, "visible": false }
+  ]
+}
