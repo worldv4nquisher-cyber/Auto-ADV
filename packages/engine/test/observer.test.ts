@@ -415,6 +415,23 @@ describe('观察模式的纯逻辑', () => {
     expect(plan.done).toEqual(['b_01_01_02']);
     expect(plan.reveals).toEqual([{ characterId: 'char_02', to: ['char_03'] }]);
     expect(plan.rejected.join('\n')).toMatch(/月球[\s\S]*路人甲[\s\S]*b_01_02_01[\s\S]*阿远/);
+
+    // 已经知道的人不再算一次揭开；全都知道了就整条丢掉（不算驳回）
+    state.reveals.set('char_02', new Set(['char_03']));
+    const again = validatePlan(world, state, {
+      plan: '测试',
+      location: '',
+      present: [],
+      time: '',
+      speakers: [],
+      completeBeats: [],
+      reveals: [
+        { owner: '林夕', to: ['白鸦'] },
+        { owner: '林夕', to: ['白鸦', '阿远'] },
+      ],
+    });
+    expect(again.reveals).toEqual([{ characterId: 'char_02', to: ['char_01'] }]);
+    expect(again.rejected).toEqual([]);
   });
 
   it('foldState：从事件算出进度、时间、停滞、事件卡、秘密和待处理的指令', async () => {
