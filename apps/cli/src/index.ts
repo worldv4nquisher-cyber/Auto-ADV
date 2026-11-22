@@ -23,6 +23,7 @@ import {
   probeCapabilities,
 } from '@auto-adv/providers';
 import { type MockServer, startMockServer } from '@auto-adv/providers/testing';
+import { advCommand, checkPlotCommand } from './plot.ts';
 
 const HELP = `Auto-ADV 命令行工具
 
@@ -49,6 +50,12 @@ const HELP = `Auto-ADV 命令行工具
       --out <文件>         全文记录写到哪里，默认 <data-dir>/observe-<时间>.md
 
 genesis / observe 都可以加 --mock：用内置模拟服务跑通流程，不需要 API Key。
+
+  check-plot <世界>        剧情图的结构检查：死路、走不到的幕、走不到结局、条件引用、手写剧本……
+  adv <世界>               在命令行里玩剧情 ADV（手写剧本 + 剧情图，不调模型），每次开一个新周目
+      --choose <1,2,1>     按顺序使用的选项编号；用完后在终端里交互选择，不是终端就选第一个能选的
+      --db <文件>          周目数据放在哪里，默认 <世界>/playthroughs/play.db（跨周目的结局进度也记在这里）
+  <世界> 是世界文件夹的路径（例如 examples/worlds/old_library），或者 --data-dir 里的世界 id。
 
 models / probe / chat 的通用参数：
   --base-url <地址>        例如 https://api.deepseek.com/v1
@@ -80,6 +87,8 @@ const { positionals, values } = parseArgs({
     'budget-tokens': { type: 'string' },
     rpm: { type: 'string' },
     out: { type: 'string' },
+    choose: { type: 'string' },
+    db: { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
 });
@@ -162,6 +171,14 @@ async function main() {
     }
     case 'observe': {
       await observe();
+      return;
+    }
+    case 'check-plot': {
+      process.exitCode = await checkPlotCommand(rest[0], { dataDir: values['data-dir'] });
+      return;
+    }
+    case 'adv': {
+      process.exitCode = await advCommand(rest[0], { dataDir: values['data-dir'], choose: values.choose, db: values.db });
       return;
     }
     default:

@@ -1,0 +1,9 @@
+{
+  "formatVersion": 0,
+  "id": "char_lin",
+  "name": "林夕",
+  "aliases": ["小夕"],
+  "role": "heroine",
+  "summary": "图书馆的常客，总在找一本不存在的书。三年前，她的姐姐借走那本书后失踪了。",
+  "expressions": ["neutral", "surprised", "angry", "sad", "smile"]
+}

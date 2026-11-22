@@ -44,7 +44,10 @@ interface EventRow {
   created_at: number;
 }
 
-type EventData = Pick<PlayEvent, 'text' | 'segments' | 'scene' | 'edited' | 'characterId' | 'beat'>;
+type EventData = Pick<
+  PlayEvent,
+  'text' | 'segments' | 'scene' | 'edited' | 'characterId' | 'beat' | 'plot' | 'stage' | 'choice' | 'check'
+>;
 
 function toEvent(r: EventRow): PlayEvent {
   const data = JSON.parse(r.data) as EventData;
@@ -58,11 +61,27 @@ function dataOf(e: PlayEvent): string {
   if (e.scene !== undefined) d.scene = e.scene;
   if (e.characterId !== undefined) d.characterId = e.characterId;
   if (e.beat !== undefined) d.beat = e.beat;
+  if (e.plot !== undefined) d.plot = e.plot;
+  if (e.stage !== undefined) d.stage = e.stage;
+  if (e.choice !== undefined) d.choice = e.choice;
+  if (e.check !== undefined) d.check = e.check;
   if (e.edited) d.edited = true;
   return JSON.stringify(d);
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+
+/** 跨周目解锁的东西：结局、CG、走过的幕（16.8）。 */
+export type UnlockKind = 'ending' | 'cg' | 'scene';
+
+export interface UnlockRow {
+  kind: UnlockKind;
+  id: string;
+  /** 第一次解锁的时间、周目和事件。 */
+  firstAt: number;
+  playthroughId: string;
+  eventId: string;
+}
 
 /**
  * 一个世界的所有周目：<world>/playthroughs/play.db。
@@ -120,6 +139,20 @@ export class PlayDb {
       this.db.exec(`
         ALTER TABLE playthroughs ADD COLUMN data TEXT NOT NULL DEFAULT '{}';
         ALTER TABLE summaries ADD COLUMN chars TEXT NOT NULL DEFAULT '{}';
+        PRAGMA user_version = 2;
+      `);
+    }
+    if ((this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version < 3) {
+      // 解锁表不挂外键：删周目、回退、换分支都不影响已有记录，删除整个世界时随 play.db 一起删
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS unlocks (
+          kind TEXT NOT NULL,
+          id TEXT NOT NULL,
+          first_at INTEGER NOT NULL,
+          pt TEXT NOT NULL,
+          event_id TEXT NOT NULL,
+          PRIMARY KEY (kind, id)
+        );
         PRAGMA user_version = ${SCHEMA_VERSION};
       `);
     }
@@ -188,6 +221,16 @@ export class PlayDb {
     this.db
       .prepare('INSERT INTO events (id, pt, parent, kind, data, call_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(e.id, pt, e.parentId, e.kind, dataOf(e), e.callId ?? null, e.createdAt);
+  }
+
+  /** 在一个事务里写入一串事件并把当前位置移到最后一个。 */
+  appendEvents(pt: string, events: readonly PlayEvent[]): void {
+    const last = events.at(-1);
+    if (!last) return;
+    this.tx(() => {
+      for (const e of events) this.insertEvent(pt, e);
+      this.db.prepare('UPDATE playthroughs SET head_id = ?, updated_at = ? WHERE id = ?').run(last.id, Date.now(), pt);
+    });
   }
 
   getEvent(pt: string, id: string): PlayEvent {
@@ -312,6 +355,31 @@ export class PlayDb {
     this.db
       .prepare('INSERT OR REPLACE INTO summaries (event_id, pt, text, covered, chars, created_at) VALUES (?, ?, ?, ?, ?, ?)')
       .run(s.eventId, pt, s.text, s.covered, JSON.stringify(s.characters), Date.now());
+  }
+
+  // ───────────── 跨周目解锁 ─────────────
+
+  /** 记一笔解锁。只增不删，同一项只记第一次；返回这次是不是新解锁的。 */
+  unlock(u: UnlockRow): boolean {
+    const r = this.db
+      .prepare('INSERT OR IGNORE INTO unlocks (kind, id, first_at, pt, event_id) VALUES (?, ?, ?, ?, ?)')
+      .run(u.kind, u.id, u.firstAt, u.playthroughId, u.eventId);
+    return Number(r.changes) > 0;
+  }
+
+  listUnlocks(kind?: UnlockKind): UnlockRow[] {
+    const rows = (
+      kind
+        ? this.db.prepare('SELECT * FROM unlocks WHERE kind = ? ORDER BY first_at, rowid').all(kind)
+        : this.db.prepare('SELECT * FROM unlocks ORDER BY first_at, rowid').all()
+    ) as Record<string, unknown>[];
+    return rows.map((r) => ({
+      kind: r.kind as UnlockKind,
+      id: r.id as string,
+      firstAt: r.first_at as number,
+      playthroughId: r.pt as string,
+      eventId: r.event_id as string,
+    }));
   }
 
   // ───────────── 存档 ─────────────

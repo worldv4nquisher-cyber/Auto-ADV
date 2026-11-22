@@ -255,7 +255,7 @@ export class Engine {
   }
 
   async getWorld(id: string): Promise<WorldDetail> {
-    const d = await this.worlds.load(id);
+    const { scripts: _scripts, ...d } = await this.worlds.load(id);
     return { ...d, summary: this.summarize(d) };
   }
 

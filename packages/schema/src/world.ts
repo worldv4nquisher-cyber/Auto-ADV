@@ -148,18 +148,6 @@ export const PlotOutline = z.object({
 });
 export type PlotOutline = z.infer<typeof PlotOutline>;
 
-/** systems/variables.json 中的一项：数值或标记的定义。 */
-export const VariableDef = z.object({
-  id: z.string().regex(/^[a-z][a-z0-9_.]*$/),
-  label: z.string(),
-  type: z.enum(['number', 'boolean', 'string']),
-  initial: z.union([z.number(), z.boolean(), z.string()]),
-  min: z.number().optional(),
-  max: z.number().optional(),
-  visible: z.boolean().default(true),
-});
-export type VariableDef = z.infer<typeof VariableDef>;
-
 /** style/style.json：文风、画风、音乐风格指南。 */
 export const StyleGuide = z.object({
   formatVersion: z.number().int().default(FORMAT_VERSION),

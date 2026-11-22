@@ -10,3 +10,14 @@ export { analyzeRun, type RunReport, runTranscript } from './play/observer/repor
 export { EVENT_CARDS, QUALITY, similarity } from './play/observer/quality.ts';
 export { overBudget } from './play/observer/runner.ts';
 export { totalCost } from './play/runtime.ts';
+export * from './plot/adv.ts';
+export * from './plot/check.ts';
+export * from './plot/conditions.ts';
+export * from './plot/dice.ts';
+export * from './plot/progress.ts';
+export * from './plot/runner.ts';
+export * from './plot/session.ts';
+export * from './plot/transition.ts';
+export * from './plot/vars.ts';
+export { PlayDb, type UnlockKind, type UnlockRow } from './play/db.ts';
+export { WorldStore, type WorldData } from './world/store.ts';

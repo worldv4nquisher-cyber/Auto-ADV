@@ -1,0 +1,31 @@
+# 第二幕：旧书库的门
+bg archive_door
+show lin neutral left
+narrate "旧书库的铁门上挂着一把生了锈的密码锁，锁面刻着潮汐的纹路。"
+lin "就是这里。我试了一个星期都没打开。"
+choice
+  "研究门锁的机关" check attr.wit dc 12 id lock
+    if {"check": "pass"}
+      narrate "你顺着潮汐纹路拨动转盘，咔哒一声，锁开了。"
+      set flags.door_open true
+      set affinity.char_lin +3
+      lin "……你怎么知道的？"
+    else
+      narrate "转盘转了一圈又一圈，锁纹丝不动。"
+  "去找管理员老周借钥匙" -> set flags.door_open true; set affinity.char_lin +2
+    show zhou neutral right
+    zhou "旧书库？……拿去吧，别弄丢了。"
+    hide zhou
+    lin "谢谢你。"
+  "用力撞门" check dc 16 id ram
+    if {"check": "pass"}
+      narrate "门轴发出一声哀鸣，竟然真的被你撞开了。"
+      set flags.door_open true
+    else
+      narrate "肩膀撞得发麻，门却连灰都没掉。"
+      set affinity.char_lin -2
+if {"flag": "flags.door_open"}
+  jump sc_03
+else
+  lin "算了，今天就到这里吧。"
+  jump sc_04

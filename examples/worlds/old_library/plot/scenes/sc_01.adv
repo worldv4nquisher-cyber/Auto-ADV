@@ -1,0 +1,21 @@
+# 第一幕：图书馆的偶遇
+bg reading_evening fade
+bgm calm_daily
+narrate "闭馆前的最后半小时，阅览室里只剩下翻书的声音。"
+show lin neutral center
+lin "……你也来找那本书？"
+narrate "她的指尖停在一排没有书脊的空位上。"
+point sc_01_1
+lin "我姐姐三年前在这里借走了它，然后就再也没有回来。"
+choice
+  "我是来找你的" -> set affinity.char_lin +5
+    show lin surprised center
+    lin "……找我？你这人真奇怪。"
+  "随便看看"
+    lin "那就别挡着光。"
+  "那本书根本不存在吧" -> set affinity.char_lin -10
+    show lin angry center
+    lin "你和他们说的一模一样。"
+point sc_01_2
+lin "图书馆地下有个旧书库，钥匙早就丢了。我今晚要下去看看。"
+narrate "她把书包往肩上一甩，等着你的回答。"
