@@ -1,4 +1,4 @@
-import { GENESIS_PRESETS, type GenesisPresetId } from '@auto-adv/schema';
+import { GENESIS_PRESETS, type GenesisPresetId, type PlotOutline } from '@auto-adv/schema';
 import type { GenesisOptions } from '../api.ts';
 import { clip, ratingText, renderBrief, renderCharacter, renderLocation, renderRelationships } from '../world/render.ts';
 import type { WorldData } from '../world/store.ts';
@@ -114,6 +114,43 @@ ${d.locations.map((l) => renderLocation(l, 'short')).join('\n')}
 - 不要为角色本身建条目（角色另有角色卡），但可以写角色所属的组织、物品、事件。${extraNotes(o)}`;
 }
 
+export function renderOutline(plot: PlotOutline, done: ReadonlySet<string> = new Set()): string {
+  const out: string[] = [];
+  if (plot.premise) out.push(`核心：${plot.premise}`);
+  for (const act of plot.acts) {
+    out.push(`## ${act.title}`);
+    for (const ch of act.chapters) {
+      const allDone = ch.beats.length > 0 && ch.beats.every((b) => done.has(b.id));
+      out.push(`### [${ch.id}] ${ch.title}${allDone ? '（已完成）' : ''}\n目标：${ch.goal}`);
+      for (const b of ch.beats) out.push(`- [${done.has(b.id) ? 'x' : ' '}] ${b.id}：${b.text}`);
+    }
+  }
+  if (plot.threads.length) out.push(`## 伏笔\n${plot.threads.map((t) => `- ${t.text}${t.payoff ? `（回收：${t.payoff}）` : ''}`).join('\n')}`);
+  if (plot.endings.length) out.push(`## 可能的结局\n${plot.endings.map((e) => `- ${e.title}：${e.condition}`).join('\n')}`);
+  return out.join('\n');
+}
+
+export function plotPrompt(d: WorldData, o: GenesisOptions): string {
+  return `${briefOf(d)}
+
+${worldviewOf(d, 3000)}
+
+# 角色
+${d.characters.map((c) => renderCharacter(c)).join('\n\n')}
+
+# 角色关系
+${renderRelationships(d.characters) || '（无）'}
+
+# 地点
+${d.locations.map((l) => renderLocation(l)).join('\n')}
+
+请设计第一篇章的剧情骨架。它是骨架，不是剧本：只规定"必须发生什么"，具体怎么发生留给演出时即兴发挥。
+- 3～5 章，每章一个清晰的戏剧目标和 3～4 个关键节拍，节拍之间有因果，难度和紧张度逐步升级。
+- 充分利用角色的目标、秘密和彼此之间的张力，让每个重要角色都有自己的戏份。
+- 埋下 2～4 条伏笔，写明在哪里回收；给出 2～3 个可能的结局。
+- 第一章的第一个节拍要能在开场后马上展开。${extraNotes(o)}`;
+}
+
 export function openingPrompt(d: WorldData, o: GenesisOptions): string {
   const protagonist = d.characters.find((c) => c.role === 'protagonist');
   const others = d.characters.filter((c) => c !== protagonist);
@@ -132,10 +169,16 @@ ${renderRelationships(d.characters) || '（无）'}
 
 # 地点
 ${d.locations.map((l) => renderLocation(l)).join('\n')}
-
+${openingPlotHint(d)}
 请设计故事的开场场景。
 - location 必须是上面的地点之一；present 是在场的其他角色（不含主角），1～3 个。
 - narration 是开场叙述，200～400 字，用第二人称「你」指代主角${protagonist ? `${protagonist.name}` : ''}：交代时间、地点、氛围和主角的处境，以一个需要主角回应的钩子收尾。
 - lines 是在场角色的 1～3 句台词，最后一句最好直接对主角说，让玩家自然地接话。
 - 不要替主角说话或做决定。${extraNotes(o)}`;
+}
+
+function openingPlotHint(d: WorldData): string {
+  const ch = d.plot?.acts[0]?.chapters[0];
+  if (!ch) return '';
+  return `\n# 第一章\n「${ch.title}」目标：${ch.goal}\n第一个节拍：${ch.beats[0]?.text ?? '（无）'}\n开场要自然地引向这一章，但不要提前把节拍演完。\n`;
 }

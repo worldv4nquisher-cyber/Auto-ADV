@@ -7,9 +7,9 @@ import type { JsonSpec } from '../llm/structured.ts';
  * 模型常把列表写成一个字符串、把数字写成字符串，这些都在这里兼容掉，而不是让整步失败。
  */
 
-const text = z.preprocess((v) => (v === null || v === undefined ? '' : typeof v === 'string' ? v : String(v)), z.string());
-const required = z.preprocess((v) => (typeof v === 'number' ? String(v) : v), z.string().trim().min(1));
-const list = z
+export const text = z.preprocess((v) => (v === null || v === undefined ? '' : typeof v === 'string' ? v : String(v)), z.string());
+export const required = z.preprocess((v) => (typeof v === 'number' ? String(v) : v), z.string().trim().min(1));
+export const list = z
   .preprocess(
     (v) =>
       typeof v === 'string'
@@ -203,5 +203,48 @@ export const openingSpec: JsonSpec<OpeningOut> = {
     present: ['在场角色的名字（不含主角）'],
     narration: '开场叙述（200～400 字）',
     lines: [{ speaker: '在场角色的名字', text: '台词' }],
+  },
+};
+
+// ───────────── 剧情骨架 ─────────────
+
+export const PlotOut = z.object({
+  premise: text.default(''),
+  arcTitle: text.default(''),
+  chapters: z
+    .array(
+      z.object({
+        title: text.default(''),
+        goal: required,
+        beats: list,
+      }),
+    )
+    .min(1),
+  endings: z
+    .array(z.object({ title: required, condition: text.default('') }))
+    .catch([])
+    .default([]),
+  threads: z
+    .array(z.object({ text: required, payoff: text.default('') }))
+    .catch([])
+    .default([]),
+});
+export type PlotOut = z.infer<typeof PlotOut>;
+
+export const plotSpec: JsonSpec<PlotOut> = {
+  name: 'plot_outline',
+  schema: PlotOut,
+  example: {
+    premise: '故事的核心冲突和走向（60～120 字）',
+    arcTitle: '这一篇章的标题',
+    chapters: [
+      {
+        title: '章节标题',
+        goal: '这一章要达成的戏剧目标（例如：主角发现灯塔与父亲失踪有关）',
+        beats: ['关键节拍 1：必须发生的事', '关键节拍 2', '关键节拍 3'],
+      },
+    ],
+    endings: [{ title: '结局名', condition: '达成条件' }],
+    threads: [{ text: '伏笔：埋下什么', payoff: '在哪里回收' }],
   },
 };

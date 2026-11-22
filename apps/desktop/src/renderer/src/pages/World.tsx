@@ -1,5 +1,5 @@
-import type { PlaythroughInfo, WorldDetail } from '@auto-adv/engine/api';
-import { type Character, GENESIS_STEPS, type GenesisStepId } from '@auto-adv/schema';
+import type { PlaythroughInfo, StartPlaythroughParams, WorldDetail } from '@auto-adv/engine/api';
+import { type Character, GENESIS_STEPS, type GenesisStepId, type ObserverSettings, type PlotOutline } from '@auto-adv/schema';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Badge,
@@ -8,18 +8,21 @@ import {
   ConfirmButton,
   cx,
   Empty,
+  Field,
+  Input,
   Markdown,
   PageHeader,
+  Select,
   Spinner,
   Tabs,
   useToast,
 } from '../components/ui.tsx';
 import { engine, errorMessage } from '../lib/engine.ts';
-import { formatTime } from '../lib/format.ts';
+import { formatTime, formatTokens } from '../lib/format.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
 
-type Tab = 'overview' | 'characters' | 'locations' | 'lore' | 'opening';
+type Tab = 'overview' | 'characters' | 'locations' | 'plot' | 'lore' | 'opening';
 
 export function WorldPage({ worldId }: { worldId: string }) {
   const { navigate } = useRouter();
@@ -30,6 +33,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
   const [starting, setStarting] = useState(false);
+  const [dialog, setDialog] = useState(false);
   const job = genesis.jobs[worldId];
 
   const load = useCallback(async () => {
@@ -76,10 +80,12 @@ export function WorldPage({ worldId }: { worldId: string }) {
   const ready = world.summary.status === 'ready' && !running;
   const protagonist = world.characters.find((c) => c.role === 'protagonist');
 
-  const start = async () => {
+  const incomplete = GENESIS_STEPS.some((s) => steps[s.id]?.status !== 'done');
+
+  const start = async (p: Omit<StartPlaythroughParams, 'worldId'>) => {
     setStarting(true);
     try {
-      const v = await engine.call('startPlaythrough', { worldId });
+      const v = await engine.call('startPlaythrough', { worldId, ...p });
       navigate({ page: 'play', worldId, playthroughId: v.playthrough.id });
     } catch (err) {
       toast('err', errorMessage(err));
@@ -111,7 +117,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
             <ConfirmButton size="md" variant="ghost" onConfirm={remove} confirmText="确认删除？" testId="delete-world">
               删除世界
             </ConfirmButton>
-            <Button variant="primary" data-testid="start-play" disabled={!ready} loading={starting} onClick={start}>
+            <Button variant="primary" data-testid="start-play" disabled={!ready} loading={starting} onClick={() => setDialog(true)}>
               开始新周目
             </Button>
           </>
@@ -127,6 +133,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
                 { value: 'overview', label: '概览' },
                 { value: 'characters', label: `角色 ${world.characters.length || ''}` },
                 { value: 'locations', label: `地点 ${world.locations.length || ''}` },
+                { value: 'plot', label: '剧情骨架' },
                 { value: 'lore', label: `设定集 ${world.lore.length || ''}` },
                 { value: 'opening', label: '开场' },
               ]}
@@ -157,6 +164,8 @@ export function WorldPage({ worldId }: { worldId: string }) {
                 ))}
               </div>
             )}
+            {tab === 'plot' &&
+              (world.plot ? <PlotView plot={world.plot} /> : <Empty title="剧情骨架还没有生成">观察模式会按剧情骨架推进故事。</Empty>)}
             {tab === 'lore' && (
               <div className="grid gap-2">
                 {world.lore.length === 0 && <Empty title="设定集还没有生成" />}
@@ -211,10 +220,18 @@ export function WorldPage({ worldId }: { worldId: string }) {
                   {plays.map((p) => (
                     <div key={p.id} className="rounded-lg border border-line p-3" data-testid="playthrough">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="text-sm font-medium">{p.title}</span>
-                        <span className="text-xs text-faint">{formatTime(p.updatedAt)}</span>
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate text-sm font-medium">{p.title}</span>
+                          {p.mode === 'observer' && <Badge tone="accent">观察</Badge>}
+                        </span>
+                        <span className="shrink-0 text-xs text-faint">{formatTime(p.updatedAt)}</span>
                       </div>
                       <p className="mt-1 line-clamp-2 text-xs text-muted">{p.preview}</p>
+                      {p.usage.calls > 0 && (
+                        <p className="mt-1 text-[11px] text-faint">
+                          已用 {formatTokens(p.usage.inputTokens + p.usage.outputTokens)} tokens · {p.usage.calls} 次调用
+                        </p>
+                      )}
                       <div className="mt-2 flex gap-1.5">
                         <Button
                           size="sm"
@@ -247,7 +264,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
                     停止
                   </Button>
                 ) : (
-                  world.summary.status !== 'ready' && (
+                  incomplete && (
                     <Button size="sm" variant="primary" data-testid="resume-genesis" onClick={() => genesis.run(worldId)}>
                       {world.summary.status === 'failed' ? '重试失败的步骤' : '继续生成'}
                     </Button>
@@ -284,15 +301,183 @@ export function WorldPage({ worldId }: { worldId: string }) {
                   );
                 })}
               </ul>
+              {ready && incomplete && (
+                <p className="mt-3 border-t border-line pt-3 text-xs leading-relaxed text-faint">
+                  这个世界是旧版本生成的，缺少剧情骨架。点「继续生成」补上，观察模式会按它推进故事；已有的内容不会变。
+                </p>
+              )}
               {ready && protagonist && (
                 <p className="mt-3 border-t border-line pt-3 text-xs leading-relaxed text-faint">
-                  你将扮演：<span className="text-muted">{protagonist.name}</span>
+                  主角：<span className="text-muted">{protagonist.name}</span>（自由对话里由你扮演）
                 </p>
               )}
             </Card>
           </div>
         </div>
       </div>
+      {dialog && (
+        <StartDialog
+          hasPlot={!!world.plot}
+          starting={starting}
+          onCancel={() => setDialog(false)}
+          onStart={(p) => void start(p)}
+        />
+      )}
+    </div>
+  );
+}
+
+const DEFAULT_OBSERVER: Pick<ObserverSettings, 'strategy' | 'focus' | 'budgetTokens'> = {
+  strategy: 'merged',
+  focus: 'protagonist',
+  budgetTokens: 2_000_000,
+};
+
+function StartDialog({
+  hasPlot,
+  starting,
+  onCancel,
+  onStart,
+}: {
+  hasPlot: boolean;
+  starting: boolean;
+  onCancel: () => void;
+  onStart: (p: Omit<StartPlaythroughParams, 'worldId'>) => void;
+}) {
+  const [mode, setMode] = useState<'chat' | 'observer'>('chat');
+  const [obs, setObs] = useState(DEFAULT_OBSERVER);
+  const option = (value: 'chat' | 'observer', title: string, desc: string) => (
+    <button
+      type="button"
+      data-testid={`mode-${value}`}
+      onClick={() => setMode(value)}
+      className={cx(
+        'flex-1 rounded-xl border p-4 text-left transition-colors',
+        mode === value ? 'border-accent bg-accent-soft' : 'border-line hover:border-line-strong',
+      )}
+    >
+      <div className="text-sm font-medium">{title}</div>
+      <p className="mt-1 text-xs leading-relaxed text-muted">{desc}</p>
+    </button>
+  );
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/50 p-6" onClick={onCancel}>
+      <Card className="w-full max-w-lg p-6" onClick={(e) => e.stopPropagation()} data-testid="start-dialog">
+        <div className="mb-4 text-base font-semibold">开始新周目</div>
+        <div className="flex gap-3">
+          {option('chat', '自由对话', '你扮演主角，和角色们你一言我一语地推进故事。')}
+          {option('observer', '观察模式', 'AI 们自己演，故事自动展开。你可以随时下导演指令、对角色说悄悄话，或者接管一个角色。')}
+        </div>
+        {mode === 'observer' && (
+          <div className="mt-5 grid grid-cols-2 gap-4">
+            <Field label="演出方式">
+              <Select value={obs.strategy} onChange={(e) => setObs({ ...obs, strategy: e.target.value as ObserverSettings['strategy'] })}>
+                <option value="merged">合并（快、省）</option>
+                <option value="split">分演（每个角色单独演）</option>
+              </Select>
+            </Field>
+            <Field label="视角">
+              <Select value={obs.focus} onChange={(e) => setObs({ ...obs, focus: e.target.value as ObserverSettings['focus'] })}>
+                <option value="protagonist">围绕主角</option>
+                <option value="ensemble">群像</option>
+              </Select>
+            </Field>
+            <Field label="token 预算" hint={`用到 ${formatTokens(obs.budgetTokens)} 自动停下，0 表示不限`} className="col-span-2">
+              <Input
+                type="number"
+                min={0}
+                step={100000}
+                value={obs.budgetTokens}
+                onChange={(e) => setObs({ ...obs, budgetTokens: Number(e.target.value || 0) })}
+              />
+            </Field>
+            {!hasPlot && (
+              <p className="col-span-2 text-xs leading-relaxed text-warn">
+                这个世界还没有剧情骨架，导演只能自由发挥。建议先在「创世步骤」里点「继续生成」补上。
+              </p>
+            )}
+          </div>
+        )}
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel}>
+            取消
+          </Button>
+          <Button
+            variant="primary"
+            data-testid="start-confirm"
+            loading={starting}
+            onClick={() => onStart(mode === 'observer' ? { mode, observer: obs } : { mode })}
+          >
+            {mode === 'observer' ? '开始观看' : '开始'}
+          </Button>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function PlotView({ plot }: { plot: PlotOutline }) {
+  return (
+    <div className="space-y-4">
+      {plot.premise && (
+        <Card className="p-5 text-sm leading-relaxed">
+          <div className="mb-1 text-xs text-faint">核心</div>
+          {plot.premise}
+        </Card>
+      )}
+      {plot.acts.map((act) => (
+        <Card key={act.id} className="p-5">
+          <div className="mb-3 font-medium">{act.title}</div>
+          <div className="space-y-4">
+            {act.chapters.map((ch, i) => (
+              <div key={ch.id}>
+                <div className="text-sm font-medium">
+                  <span className="mr-2 text-faint">第 {i + 1} 章</span>
+                  {ch.title}
+                </div>
+                <p className="mt-0.5 text-xs text-muted">{ch.goal}</p>
+                <ul className="mt-1.5 space-y-1">
+                  {ch.beats.map((b) => (
+                    <li key={b.id} className="flex gap-2 text-sm text-muted">
+                      <span className="text-faint">·</span>
+                      {b.text}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ))}
+      {(plot.threads.length > 0 || plot.endings.length > 0) && (
+        <Card className="grid grid-cols-2 gap-6 p-5 text-sm">
+          {plot.threads.length > 0 && (
+            <div>
+              <div className="mb-1.5 text-xs text-faint">伏笔</div>
+              <ul className="space-y-1.5 text-muted">
+                {plot.threads.map((t) => (
+                  <li key={t.id}>
+                    {t.text}
+                    {t.payoff && <span className="text-faint">（回收：{t.payoff}）</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {plot.endings.length > 0 && (
+            <div>
+              <div className="mb-1.5 text-xs text-faint">可能的结局</div>
+              <ul className="space-y-1.5 text-muted">
+                {plot.endings.map((e) => (
+                  <li key={e.id}>
+                    <span className="text-fg">{e.title}</span>：{e.condition}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </Card>
+      )}
     </div>
   );
 }

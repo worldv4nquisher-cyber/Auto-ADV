@@ -7,7 +7,9 @@
 - **模型可插拔**：OpenAI 兼容接口（DeepSeek、通义千问、Kimi、OpenAI、Ollama……）优先，之后加入 Claude、Gemini 原生接口，以及可选的生图、生视频、音乐和语音模型。
 - **同人模式**：从已有作品学习，生成衍生世界。
 
-> 当前进度：**M1 首个可玩版**。输入一句话（或者什么都不写），一键生成世界简报、世界观、角色、地点、设定集和开场，然后走进去和角色们聊天：可以重抽、切换分支、编辑、回退、存档读档，对话变长后会自动整理前情提要。观察模式在 M2。
+> 当前进度：**M2 观察模式**。输入一句话（或者什么都不写），一键生成世界简报、世界观、角色、地点、剧情骨架、设定集和开场。然后可以：
+> - **自由对话**：扮演主角和角色们聊天，可以重抽、切换分支、编辑、回退、存档读档，对话变长后会自动整理前情提要；
+> - **观察模式**：只当观众，导演按剧情骨架安排每一拍，演员们自己演下去，像视觉小说一样逐字播放。你可以随时下导演指令、对某个角色说悄悄话、接管一个角色亲自演，或者暂停、调速、回退、重抽。有预算上限和安全阀，骨架演完会自动续写新篇章。
 
 ## 文档
 
@@ -45,6 +47,9 @@ pnpm cli probe --base-url https://api.deepseek.com/v1 --key sk-... --model deeps
 pnpm cli chat  --base-url https://api.deepseek.com/v1 --key sk-... --model deepseek-chat "你好"
 # 不开界面跑一遍一键创世，打印生成的世界、调用次数和用量（调提示词用）
 pnpm cli genesis --base-url https://api.deepseek.com/v1 --key sk-... --model deepseek-chat --probe "雾中的灯塔"
+# 无人值守跑观察模式：生成世界后自动演 30 拍，打印质量报告（重复、停滞、剧情推进、用量），并写出带导演笔记的全文记录
+pnpm cli observe --base-url https://api.deepseek.com/v1 --key sk-... --model deepseek-chat --beats 30 "雾中的灯塔"
+pnpm cli observe --mock --beats 20     # 用内置模拟服务走一遍流程，不需要 API Key
 ```
 
 端到端测试会真正启动应用并走一遍完整流程（需要先 `pnpm build`；Linux 无显示环境用 `xvfb-run -a`）：
@@ -60,5 +65,5 @@ apps/desktop      Electron 应用：主进程、预加载脚本、引擎进程�
 apps/cli          命令行工具
 packages/schema   原生格式与设置的 Zod 定义
 packages/providers 模型接入层：OpenAI 兼容客户端、能力探测、计费、模拟服务
-packages/engine   核心引擎：模型网关、世界文件夹、创世管线、对话运行时（事件树、记忆）、调用日志、RPC
+packages/engine   核心引擎：模型网关、世界文件夹、创世管线、游玩运行时（事件树、记忆、观察模式的导演和演员）、调用日志、RPC
 ```

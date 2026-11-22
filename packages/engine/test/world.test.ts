@@ -74,6 +74,14 @@ describe('一键创世', () => {
     expect(w.opening?.presentCharacterIds).toEqual(['char_02']);
     expect(w.opening?.lines[0]?.characterId).toBe('char_02');
     expect(w.worldview).toContain('## 当前局势');
+    // 剧情骨架：章节和节拍都有稳定的 id，开场提示词里带上了第一章
+    const act = w.plot?.acts[0];
+    expect(act?.id).toBe('act_01');
+    expect(act?.chapters.map((c) => c.id)).toEqual(['ch_01_01', 'ch_01_02', 'ch_01_03']);
+    expect(act?.chapters[0]?.beats.map((b) => b.id)).toEqual(['b_01_01_01', 'b_01_01_02', 'b_01_01_03']);
+    expect(w.plot?.endings[0]?.id).toBe('end_01');
+    const openingReq = server.requests.find((r) => JSON.stringify(r).includes('story_opening'));
+    expect(JSON.stringify(openingReq)).toContain('归乡');
 
     const worldDir = path.join(dir, 'worlds', summary.id);
     const manifest = JSON.parse(await readFile(path.join(worldDir, 'world.json'), 'utf8'));
@@ -84,7 +92,15 @@ describe('一键创世', () => {
     const logs = await client.call('listCalls', {});
     const tags = new Set(logs.items.map((c) => c.tag));
     expect(tags).toEqual(
-      new Set(['genesis.brief', 'genesis.worldview', 'genesis.cast', 'genesis.locations', 'genesis.lore', 'genesis.opening']),
+      new Set([
+        'genesis.brief',
+        'genesis.worldview',
+        'genesis.cast',
+        'genesis.locations',
+        'genesis.plot',
+        'genesis.lore',
+        'genesis.opening',
+      ]),
     );
     expect(logs.items.every((c) => c.role === 'worldgen')).toBe(true);
 
@@ -107,12 +123,12 @@ describe('一键创世', () => {
     const before = server.requests.length;
     const resumed = await client.stream('runGenesis', { worldId: summary.id }, () => {});
     expect(resumed.status).toBe('ready');
-    expect(server.requests.length - before).toBe(3); // cast、lore、opening
+    expect(server.requests.length - before).toBe(4); // cast、plot、lore、opening
 
     const before2 = server.requests.length;
     const rerun = await client.stream('runGenesis', { worldId: summary.id, from: 'locations' }, () => {});
     expect(rerun.status).toBe('ready');
-    expect(server.requests.length - before2).toBe(3); // locations、lore、opening
+    expect(server.requests.length - before2).toBe(4); // locations、plot、lore、opening
   });
 
   it('中途取消后状态保留，之后可以续跑', async () => {

@@ -1,7 +1,8 @@
 /**
  * 端到端冒烟测试：真正启动 Electron 应用，连一个本地模拟的 OpenAI 兼容服务，走一遍完整流程：
  * 添加接入点 → 拉取模型 → 能力探测 → 设置职责路由 → 调试台对话 → 查看调用日志（M0）
- * → 一键创世 → 开始周目 → 对话 → 重抽 / 切换分支 → 存档 → 继续 → 读档（M1）。
+ * → 一键创世 → 开始周目 → 对话 → 重抽 / 切换分支 → 存档 → 继续 → 读档（M1）
+ * → 观察模式：自动演出 → 导演指令 → 暂停 → 接管角色 → 交还（M2）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
@@ -133,16 +134,21 @@ try {
   });
   await shot(page, '08-genesis-running');
   await page.waitForSelector('[data-step="opening"][data-status="done"]', { timeout: 60_000 });
+  assert.equal(await page.getAttribute('[data-step="plot"]', 'data-status'), 'done');
   await page.waitForSelector('[data-testid="start-play"]:not([disabled])');
   await page.waitForSelector('text=雾港谜灯');
   step('一键创世完成：雾港谜灯');
   await page.click('button:has-text("角色") >> nth=0');
   await page.waitForSelector('text=主角（你）');
   await shot(page, '09-world-characters');
+  await page.click('button:has-text("剧情骨架")');
+  await page.waitForSelector('text=第 1 章');
+  await shot(page, '09b-world-plot');
   await page.click('button:has-text("概览")');
 
   // ── 游玩：对话、重抽、分支
   await page.click('[data-testid="start-play"]');
+  await page.click('[data-testid="start-confirm"]');
   await page.waitForSelector('[data-testid="play-event"][data-kind="opening"]');
   await page.fill('[data-testid="play-input"]', '灯塔是谁点亮的？');
   await page.click('[data-testid="play-send"]');
@@ -175,6 +181,66 @@ try {
     () => document.querySelectorAll('[data-testid="play-event"][data-kind="ai"]').length === 1,
   );
   step('存档、继续、读档正常');
+
+  // ── 观察模式：AI 自己演
+  await page.click('button:has-text("‹ 雾港谜灯")');
+  await page.click('[data-testid="start-play"]');
+  await page.click('[data-testid="mode-observer"]');
+  await shot(page, '11-start-observer');
+  await page.click('[data-testid="start-confirm"]');
+  await page.waitForSelector('[data-testid="observe-stopped"]');
+  await page.selectOption('[data-testid="observe-speed"]', '1');
+  await page.click('[data-testid="observe-play"]');
+  // 1 倍速：像视觉小说一样逐字播放
+  await page.waitForSelector('[data-testid="observe-current"]', { timeout: 60_000 });
+  await shot(page, '11b-observer-typing');
+  await page.selectOption('[data-testid="observe-speed"]', '0'); // 即时，不等打字
+  const aiCount = () => page.$$eval('[data-testid="play-event"][data-kind="ai"]', (els) => els.length);
+  await page.waitForFunction(
+    () => document.querySelectorAll('[data-testid="play-event"][data-kind="ai"]').length >= 2,
+    undefined,
+    { timeout: 60_000 },
+  );
+  const plotText = (await page.textContent('[data-testid="observe-plot"]')) ?? '';
+  assert.match(plotText, /[1-9]\d*\/\d+ 个节拍/, `剧情进度应该在推进：${plotText}`);
+  step('观察模式自动演出，剧情骨架在推进');
+
+  await page.fill('[data-testid="observe-input"]', '让白鸦突然出现');
+  await page.click('[data-testid="observe-send"]');
+  await page.waitForSelector('[data-testid="play-event"][data-kind="directive"]', { timeout: 60_000 });
+  await page.waitForFunction(
+    () => {
+      const kinds = [...document.querySelectorAll('[data-testid="play-event"]')].map((e) => e.getAttribute('data-kind'));
+      return kinds.lastIndexOf('ai') > kinds.indexOf('directive');
+    },
+    undefined,
+    { timeout: 60_000 },
+  );
+  step('导演指令写进故事，之后继续演出');
+  await shot(page, '12-observer');
+
+  await page.click('[data-testid="observe-toggle"]');
+  await page.waitForSelector('[data-testid="observe-status"][data-activity="idle"]', { timeout: 30_000 });
+  step('暂停自动演出');
+
+  await page.click('[data-testid="takeover"] >> nth=1');
+  await page.waitForSelector('[data-testid="handback"]');
+  const before = await aiCount();
+  await page.fill('[data-testid="observe-input"]', '其实我一直在等你回来');
+  await page.click('[data-testid="observe-send"]');
+  await page.waitForSelector('[data-testid="play-event"][data-kind="player"] >> text=其实我一直在等你回来', {
+    timeout: 30_000,
+  });
+  await page.waitForFunction((n) => document.querySelectorAll('[data-testid="play-event"][data-kind="ai"]').length > n, before, {
+    timeout: 30_000,
+  });
+  await shot(page, '13-takeover');
+  await page.click('[data-testid="handback"]');
+  await page.waitForFunction((n) => document.querySelectorAll('[data-testid="play-event"][data-kind="ai"]').length > n + 1, before, {
+    timeout: 60_000,
+  });
+  await page.click('[data-testid="observe-toggle"]');
+  step('接管角色说话，交还后继续自动演出');
 
   // ── 世界文件夹
   const worlds = await readdir(path.join(dataDir, 'worlds'));

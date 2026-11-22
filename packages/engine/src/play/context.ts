@@ -25,9 +25,13 @@ export function sceneAt(path: PlayEvent[]): SceneState {
   return { locationId: null, presentCharacterIds: [] };
 }
 
-export function eventText(e: PlayEvent, protagonistName: string): string {
-  if (e.kind === 'player') return `${protagonistName}：${e.text ?? ''}`;
-  if (e.kind === 'scene') return '';
+/** 事件的纯文本（给模型看的记录）。world 用于把玩家事件里的角色 id 换成名字。 */
+export function eventText(e: PlayEvent, protagonistName: string, world?: WorldData): string {
+  if (e.kind === 'player') {
+    const who = (e.characterId && world?.characters.find((c) => c.id === e.characterId)?.name) || protagonistName;
+    return `${who}：${e.text ?? ''}`;
+  }
+  if (e.kind === 'scene' || e.kind === 'directive' || e.kind === 'whisper') return '';
   return (e.segments ?? []).map((s: Segment) => (s.kind === 'line' ? `${s.name}：${s.text}` : s.text)).join('\n');
 }
 
@@ -105,7 +109,25 @@ export function systemPrompt(p: BuildContextParams): string {
   return parts.join('\n\n');
 }
 
-function sceneNote(world: WorldData, s: SceneState): string {
+/** 一组事件的文字记录（含换场景、时间推进），给导演和书记看。 */
+export function transcriptOf(world: WorldData, events: PlayEvent[], protagonistName: string): string {
+  return events
+    .map((e) => {
+      if (e.kind === 'scene' && e.scene) return sceneNote(world, e.scene);
+      const head = [
+        e.beat?.time ? `［时间］${e.beat.time}` : '',
+        e.kind === 'ai' && e.scene ? sceneNote(world, e.scene) : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
+      const body = eventText(e, protagonistName, world);
+      return [head, body].filter(Boolean).join('\n');
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+export function sceneNote(world: WorldData, s: SceneState): string {
   const loc = world.locations.find((l) => l.id === s.locationId)?.name ?? '未指定';
   const names = world.characters.filter((c) => s.presentCharacterIds.includes(c.id)).map((c) => c.name);
   return `［场景切换］地点：${loc}；在场：${names.join('、') || '无'}`;
@@ -136,7 +158,7 @@ export function buildMessages(p: BuildContextParams): ChatMessage[] {
   let used = 0;
   let start = history.length;
   while (start > 0) {
-    const size = eventText(history[start - 1] as PlayEvent, pName).length;
+    const size = eventText(history[start - 1] as PlayEvent, pName, p.world).length;
     if (used + size > BUDGET.history && history.length - start >= 2) break;
     used += size;
     start--;
@@ -146,12 +168,16 @@ export function buildMessages(p: BuildContextParams): ChatMessage[] {
   const messages: ChatMessage[] = [{ role: 'system', content: systemPrompt(p) }];
   messages.push({ role: 'user', content: start > 0 || p.memory ? '（接着前情提要继续）' : '（故事开始）' });
   for (const e of kept) {
-    if (e.kind === 'player') messages.push({ role: 'user', content: e.text ?? '' });
+    if (e.kind === 'player') {
+      // 接管过别的角色时，标明是谁说的
+      const other = e.characterId && e.characterId !== p.protagonist?.id;
+      messages.push({ role: 'user', content: other ? eventText(e, pName, p.world) : (e.text ?? '') });
+    }
     else if (e.kind === 'scene' && e.scene) messages.push({ role: 'user', content: sceneNote(p.world, e.scene) });
     else if (e.segments?.length) messages.push({ role: 'assistant', content: segmentsToText(e.segments) });
   }
 
-  const recent = [...kept.slice(-4), ...(pending ? [pending] : [])].map((e) => eventText(e, pName)).join('\n');
+  const recent = [...kept.slice(-4), ...(pending ? [pending] : [])].map((e) => eventText(e, pName, p.world)).join('\n');
   const lore = selectLore(p.world.lore, recent);
   const finalParts: string[] = [];
   if (lore.length) finalParts.push(`［相关设定，供参考］\n${lore.map((e) => `- ${e.title}：${e.content}`).join('\n')}`);
@@ -163,10 +189,7 @@ export function buildMessages(p: BuildContextParams): ChatMessage[] {
 
 export function summaryPrompt(world: WorldData, protagonist: Character | null, previous: string | null, events: PlayEvent[]) {
   const pName = protagonist?.name ?? '主角';
-  const transcript = events
-    .map((e) => (e.kind === 'scene' && e.scene ? sceneNote(world, e.scene) : eventText(e, pName)))
-    .filter(Boolean)
-    .join('\n');
+  const transcript = transcriptOf(world, events, pName);
   const system = '你是互动故事的书记员，负责整理「前情提要」，让后续的写作保持连贯。只根据给出的内容整理，不要编造。';
   const user = `# 角色
 ${world.characters.map((c) => `- ${c.name}${c.id === protagonist?.id ? '（玩家扮演的主角）' : ''}`).join('\n')}

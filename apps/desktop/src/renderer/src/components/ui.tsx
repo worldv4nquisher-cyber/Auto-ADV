@@ -1,11 +1,11 @@
 import {
   type ButtonHTMLAttributes,
+  type ComponentProps,
   createContext,
   type HTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
   type SelectHTMLAttributes,
-  type TextareaHTMLAttributes,
   useCallback,
   useContext,
   useEffect,
@@ -60,7 +60,7 @@ export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputEleme
   return <input className={cx(fieldBase, 'h-9', className)} {...rest} />;
 }
 
-export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+export function Textarea({ className, ...rest }: ComponentProps<'textarea'>) {
   return <textarea className={cx(fieldBase, 'py-2 leading-relaxed', className)} {...rest} />;
 }
 

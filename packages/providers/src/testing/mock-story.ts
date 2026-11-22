@@ -34,6 +34,79 @@ export function schemaNameOf(body: Record<string, unknown>, messages: MockMessag
   return null;
 }
 
+/** 模拟的演出素材：按请求序号轮换，让相邻几拍的文字不一样（重复检测不会误报）。 */
+const NARRATION = [
+  '雾从海面上漫过来，煤气灯的光晕被揉成一团团昏黄。',
+  '码头上的木板吱呀作响，有人在远处收起了渔网。',
+  '一阵冷风灌进门缝，桌上的蜡烛晃了晃，差点熄灭。',
+  '钟楼敲了十一下，声音在湿漉漉的石板路上滚出很远。',
+  '酒馆里的喧闹忽然低了下去，几个水手交换了一下眼色。',
+  '灯塔的光扫过窗户，在墙上留下一道转瞬即逝的白痕。',
+  '档案馆的书架之间弥漫着纸张发霉的气味，脚步声被吸得很轻。',
+  '潮水退了，礁石上露出一串新鲜的脚印，一直通向灯塔。',
+];
+const ACTIONS = ['压低声音', '把杯子推到一边', '盯着窗外', '从怀里掏出一张旧照片', '笑了一下', '停下脚步', '摸了摸口袋里的钥匙', '回头看了一眼'];
+const LINES = [
+  '昨晚我又看见那道光了，比上次亮。',
+  '守灯人的日志少了最后三页，你知道是谁拿走的吗？',
+  '港务局的人今天来过，问了很多奇怪的问题。',
+  '别在雾潮之夜靠近礁石，这是老规矩。',
+  '我答应过你父亲，要替他守住这件事。',
+  '如果你真想知道，明晚跟我去档案馆。',
+  '有人在灯塔的铁门上换了一把新锁。',
+  '那艘没有名字的船，又在港外停了一夜。',
+];
+const pick = <T>(arr: T[], i: number): T => arr[((i % arr.length) + arr.length) % arr.length] as T;
+
+/** 从提示词里抠出 "## 名字" 形式的角色列表（某个标题之下）。 */
+function namesUnder(text: string, heading: string): string[] {
+  const at = text.indexOf(`# ${heading}`);
+  if (at < 0) return [];
+  const block = text.slice(at).split(/\n# /)[0] ?? '';
+  return [...block.matchAll(/^## ([^\s（\n]+)/gm)].map((m) => m[1] as string);
+}
+
+function directorPlan(user: string, count: number): string {
+  const now = /# 现在\n地点：([^；\n]*)；在场：([^；\n]*)/.exec(user);
+  const allNames = namesUnder(user, '角色（全部信息，包括秘密）');
+  let present = (now?.[2] ?? '').split('、').filter((n) => n && n !== '无');
+  if (!present.length) present = allNames.slice(0, 2);
+  // 每隔几拍让一个没在场的角色登场
+  const absent = allNames.filter((n) => !present.includes(n));
+  if (count % 4 === 0 && absent[0]) present = [...present, absent[0]];
+  const locBlock = user.slice(user.indexOf('# 地点')).split(/\n# /)[0] ?? '';
+  const locations = [...locBlock.matchAll(/^- ([^：\n]+)：/gm)].map((m) => m[1] as string);
+  const here = now?.[1] && now[1] !== '未指定' ? now[1] : (locations[0] ?? '');
+  const location = count % 5 === 0 && locations.length > 1 ? pick(locations.filter((l) => l !== here), count) : here;
+
+  // 当前章节第一个没完成的节拍
+  const chapter = /当前章节：\[(\w+)\]/.exec(user)?.[1];
+  let beat: string | undefined;
+  if (chapter) {
+    const block = user.slice(user.indexOf(`### [${chapter}]`)).split(/\n###? /)[0] ?? '';
+    beat = /- \[ \] (\w+)：/.exec(block)?.[1];
+  }
+  const directive = /# 观众的导演指令（尽量满足）\n- (.+)/.exec(user)?.[1];
+  const card = /事件卡来打破僵局：「(.+?)」/.exec(user)?.[1];
+  const plan = directive
+    ? `按观众的要求：${directive}`
+    : card
+      ? `用事件卡打破僵局：${card}`
+      : `（模拟导演 #${count}）${present[0] ?? '众人'}和${present[1] ?? '自己'}围绕灯塔的线索交换情报，气氛逐渐紧张。`;
+  // 轮流让不同的人开口
+  const order = [...present.slice(count % Math.max(1, present.length)), ...present.slice(0, count % Math.max(1, present.length))];
+  const speakers = order.slice(0, 2).map((name, i) => ({ name, intent: i ? '回应，但有所保留' : '抛出新线索' }));
+  return JSON.stringify({
+    plan,
+    location,
+    present,
+    time: count % 3 === 0 ? `第 ${Math.ceil(count / 3)} 天夜里` : '',
+    speakers,
+    completeBeats: beat ? [beat] : [],
+    reveals: count % 6 === 0 && present.length >= 2 ? [{ owner: present[1], to: [present[0]] }] : [],
+  });
+}
+
 /** 返回 undefined 表示不是故事相关的请求。 */
 export function storyReply(info: MockRequestInfo): string | undefined {
   const system = info.messages.find((m) => m.role === 'system')?.content ?? '';
@@ -105,6 +178,38 @@ export function storyReply(info: MockRequestInfo): string | undefined {
           { title: '守灯人', category: '历史', content: '灯塔最后一任守灯人十年前失踪，留下一本残缺的日志。', keys: ['守灯人', '日志'] },
         ],
       });
+    case 'plot_outline': {
+      // 观察模式续写新篇章时，系统提示是导演
+      const sequel = system.includes('导演') ? `续篇 ${info.count}：` : '';
+      const chapter = (i: number, title: string, goal: string) => ({
+        title: `${sequel}${title}`,
+        goal,
+        beats: [`${title}：发现异常`, `${title}：追查线索`, `${title}：真相的一角`].slice(0, i === 2 ? 2 : 3),
+      });
+      return JSON.stringify({
+        premise: '灯塔重新亮起，牵出十年前守灯人失踪的真相，以及整个雾港守护的秘密。',
+        arcTitle: sequel ? `${sequel}新的潮汐` : '第一篇章：午夜灯光',
+        chapters: [
+          chapter(0, '归乡', '主角回到雾港，察觉所有人都在隐瞒灯塔的事'),
+          chapter(1, '暗流', '主角找到守灯人日志的线索，引起港务局的警觉'),
+          chapter(2, '雾潮之夜', '在雾潮之夜登上灯塔，直面真相'),
+        ],
+        endings: [
+          { title: '守望', condition: '主角选择留下，成为新的守灯人' },
+          { title: '离港', condition: '主角公开真相后离开雾港' },
+        ],
+        threads: [{ text: '日志缺失的最后三页', payoff: '在灯塔顶层找到' }],
+      });
+    }
+    case 'director_plan':
+      return directorPlan(lastUser, info.count);
+    case 'story_memory': {
+      const names = [...firstUser.slice(0, firstUser.indexOf('# 之前的前情提要')).matchAll(/^- (\S+)/gm)].map((m) => m[1]);
+      return JSON.stringify({
+        summary: `前情提要：众人围绕灯塔的线索各怀心事。（模拟记忆 #${info.count}）`,
+        characters: names.map((name) => ({ name, knows: `${name}记得最近发生的几件事（模拟 #${info.count}）` })),
+      });
+    }
     case 'story_opening': {
       const loc = /# 地点\n- ([^：\n]+)：/.exec(firstUser)?.[1] ?? LOCATIONS[0]?.name;
       const first = /# 其他角色\n## ([^\s（\n]+)/.exec(firstUser)?.[1] ?? '林夕';
@@ -134,6 +239,28 @@ export function storyReply(info: MockRequestInfo): string | undefined {
 
   if (system.includes('书记员')) {
     return `前情提要：主角回到雾港，与在场的人谈起了灯塔。（模拟摘要 #${info.count}）`;
+  }
+
+  // 观察模式：合并模式的编剧（一次写出整拍）。每拍大约两次请求，按拍数轮换素材
+  if (system.includes('演员兼旁白') && system.includes('没有玩家')) {
+    const present = namesUnder(system, '在场角色');
+    const n = Math.floor(info.count / 2);
+    const a = present[n % Math.max(1, present.length)] ?? '林夕';
+    const b = present[(n + 1) % Math.max(1, present.length)] ?? a;
+    return [
+      pick(NARRATION, n),
+      `【${a}】（${pick(ACTIONS, n)}）${pick(LINES, n)}`,
+      `【${b}】（${pick(ACTIONS, n + 3)}）${pick(LINES, n + 5)}`,
+    ].join('\n');
+  }
+
+  // 观察模式：分演模式的旁白和演员
+  if (system.startsWith('你是互动故事的旁白')) {
+    return pick(NARRATION, Math.floor(info.count / 3));
+  }
+  const actor = /^你是演员，在一部互动故事里扮演「(.+?)」/.exec(system)?.[1];
+  if (actor) {
+    return `（${pick(ACTIONS, info.count)}）${pick(LINES, info.count)}`;
   }
 
   if (system.includes('演员兼旁白')) {
