@@ -28,6 +28,8 @@ export interface MockServerOptions {
   chunkDelayMs?: number;
   /** 在正文前输出的推理内容（模拟 DeepSeek 的 reasoning_content）。 */
   reasoning?: string;
+  /** 把推理写进正文开头的 <think>…</think>（模拟 MiniMax M2 / M3 等模型）。 */
+  thinkInContent?: boolean;
   /** 自定义回复；返回 undefined 时走内置逻辑（故事模型 → 默认回复）。 */
   reply?: (lastUserMessage: string, info: MockRequestInfo) => string | undefined;
   /** 内置的故事模型（认出创世和游玩请求并返回固定内容），默认开启。 */
@@ -134,7 +136,11 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
       } else {
         text = defaultReply(lastUser);
       }
-      const reasoning = opts.reasoning ?? '';
+      let reasoning = opts.reasoning ?? '';
+      if (opts.thinkInContent && !toolCall) {
+        text = `<think>${reasoning || '先想一想。'}</think>\n\n${text}`;
+        reasoning = '';
+      }
       const model = String(body.model ?? 'mock-chat');
       const promptTokens = messages.reduce((s, m) => s + [...String(m.content)].length, 0);
       const usage = {

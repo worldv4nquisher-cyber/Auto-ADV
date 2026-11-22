@@ -204,6 +204,12 @@ describe('probeCapabilities', () => {
     expect(steps).toEqual(['chat:true', 'streaming:true', 'jsonSchema:false', 'jsonObject:true', 'tools:false']);
   });
 
+  it('正文开头带 <think> 的模型也能认出 JSON 模式', async () => {
+    const { client } = await setup({ jsonSchema: false, thinkInContent: true });
+    const caps = await probeCapabilities(client, 'mock-chat');
+    expect(caps).toMatchObject({ jsonSchema: false, jsonObject: true });
+  });
+
   it('基础对话失败时直接报错', async () => {
     server = await startMockServer({ apiKey: 'right' });
     const client = new OpenAICompatibleClient({ baseURL: server.baseURL, apiKey: 'wrong', maxRetries: 0 });
