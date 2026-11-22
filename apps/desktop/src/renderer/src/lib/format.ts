@@ -39,10 +39,16 @@ const TAG_NAMES: Record<string, string> = {
   'genesis.worldview': '创世 · 世界观',
   'genesis.cast': '创世 · 角色',
   'genesis.locations': '创世 · 地点',
+  'genesis.plot': '创世 · 剧情骨架',
   'genesis.lore': '创世 · 设定集',
   'genesis.opening': '创世 · 开场',
   'play.reply': '对话 · 回复',
   'play.memory': '对话 · 前情提要',
+  'observer.director': '观察 · 导演',
+  'observer.writer': '观察 · 演出',
+  'observer.narrator': '观察 · 旁白',
+  'observer.actor': '观察 · 演员',
+  'observer.arc': '观察 · 续写篇章',
 };
 
 /** 调用用途的显示名。 */

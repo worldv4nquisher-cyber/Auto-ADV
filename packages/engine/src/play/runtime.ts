@@ -520,7 +520,7 @@ export class PlayService {
       readId,
       ahead,
       queued: pt.data.pending?.length ?? 0,
-      budget: { cost: totalCost(u), tokens: u.inputTokens + u.outputTokens },
+      budget: { cost: totalCost(u), tokens: u.inputTokens + u.outputTokens, calls: u.calls },
     };
   }
 

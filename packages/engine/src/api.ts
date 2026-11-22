@@ -322,7 +322,8 @@ export interface ObserverStatus {
   ahead: number;
   /** 正在生成时收到、等下一拍开始时写入的导演指令和悄悄话。 */
   queued: number;
-  budget: { cost: number; tokens: number };
+  /** 这个周目到目前为止的用量（预算按它算）。 */
+  budget: { cost: number; tokens: number; calls: number };
 }
 
 export interface PlayView {

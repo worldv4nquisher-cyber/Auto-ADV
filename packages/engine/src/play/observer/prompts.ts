@@ -110,7 +110,13 @@ export function directorPrompt(p: DirectorInput): string {
 
 // ───────────── 合并模式：一次写出整拍 ─────────────
 
-export function writerSystem(world: WorldData, state: StoryState, memory: string | null, knowledge: Record<string, string>) {
+export function writerSystem(
+  world: WorldData,
+  state: StoryState,
+  memory: string | null,
+  knowledge: Record<string, string>,
+  pName = '主角',
+) {
   const location = world.locations.find((l) => l.id === state.scene.locationId);
   const present = world.characters.filter((c) => state.scene.presentCharacterIds.includes(c.id));
   const absent = world.characters.filter((c) => !state.scene.presentCharacterIds.includes(c.id));
@@ -119,7 +125,7 @@ export function writerSystem(world: WorldData, state: StoryState, memory: string
 
 # 输出格式（必须严格遵守）
 - 角色说话：单独一行，以【角色名】开头，动作和神态写在台词前的括号里。例如：【${present[0]?.name ?? '角色名'}】（抬起头）你来晚了。
-- 旁白：不带任何前缀的行，用第三人称。
+- 旁白：不带任何前缀的行，用第三人称（开场里如果有「你」，指的是${pName}）。
 - 200～400 字，把导演安排的这一拍完整演出来，然后停下。
 - 角色只能说出他们知道的事；秘密要藏在言行的细节里，导演没安排揭开就不要说破。
 - 不要重复之前说过的话，不要写任何说明、标题或括号外的旁注。`,
@@ -167,7 +173,7 @@ export function writerMessages(
     .filter(Boolean)
     .join('\n\n');
   return [
-    { role: 'system', content: writerSystem(world, state, memory, knowledge) },
+    { role: 'system', content: writerSystem(world, state, memory, knowledge, pName) },
     { role: 'user', content: user },
   ];
 }

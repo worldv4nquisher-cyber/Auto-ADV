@@ -153,6 +153,8 @@ class Runner {
         this.beatTimes.push(Date.now());
         this.failures = 0;
         this.lastError = null;
+        // 用量和缓冲变了
+        this.broadcast();
       } catch (err) {
         if (ctrl.signal.aborted || isAbort(err)) continue;
         this.failures++;
