@@ -38,7 +38,7 @@
 ## M2 观察模式（Auto 核心）✅
 
 > 已完成。具体做法见 [ARCHITECTURE.md 第 15 节](./ARCHITECTURE.md#15-m2-实现备注)。命令行 `pnpm cli observe` 可以无人值守跑 N 拍并打印质量报告（`--mock` 不需要 API Key）。
-> 一小时验收需要用真实模型跑（`pnpm cli observe --beats 100 ...` 或在应用里放着），模拟服务只能证明流程走得通。
+> 2026-11-22 用真实模型（MiniMax-M3.1-Flash）短测 25 拍通过，结果和发现的问题见 ARCHITECTURE.md 第 15 节末尾。一小时长测（`pnpm cli observe --beats 100 ...`）留到正式版发布前再做。
 > 推迟到后面的：观察模式的 VN 舞台呈现（M3）；"倍速"目前是阅读速度，生成速度由预生成缓冲和每分钟上限控制。
 
 - 导演 / 演员 / 旁白 / 书记；合并模式与分演模式
