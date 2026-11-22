@@ -22,6 +22,8 @@ const MAX_TOKENS = 512;
 
 function tryParseObject(text: string): Record<string, unknown> | null {
   const trimmed = text
+    // 部分模型（如 MiniMax M2 / M3）把推理写在正文开头的 <think>…</think> 里
+    .replace(/^\s*<think>[\s\S]*?<\/think>/, '')
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
     .replace(/```$/, '')
