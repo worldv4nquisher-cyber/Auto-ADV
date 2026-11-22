@@ -93,9 +93,11 @@ export function validatePlan(world: WorldData, state: StoryState, plan: Director
       rejected.push(`「${r.owner}」没有可以揭开的秘密`);
       continue;
     }
+    // 已经知道的人不再算一次揭开（真实模型常把同一个秘密每拍都报一遍）
+    const known = state.reveals.get(owner.id);
     const to = r.to.flatMap((n) => {
       const c = matchByName(n, world.characters);
-      return c && c.id !== owner.id ? [c.id] : [];
+      return c && c.id !== owner.id && !known?.has(c.id) ? [c.id] : [];
     });
     if (to.length) reveals.push({ characterId: owner.id, to: [...new Set(to)] });
   }
