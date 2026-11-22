@@ -24,6 +24,8 @@ export interface ScriptOptions {
 
 const TAGGED = /^\s*[【[［]([^】\]］\n]{1,24})[】\]］]\s*(.*)$/;
 const COLON = /^\s*([^\s：:「」【】()（）]{1,12})\s*[：:]\s*(.+)$/;
+/** 有的模型会给旁白也加前缀：「旁白：……」或「【旁白】……」。 */
+const NARRATOR = /^(?:[【[［]\s*旁白\s*[】\]］]|旁白\s*[：:])\s*/;
 
 function isProtagonist(name: string, o: ScriptOptions): boolean {
   return !!o.protagonist && !!matchByName(name, [{ name: o.protagonist.name, aliases: o.protagonist.aliases }]);
@@ -59,6 +61,14 @@ export function parseScript(text: string, o: ScriptOptions): Segment[] {
   for (const rawLine of stripThink(text).split(/\r?\n/)) {
     const line = cleanLine(rawLine);
     if (!line || /^-{3,}$/.test(line)) continue;
+    const narrator = NARRATOR.exec(line);
+    if (narrator) {
+      skipping = false;
+      pending = null;
+      const rest = line.slice(narrator[0].length).trim();
+      if (rest) out.push({ kind: 'narration', text: rest });
+      continue;
+    }
     const tagged = TAGGED.exec(line);
     const colon = tagged ? null : COLON.exec(line);
     const speakerName = tagged?.[1]?.trim() ?? (colon && matchByName(colon[1] ?? '', o.cast) ? colon[1] : undefined);

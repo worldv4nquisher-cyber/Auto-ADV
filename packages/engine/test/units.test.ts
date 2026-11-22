@@ -43,6 +43,15 @@ describe('回复解析', () => {
     ]);
   });
 
+  it('旁白带「旁白：」或【旁白】前缀时去掉前缀', () => {
+    expect(parseScript('旁白：盐阶同时震动。\n【林夕】走吧。\n【旁白】灯灭了。\n旁白:风停了。', { cast })).toEqual([
+      { kind: 'narration', text: '盐阶同时震动。' },
+      { kind: 'line', characterId: 'char_02', name: '林夕', text: '走吧。' },
+      { kind: 'narration', text: '灯灭了。' },
+      { kind: 'narration', text: '风停了。' },
+    ]);
+  });
+
   it('名字单独一行时，台词取下一行；去掉 <think>', () => {
     expect(parseScript('<think>想一想</think>\n【林夕】\n好。', { cast })).toEqual([
       { kind: 'line', characterId: 'char_02', name: '林夕', text: '好。' },
