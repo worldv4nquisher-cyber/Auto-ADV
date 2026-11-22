@@ -14,15 +14,24 @@ import type {
   LoreEntry,
   ObserverSettings,
   PlayMode,
+  PlotGraph,
   PlotOutline,
   RoleId,
   RoleRoute,
+  StageCommand,
   StoryOpening,
   StyleGuide,
+  VariableDef,
   WorldBrief,
   WorldManifest,
 } from '@auto-adv/schema';
+import type { CheckResult } from './plot/dice.ts';
+import type { VarChange } from './plot/vars.ts';
 import type { Streaming, Unary } from './rpc/index.ts';
+
+export type { CheckResult } from './plot/dice.ts';
+export type { CheckOutcome } from './plot/conditions.ts';
+export type { VarChange } from './plot/vars.ts';
 
 export interface EndpointView extends Endpoint {
   /** 是否已保存 API Key（密钥本身永远不会发给界面）。 */
@@ -162,7 +171,11 @@ export interface WorldDetail {
   characters: Character[];
   locations: Location[];
   lore: LoreEntry[];
+  /** M2 的旧骨架（观察模式在 M3 第 3 步切到剧情图之前还用它）；剧情图格式的世界为 null。 */
   plot: PlotOutline | null;
+  /** 剧情图：原生的，或者从旧骨架自动迁移来的。 */
+  graph: PlotGraph | null;
+  variables: VariableDef[];
   opening: StoryOpening | null;
 }
 
@@ -231,15 +244,55 @@ export interface BeatMeta {
   similarity?: number;
 }
 
+/** 走出口的原因：auto 条件成立、剧本 jump、玩家选项、只有一条路、演满 maxBeats 走 default、导演判断。 */
+export type ExitReason = 'auto' | 'script' | 'choice' | 'single' | 'default' | 'director';
+
+/** 一拍结束时弹出的选项（等玩家选）。 */
+export interface PlotMenu {
+  /** script：手写剧本里的 choice；exits：剧情图的岔路（选项文字来自出口的 label）。 */
+  source: 'script' | 'exits';
+  options: {
+    label: string;
+    enabled: boolean;
+    /** 锁住的原因（条件写成的一句话）。 */
+    lockedBy?: string;
+    /** 选这一项要掷骰。 */
+    check?: { var?: string; dc: number };
+  }[];
+}
+
+/** 剧情图上的进度（M3），记在 script / ai / choice 事件上，由 plot/progress.ts 折叠。 */
+export interface PlotMark {
+  /** 这个事件所在的幕。 */
+  scene: string;
+  /** 这一拍演到的要点。 */
+  points?: string[];
+  /** 这一拍的数值变化（裁决之后的结果）。 */
+  vars?: VarChange[];
+  /** 被驳回或截断的内容和理由，下一拍反馈给导演。 */
+  notes?: string[];
+  /** 手写剧本播到哪里（下一拍从这里继续；-1 表示播完了）。 */
+  pc?: number;
+  /** 这一拍结束时弹出的选项。 */
+  menu?: PlotMenu;
+  /** 走了哪个出口：之后的事件在新的幕里。 */
+  exit?: { to: string; by: ExitReason };
+  /** 这一拍达成的结局（结局幕的第一拍）。 */
+  ending?: string;
+  /** 剧情图走完了（结局幕演完）。 */
+  finished?: boolean;
+}
+
 /**
  * 事件树上的一个节点。
  * opening：开场（树根）；player：玩家的一次输入；ai：模型的一次回复（观察模式里是一拍）；scene：玩家手动换场景；
- * directive：观众给导演的指令；whisper：观众对某个角色的悄悄话。
+ * directive：观众给导演的指令；whisper：观众对某个角色的悄悄话；
+ * script：手写剧本的一拍；choice：玩家选了一个选项；check：引擎掷骰的一次检定。
  */
 export interface PlayEvent {
   id: string;
   parentId: string | null;
-  kind: 'opening' | 'player' | 'ai' | 'scene' | 'directive' | 'whisper';
+  kind: 'opening' | 'player' | 'ai' | 'scene' | 'directive' | 'whisper' | 'script' | 'choice' | 'check';
   createdAt: number;
   /** player / directive / whisper 的原文。 */
   text?: string;
@@ -254,6 +307,14 @@ export interface PlayEvent {
   /** 产生它的那次模型调用（可在调用日志里查看）。 */
   callId?: string | null;
   edited?: boolean;
+  /** 剧情图进度（M3）。 */
+  plot?: PlotMark;
+  /** script：这一拍的舞台指令（Script IR），VN 舞台按它播放；segments 是同一段内容的文本形式。 */
+  stage?: StageCommand[];
+  /** choice：选了第几项（从 0 开始）和选项文字。 */
+  choice?: { index: number; label: string };
+  /** check：检定结果。 */
+  check?: CheckResult;
 }
 
 export interface PathEvent extends PlayEvent {

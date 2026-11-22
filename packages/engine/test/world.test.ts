@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { type MockServer, type MockServerOptions, startMockServer } from '@auto-adv/providers/testing';
+import type { PlotGraph } from '@auto-adv/schema';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createPortPair,
@@ -13,6 +14,7 @@ import {
   serveRpc,
 } from '../src/index.ts';
 import { MEMORY } from '../src/play/runtime.ts';
+import { checkPlot } from '../src/plot/check.ts';
 
 let dir: string;
 let server: MockServer;
@@ -80,6 +82,17 @@ describe('一键创世', () => {
     expect(act?.chapters.map((c) => c.id)).toEqual(['ch_01_01', 'ch_01_02', 'ch_01_03']);
     expect(act?.chapters[0]?.beats.map((b) => b.id)).toEqual(['b_01_01_01', 'b_01_01_02', 'b_01_01_03']);
     expect(w.plot?.endings[0]?.id).toBe('end_01');
+    // 旧骨架读取时自动迁移成剧情图（16.7）：节拍 id 原样保留为要点 id，能通过结构检查
+    expect(w.graph?.scenes.map((s) => [s.id, s.points.map((p) => p.id), s.exits.map((e) => e.to)])).toEqual([
+      ['sc_01', ['b_01_01_01', 'b_01_01_02', 'b_01_01_03'], ['sc_02']],
+      ['sc_02', ['b_01_02_01', 'b_01_02_02', 'b_01_02_03'], ['sc_03']],
+      ['sc_03', ['b_01_03_01', 'b_01_03_02'], ['sc_04', 'sc_05']],
+      ['sc_04', [], []],
+      ['sc_05', [], []],
+    ]);
+    const check = checkPlot({ graph: w.graph as PlotGraph, variables: w.variables });
+    expect(check.ok).toBe(true);
+    expect(check.warnings.every((x) => x.message.includes('迁移来的文字'))).toBe(true);
     const openingReq = server.requests.find((r) => JSON.stringify(r).includes('story_opening'));
     expect(JSON.stringify(openingReq)).toContain('归乡');
 

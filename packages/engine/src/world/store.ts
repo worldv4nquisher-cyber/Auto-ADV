@@ -2,12 +2,17 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   Character,
+  isPlotGraph,
   Location,
   LoreEntry,
   migrate,
+  migratePlotOutline,
+  PlotGraph,
   PlotOutline,
   StoryOpening,
   StyleGuide,
+  type VariableDef,
+  VariablesFile,
   WorldBrief,
   WorldManifest,
 } from '@auto-adv/schema';
@@ -23,7 +28,14 @@ export interface WorldData {
   characters: Character[];
   locations: Location[];
   lore: LoreEntry[];
+  /** M2 的旧骨架：观察模式在 M3 第 3 步切到剧情图之前还用它。outline.json 已经是剧情图时为 null。 */
   plot: PlotOutline | null;
+  /** 剧情图：原生的，或者从旧骨架自动迁移来的（16.7，只在内存里迁移，不改文件）。 */
+  graph: PlotGraph | null;
+  /** systems/variables.json */
+  variables: VariableDef[];
+  /** 手写剧本：幕 id → plot/scenes/ 下 .adv 文件的原文。 */
+  scripts: Record<string, string>;
   opening: StoryOpening | null;
 }
 
@@ -145,20 +157,59 @@ export class WorldStore {
   // ───────────── 内容 ─────────────
 
   async load(id: string): Promise<WorldData> {
-    const [manifest, brief, style, worldview, characters, locations, lore, plot, opening] = await Promise.all([
-      this.getManifest(id),
-      this.read(this.file(id, 'brief.json'), WorldBrief),
-      this.read(this.file(id, 'style', 'style.json'), StyleGuide),
-      this.readWorldview(id),
-      this.readDir(this.file(id, 'characters'), Character, 'character.json'),
-      this.readDir(this.file(id, 'locations'), Location),
-      this.readDir(this.file(id, 'setting', 'lore'), LoreEntry),
-      this.read(this.file(id, 'plot', 'outline.json'), PlotOutline),
-      this.read(this.file(id, 'story', 'opening.json'), StoryOpening),
-    ]);
+    const [manifest, brief, style, worldview, characters, locations, lore, outline, variables, opening] =
+      await Promise.all([
+        this.getManifest(id),
+        this.read(this.file(id, 'brief.json'), WorldBrief),
+        this.read(this.file(id, 'style', 'style.json'), StyleGuide),
+        this.readWorldview(id),
+        this.readDir(this.file(id, 'characters'), Character, 'character.json'),
+        this.readDir(this.file(id, 'locations'), Location),
+        this.readDir(this.file(id, 'setting', 'lore'), LoreEntry),
+        this.readOutline(id),
+        this.read(this.file(id, 'systems', 'variables.json'), VariablesFile),
+        this.read(this.file(id, 'story', 'opening.json'), StoryOpening),
+      ]);
     // 角色按创建顺序（id 里带序号），主角排第一
     characters.sort((a, b) => Number(b.role === 'protagonist') - Number(a.role === 'protagonist'));
-    return { manifest, brief, style, worldview, characters, locations, lore, plot, opening };
+    const scripts = outline.graph ? await this.readScripts(id, outline.graph) : {};
+    return {
+      manifest,
+      brief,
+      style,
+      worldview,
+      characters,
+      locations,
+      lore,
+      plot: outline.plot,
+      graph: outline.graph,
+      variables: variables?.variables ?? [],
+      scripts,
+      opening,
+    };
+  }
+
+  /** plot/outline.json：按结构区分剧情图和 M2 的旧骨架，旧骨架同时给出迁移后的剧情图。 */
+  private async readOutline(id: string): Promise<{ plot: PlotOutline | null; graph: PlotGraph | null }> {
+    const raw = await readJsonFile(this.file(id, 'plot', 'outline.json'));
+    if (raw === undefined) return { plot: null, graph: null };
+    const data = migrate(raw);
+    if (isPlotGraph(data)) return { plot: null, graph: PlotGraph.parse(data) };
+    const plot = PlotOutline.parse(data);
+    return { plot, graph: migratePlotOutline(plot) };
+  }
+
+  /** plot/scenes/ 下的手写剧本：幕的 script 字段指定的文件，没指定就找 <幕 id>.adv。 */
+  private async readScripts(id: string, graph: PlotGraph): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    for (const s of graph.scenes) {
+      try {
+        out[s.id] = await fs.readFile(this.file(id, 'plot', 'scenes', s.script ?? `${s.id}.adv`), 'utf8');
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+    return out;
   }
 
   async readWorldview(id: string): Promise<string> {
