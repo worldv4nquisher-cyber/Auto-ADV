@@ -66,6 +66,7 @@ describe('舞台时间线', () => {
     // 检定单独一步
     const check = t.steps.find((s) => s.kind === 'check');
     expect(check?.check?.label).toBe('研究门锁的机关');
+    expect(check?.scene).toBe('sc_02'); // 检定结果显示时还在这一幕，结果决定的下一幕还没到
     expect(t.backlog.some((b) => b.kind === 'check')).toBe(true);
     // 第二幕的标题卡；bg 换背景时清场，show 写了 left 就站左边
     const card = t.steps.find((s) => s.card?.title === '旧书库的门');

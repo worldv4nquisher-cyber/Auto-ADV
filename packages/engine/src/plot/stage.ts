@@ -79,6 +79,8 @@ export interface StageStep {
    * wait：停顿几秒自动继续；check：检定结果；card：进入新一幕的标题卡。
    */
   kind: 'text' | 'pause' | 'wait' | 'check' | 'card';
+  /** 这一步所在的幕（剧情图上的 id；没有剧情图进度的事件为 null）。 */
+  scene: string | null;
   view: StageView;
   text?: StageText;
   seconds?: number;
@@ -141,13 +143,13 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
   let lastEvent: string | null = null;
   let index = 0;
 
-  const push = (ev: PlayEvent, step: Omit<StageStep, 'eventId' | 'index' | 'view'>) => {
+  const push = (ev: PlayEvent, step: Omit<StageStep, 'eventId' | 'index' | 'view' | 'scene'>) => {
     // 标题卡不占序号：出不出标题卡（给没给剧情图）不影响存档位置
     if (step.kind !== 'card') {
       index = ev.id === lastEvent ? index + 1 : 0;
       lastEvent = ev.id;
     }
-    const s: StageStep = { eventId: ev.id, index: step.kind === 'card' ? -1 : index, view: snapshot(view), ...step };
+    const s: StageStep = { eventId: ev.id, index: step.kind === 'card' ? -1 : index, scene, view: snapshot(view), ...step };
     if (cues.length) s.cues = cues;
     if (vars.length) s.vars = vars;
     if (cgShown) s.cgShown = cgShown;

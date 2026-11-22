@@ -10,6 +10,8 @@ ipcRenderer.on('engine:restarted', () => {
 
 const bridge = {
   connectEngine: () => ipcRenderer.send('engine:connect'),
+  /** 选一个文件夹；取消时为 null。 */
+  pickFolder: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:pickFolder', title),
   platform: process.platform,
   versions: {
     electron: process.versions.electron,

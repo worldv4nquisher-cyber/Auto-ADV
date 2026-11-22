@@ -1,7 +1,7 @@
 import type { WorldSummary } from '@auto-adv/engine/api';
 import { GENESIS_STEPS } from '@auto-adv/schema';
 import { useCallback, useEffect, useState } from 'react';
-import { Badge, Button, Card, cx } from '../components/ui.tsx';
+import { Badge, Button, Card, cx, useToast } from '../components/ui.tsx';
 import { engine, errorMessage, onConnectionChange } from '../lib/engine.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
@@ -13,6 +13,24 @@ export function HomePage() {
   const genesis = useGenesis();
   const [worlds, setWorlds] = useState<WorldSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const toast = useToast();
+
+  /** 从文件夹导入世界（默认打开自带的示例世界）。 */
+  const importWorld = async () => {
+    const dir = await window.autoAdv?.pickFolder('选择要导入的世界文件夹（里面有 world.json）');
+    if (!dir) return;
+    setImporting(true);
+    try {
+      const w = await engine.call('importWorld', { path: dir });
+      toast('ok', `已导入「${w.title}」`);
+      navigate({ page: 'world', worldId: w.id });
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setImporting(false);
+    }
+  };
 
   const load = useCallback(() => {
     engine
@@ -76,7 +94,10 @@ export function HomePage() {
               >
                 ＋ 新建世界
               </Button>
-              {!ready && <span className="text-xs text-faint">先接好模型（见下方）</span>}
+              <Button data-testid="import-world" loading={importing} onClick={() => void importWorld()}>
+                导入世界
+              </Button>
+              {!ready && <span className="text-xs text-faint">新建世界要先接好模型（见下方）；导入手写的世界不需要</span>}
             </div>
           </div>
         </div>

@@ -5,6 +5,7 @@ import { Button, Card, ConfirmButton, cx, Input, Markdown, Select, Spinner, Text
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatTime } from '../lib/format.ts';
 import { useRouter } from '../lib/router.tsx';
+import { AdvPage } from './Adv.tsx';
 import { ObservePage } from './Observe.tsx';
 
 interface Streaming {
@@ -120,6 +121,9 @@ export function PlayPage({ worldId, playthroughId }: { worldId: string; playthro
     );
   }
 
+  if (view.playthrough.mode === 'adv') {
+    return <AdvPage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />;
+  }
   if (view.playthrough.mode === 'observer') {
     return <ObservePage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />;
   }
