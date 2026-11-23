@@ -1,4 +1,4 @@
-import type { PlaythroughInfo, StartPlaythroughParams, WorldDetail } from '@auto-adv/engine/api';
+import type { PlaythroughInfo, PlotCheckResult, StartPlaythroughParams, WorldDetail } from '@auto-adv/engine/api';
 import { type Character, GENESIS_STEPS, type GenesisStepId, type ObserverSettings, type PlotOutline } from '@auto-adv/schema';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -80,7 +80,9 @@ export function WorldPage({ worldId }: { worldId: string }) {
   const ready = world.summary.status === 'ready' && !running;
   const protagonist = world.characters.find((c) => c.role === 'protagonist');
 
-  const incomplete = GENESIS_STEPS.some((s) => steps[s.id]?.status !== 'done');
+  // 手写的世界（比如导入的示例）没有创世步骤，不能"继续生成"
+  const handmade = Object.keys(world.summary.steps).length === 0 && !running;
+  const incomplete = !handmade && GENESIS_STEPS.some((s) => steps[s.id]?.status !== 'done');
 
   const start = async (p: Omit<StartPlaythroughParams, 'worldId'>) => {
     setStarting(true);
@@ -133,7 +135,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
                 { value: 'overview', label: '概览' },
                 { value: 'characters', label: `角色 ${world.characters.length || ''}` },
                 { value: 'locations', label: `地点 ${world.locations.length || ''}` },
-                { value: 'plot', label: '剧情骨架' },
+                { value: 'plot', label: world.plot || !world.graph ? '剧情骨架' : '剧情图' },
                 { value: 'lore', label: `设定集 ${world.lore.length || ''}` },
                 { value: 'opening', label: '开场' },
               ]}
@@ -165,7 +167,13 @@ export function WorldPage({ worldId }: { worldId: string }) {
               </div>
             )}
             {tab === 'plot' &&
-              (world.plot ? <PlotView plot={world.plot} /> : <Empty title="剧情骨架还没有生成">观察模式会按剧情骨架推进故事。</Empty>)}
+              (world.plot ? (
+                <PlotView plot={world.plot} />
+              ) : world.graph ? (
+                <GraphView world={world} />
+              ) : (
+                <Empty title="剧情骨架还没有生成">观察模式会按剧情骨架推进故事。</Empty>
+              ))}
             {tab === 'lore' && (
               <div className="grid gap-2">
                 {world.lore.length === 0 && <Empty title="设定集还没有生成" />}
@@ -223,6 +231,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
                         <span className="flex min-w-0 items-center gap-1.5">
                           <span className="truncate text-sm font-medium">{p.title}</span>
                           {p.mode === 'observer' && <Badge tone="accent">观察</Badge>}
+                          {p.mode === 'adv' && <Badge tone="ok">剧情 ADV</Badge>}
                         </span>
                         <span className="shrink-0 text-xs text-faint">{formatTime(p.updatedAt)}</span>
                       </div>
@@ -256,6 +265,13 @@ export function WorldPage({ worldId }: { worldId: string }) {
               </Card>
             )}
 
+            {handmade && (
+              <Card className="p-4 text-xs leading-relaxed text-muted">
+                这是一个手写的世界（不是一键创世生成的）。
+                {world.graph && <PlotCheckSummary check={world.plotCheck} className="mt-2" />}
+              </Card>
+            )}
+            {!handmade && (
             <Card className="p-4" data-testid="genesis-steps">
               <div className="mb-3 flex items-center justify-between">
                 <span className="text-xs font-medium text-muted">创世步骤</span>
@@ -312,12 +328,15 @@ export function WorldPage({ worldId }: { worldId: string }) {
                 </p>
               )}
             </Card>
+            )}
           </div>
         </div>
       </div>
       {dialog && (
         <StartDialog
           hasPlot={!!world.plot}
+          hasOpening={!!world.opening}
+          plotCheck={world.graph ? world.plotCheck : null}
           starting={starting}
           onCancel={() => setDialog(false)}
           onStart={(p) => void start(p)}
@@ -333,26 +352,36 @@ const DEFAULT_OBSERVER: Pick<ObserverSettings, 'strategy' | 'focus' | 'budgetTok
   budgetTokens: 2_000_000,
 };
 
+type StartMode = 'chat' | 'observer' | 'adv';
+
 function StartDialog({
   hasPlot,
+  hasOpening,
+  plotCheck,
   starting,
   onCancel,
   onStart,
 }: {
   hasPlot: boolean;
+  hasOpening: boolean;
+  /** 剧情图的结构检查；没有剧情图为 null。 */
+  plotCheck: PlotCheckResult | null;
   starting: boolean;
   onCancel: () => void;
   onStart: (p: Omit<StartPlaythroughParams, 'worldId'>) => void;
 }) {
-  const [mode, setMode] = useState<'chat' | 'observer'>('chat');
+  const advOk = !!plotCheck?.ok;
+  const [mode, setMode] = useState<StartMode>(!hasOpening && advOk ? 'adv' : 'chat');
   const [obs, setObs] = useState(DEFAULT_OBSERVER);
-  const option = (value: 'chat' | 'observer', title: string, desc: string) => (
+  const blocked = (m: StartMode) => (m === 'adv' ? !advOk : !hasOpening);
+  const option = (value: StartMode, title: string, desc: string) => (
     <button
       type="button"
       data-testid={`mode-${value}`}
+      disabled={blocked(value)}
       onClick={() => setMode(value)}
       className={cx(
-        'flex-1 rounded-xl border p-4 text-left transition-colors',
+        'flex-1 rounded-xl border p-4 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-40',
         mode === value ? 'border-accent bg-accent-soft' : 'border-line hover:border-line-strong',
       )}
     >
@@ -367,7 +396,20 @@ function StartDialog({
         <div className="flex gap-3">
           {option('chat', '自由对话', '你扮演主角，和角色们你一言我一语地推进故事。')}
           {option('observer', '观察模式', 'AI 们自己演，故事自动展开。你可以随时下导演指令、对角色说悄悄话，或者接管一个角色。')}
+          {option('adv', '剧情 ADV', '按剧情图推进，在岔路做选择、掷骰检定，走向不同的结局。')}
         </div>
+        {mode === 'adv' && (
+          <p className="mt-4 text-xs leading-relaxed text-muted">
+            目前只播放手写剧本，没有剧本的幕先用一句占位旁白代替（接 AI 演出是下一步）。背景、立绘和 CG 先用占位图。
+          </p>
+        )}
+        {plotCheck && !plotCheck.ok && (
+          <p className="mt-4 text-xs leading-relaxed text-warn">
+            剧情图没有通过结构检查，暂时不能玩剧情 ADV：{plotCheck.errors[0]?.message}
+            {plotCheck.errors.length > 1 ? `（共 ${plotCheck.errors.length} 个问题）` : ''}
+          </p>
+        )}
+        {!hasOpening && <p className="mt-4 text-xs leading-relaxed text-faint">这个世界没有开场，只能玩剧情 ADV。</p>}
         {mode === 'observer' && (
           <div className="mt-5 grid grid-cols-2 gap-4">
             <Field label="演出方式">
@@ -406,6 +448,7 @@ function StartDialog({
             variant="primary"
             data-testid="start-confirm"
             loading={starting}
+            disabled={blocked(mode)}
             onClick={() => onStart(mode === 'observer' ? { mode, observer: obs } : { mode })}
           >
             {mode === 'observer' ? '开始观看' : '开始'}
@@ -578,5 +621,97 @@ function CharacterCard({ c, all }: { c: Character; all: Character[] }) {
         )}
       </div>
     </Card>
+  );
+}
+
+function PlotCheckSummary({ check, className }: { check: PlotCheckResult | null; className?: string }) {
+  if (!check) return null;
+  const issues = [...check.errors.map((e) => ({ ...e, err: true })), ...check.warnings.map((w) => ({ ...w, err: false }))];
+  return (
+    <div className={cx('space-y-1', className)} data-testid="plot-check">
+      <div className={cx('font-medium', check.ok ? (check.warnings.length ? 'text-warn' : 'text-ok') : 'text-err')}>
+        {check.ok
+          ? `剧情图检查通过${check.warnings.length ? `（${check.warnings.length} 个警告）` : ''}`
+          : `剧情图有 ${check.errors.length} 个错误，修好之前不能玩剧情 ADV`}
+      </div>
+      {issues.slice(0, 8).map((i, n) => (
+        <div key={n} className={cx('break-all', i.err ? 'text-err/90' : 'text-warn/90')}>
+          {i.scene ? `${i.scene}${i.line ? `:${i.line}` : ''} ` : ''}
+          {i.message}
+        </div>
+      ))}
+      {issues.length > 8 && <div className="text-faint">……还有 {issues.length - 8} 条</div>}
+    </div>
+  );
+}
+
+const ENDING_KIND = { good: '好结局', normal: '普通结局', bad: '坏结局' } as const;
+
+/** 剧情图：按章列出每一幕的要点、出口和结局。 */
+function GraphView({ world }: { world: WorldDetail }) {
+  const g = world.graph;
+  if (!g) return null;
+  const titleOf = (id: string) => g.scenes.find((s) => s.id === id)?.title || id;
+  const groups = [
+    ...g.chapters.map((c) => ({ id: c.id, title: c.title || c.id, scenes: g.scenes.filter((s) => s.chapter === c.id) })),
+    { id: '', title: g.chapters.length ? '其他' : '', scenes: g.scenes.filter((s) => !s.chapter || !g.chapters.some((c) => c.id === s.chapter)) },
+  ].filter((x) => x.scenes.length);
+  return (
+    <div className="space-y-4">
+      {g.premise && (
+        <Card className="p-5 text-sm leading-relaxed">
+          <div className="mb-1 text-xs text-faint">核心</div>
+          {g.premise}
+        </Card>
+      )}
+      <Card className="p-4 text-xs">
+        <PlotCheckSummary check={world.plotCheck} />
+      </Card>
+      {groups.map((grp) => (
+        <Card key={grp.id || 'rest'} className="p-5">
+          {grp.title && <div className="mb-3 font-medium">{grp.title}</div>}
+          <div className="space-y-4">
+            {grp.scenes.map((sc) => (
+              <div key={sc.id} data-scene={sc.id}>
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <span className="font-mono text-xs text-faint">{sc.id}</span>
+                  {sc.title}
+                  {g.start === sc.id && <Badge tone="accent">起点</Badge>}
+                  {sc.ending && (
+                    <Badge tone={sc.ending.kind === 'good' ? 'ok' : sc.ending.kind === 'bad' ? 'err' : 'neutral'}>
+                      {ENDING_KIND[sc.ending.kind]}
+                      {sc.ending.hidden ? ' · 隐藏' : ''}
+                    </Badge>
+                  )}
+                </div>
+                {sc.what && <p className="mt-0.5 text-xs text-muted">{sc.what}</p>}
+                {sc.points.length > 0 && (
+                  <ul className="mt-1.5 space-y-1">
+                    {sc.points.map((p) => (
+                      <li key={p.id} className="flex gap-2 text-sm text-muted">
+                        <span className="text-faint">·</span>
+                        {p.text}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {sc.exits.length > 0 && (
+                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                    {sc.exits.map((e) => (
+                      <span key={e.to} className="rounded-md bg-panel-2 px-2 py-0.5 text-xs text-muted">
+                        → {titleOf(e.to)}
+                        {e.label ? `（${e.label}）` : ''}
+                        {e.auto ? ' · 自动' : ''}
+                        {sc.default === e.to ? ' · 默认' : ''}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </Card>
+      ))}
+    </div>
   );
 }

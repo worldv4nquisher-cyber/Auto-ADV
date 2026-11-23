@@ -10,13 +10,17 @@ import type {
   PlayRef,
   PlayUsage,
   PlayView,
+  SaveInfo,
   SceneState,
   Segment,
   SendParams,
+  StagePos,
   StartPlaythroughParams,
 } from '../api.ts';
 import type { Meter, ModelGateway } from '../llm/gateway.ts';
 import { generateJson, stripThinking } from '../llm/structured.ts';
+import { AdvSession, advView, loadAdvWorld, recordCgShown } from '../plot/session.ts';
+import { buildTimeline, findStep, stepText } from '../plot/stage.ts';
 import { shortId } from '../util.ts';
 import { matchByName } from '../world/render.ts';
 import type { WorldData, WorldStore } from '../world/store.ts';
@@ -50,7 +54,11 @@ function preview(e: PlayEvent | undefined, max = 40): string {
           ? `（导演指令）${e.text ?? ''}`
           : e.kind === 'whisper'
             ? `（悄悄话）${e.text ?? ''}`
-            : (e.segments ?? []).map((s) => (s.kind === 'line' ? `${s.name}：${s.text}` : s.text)).join(' ');
+            : e.kind === 'choice'
+              ? `▶ ${e.choice?.label ?? ''}`
+              : e.kind === 'check'
+                ? `检定「${e.check?.label ?? ''}」`
+                : (e.segments ?? []).map((s) => (s.kind === 'line' ? `${s.name}：${s.text}` : s.text)).join(' ');
   const chars = [...t.replace(/\s+/g, ' ').trim()];
   return chars.length > max ? `${chars.slice(0, max).join('')}…` : chars.join('');
 }
@@ -181,9 +189,9 @@ export class PlayService {
 
   async start(p: StartPlaythroughParams): Promise<PlayView> {
     const world = await this.store.load(p.worldId);
-    if (world.manifest.status !== 'ready' || !world.opening) throw new Error('这个世界还没有生成完，不能开始游玩');
     const mode = p.mode ?? 'chat';
-    if (mode === 'adv') throw new Error('结构化 ADV 模式还没有开放');
+    if (mode === 'adv' && world.manifest.status === 'ready') return this.startAdv(world, p);
+    if (world.manifest.status !== 'ready' || !world.opening) throw new Error('这个世界还没有生成完，不能开始游玩');
     const protagonist = protagonistOf(world, null);
     let present = world.opening.presentCharacterIds;
     // 观察模式没有玩家，主角也是由 AI 扮演的在场角色
@@ -215,6 +223,36 @@ export class PlayService {
     return this.view({ worldId: p.worldId, playthroughId: pt.id });
   }
 
+  /** 剧情 ADV：按剧情图从起始幕开始，第一拍直接演出来（手写剧本不调模型）。 */
+  private startAdv(world: WorldData, p: StartPlaythroughParams): Promise<PlayView> {
+    const { adv } = loadAdvWorld(world);
+    const db = this.db(p.worldId);
+    const session = new AdvSession(db, adv);
+    const title = p.title?.trim() || `周目 ${db.listPlaythroughs().length + 1}`;
+    const id = session.start(title, protagonistOf(world, null)?.id ?? null);
+    session.next(id);
+    return this.view({ worldId: p.worldId, playthroughId: id });
+  }
+
+  /** 剧情 ADV：往下演一拍（choose 不给），或者选一个选项。 */
+  advStep(ref: PlayRef, choose?: number): Promise<PlayView> {
+    return this.exclusive(ref, async () => {
+      const world = await this.store.load(ref.worldId);
+      const db = this.db(ref.worldId);
+      const pt = db.getPlaythrough(ref.playthroughId);
+      if (pt.mode !== 'adv') throw new Error('这个周目不是剧情 ADV 模式');
+      const session = new AdvSession(db, loadAdvWorld(world).adv);
+      if (choose === undefined) session.next(pt.id);
+      else session.choose(pt.id, choose);
+      return this.view(ref);
+    });
+  }
+
+  /** 剧情 ADV：舞台第一次显示了某张 CG。 */
+  advShown(ref: PlayRef, eventId: string, cg: string): { unlocked: boolean } {
+    return { unlocked: !!recordCgShown(this.db(ref.worldId), ref.playthroughId, eventId, cg) };
+  }
+
   async delete(ref: PlayRef): Promise<void> {
     await this.observer.drop(ref);
     this.guard(ref);
@@ -244,6 +282,7 @@ export class PlayService {
       saves: db.listSaves(pt.id),
       plot: plotProgress(foldState(world, events)),
       observer: pt.mode === 'observer' ? this.status(ref) : null,
+      adv: pt.mode === 'adv' ? advView(world, events, db.listUnlocks()) : null,
     };
   }
 
@@ -307,6 +346,7 @@ export class PlayService {
         const db = this.db(p.worldId);
         const pt = db.getPlaythrough(p.playthroughId);
         const controlled = controlledOf(pt);
+        if (pt.mode === 'adv') throw new Error('剧情 ADV 模式现在只能用选项推进，自由输入要等接上 AI 之后');
         if (pt.mode === 'observer' && !controlled) throw new Error('观察模式下请先接管一个角色，或者给导演下指令');
         let parentId = p.parentId ?? pt.headId;
         db.getEvent(pt.id, parentId);
@@ -758,17 +798,38 @@ export class PlayService {
     return this.view(ref);
   }
 
-  save(ref: PlayRef, name?: string): Promise<PlayView> {
+  async save(ref: PlayRef, name?: string, at?: StagePos): Promise<PlayView> {
     const db = this.db(ref.worldId);
     const pt = db.getPlaythrough(ref.playthroughId);
     const head = db.getEvent(pt.id, pt.headId);
-    db.addSave(pt.id, {
+    const info: SaveInfo = {
       id: shortId('sv'),
       name: name?.trim() || `存档 ${db.listSaves(pt.id).length + 1}`,
       eventId: head.id,
       preview: preview(head, 60),
       createdAt: Date.now(),
-    });
+    };
+    if (pt.mode === 'adv' && at) {
+      // 舞台播到的那一句做预览，当时的画面做缩略图
+      const world = await this.store.load(ref.worldId);
+      const events = db.path(pt.id, pt.headId);
+      if (!events.some((e) => e.id === at.eventId)) throw new Error('存档位置不在当前路径上');
+      const t = buildTimeline(events, { characters: world.characters, graph: world.graph });
+      const step = t.steps[findStep(t, at)];
+      const upto = events.slice(0, events.findIndex((e) => e.id === at.eventId) + 1);
+      const sceneId = upto.findLast((e) => e.plot)?.plot?.scene;
+      const scene = world.graph?.scenes.find((x) => x.id === sceneId);
+      const v = step?.view ?? t.end;
+      info.at = { eventId: at.eventId, index: at.index };
+      info.preview = [...stepText(step)].slice(0, 60).join('') || info.preview;
+      info.thumb = {
+        bg: v.bg?.id ?? null,
+        cg: v.cg,
+        chars: v.sprites.map((x) => x.characterId ?? x.name),
+        scene: scene ? scene.title || scene.id : null,
+      };
+    }
+    db.addSave(pt.id, info);
     return this.view(ref);
   }
 

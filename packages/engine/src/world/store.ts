@@ -154,6 +154,37 @@ export class WorldStore {
     this.queues.delete(id);
   }
 
+  /**
+   * 把一个世界文件夹复制进来（不带 playthroughs/ 里的周目记录）。id 已经被占用时加数字后缀。
+   * 复制完整读一遍，读不出来就删掉并报错。返回导入后的 id。
+   */
+  async importFolder(src: string): Promise<string> {
+    const from = path.resolve(src);
+    const raw = await readJsonFile(path.join(from, 'world.json'));
+    if (raw === undefined) throw new Error('这个文件夹里没有 world.json，不是世界文件夹');
+    const manifest = WorldManifest.parse(migrate(raw));
+    const base = ID_RE.test(manifest.id) ? manifest.id.slice(0, 56) : 'world';
+    const taken = new Set(await fs.readdir(this.root).catch(() => [] as string[]));
+    let id = base;
+    for (let i = 2; taken.has(id); i++) id = `${base}_${i}`;
+    const to = this.dir(id);
+    await fs.mkdir(this.root, { recursive: true });
+    try {
+      await fs.cp(from, to, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        filter: (s) => path.relative(from, s).split(path.sep)[0] !== 'playthroughs',
+      });
+      if (id !== manifest.id) await writeFileAtomic(this.file(id, 'world.json'), json({ ...manifest, id }));
+      await this.load(id);
+    } catch (err) {
+      await fs.rm(to, { recursive: true, force: true, maxRetries: 5 });
+      throw new Error(`导入失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+    return id;
+  }
+
   // ───────────── 内容 ─────────────
 
   async load(id: string): Promise<WorldData> {

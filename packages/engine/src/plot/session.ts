@@ -1,15 +1,15 @@
 /**
  * 剧情 ADV 周目：把 runner.ts 算出的新事件写进事件树（play.db），并记下跨周目的解锁（16.8）。
- * M3 第 1 步只给命令行和测试用；第 2 步接到 PlayService 和界面。
+ * 命令行和 PlayService（应用里的 VN 舞台）共用。
  */
-import type { PlayMode, PlotGraph } from '@auto-adv/schema';
-import type { PlayEvent } from '../api.ts';
+import type { PlayMode, PlotEnding, PlotGraph } from '@auto-adv/schema';
+import type { AdvView, PlayEvent } from '../api.ts';
 import type { PlayDb, UnlockRow } from '../play/db.ts';
 import { shortId } from '../util.ts';
 import type { WorldData } from '../world/store.ts';
-import { type AdvParseResult, parseAdv } from './adv.ts';
+import { type AdvParseResult, parseAdv, walkScript } from './adv.ts';
 import { checkPlot, type PlotCheckResult } from './check.ts';
-import { foldPlot, type PlotState } from './progress.ts';
+import { foldPlot, isStuck, type PlotState } from './progress.ts';
 import { type AdvAction, type AdvWorld, compileScript, type Program, stepAdv } from './runner.ts';
 
 /** 解析世界里的手写剧本。 */
@@ -60,7 +60,7 @@ export interface EndingProgress {
   reached: number;
   /** 结局总数：隐藏结局达成前不计入。 */
   total: number;
-  endings: { id: string; title: string; kind: string; hidden: boolean; reached: boolean }[];
+  endings: { id: string; title: string; kind: PlotEnding['kind']; hidden: boolean; reached: boolean }[];
 }
 
 export function endingProgress(graph: PlotGraph, unlocks: readonly UnlockRow[]): EndingProgress {
@@ -74,6 +74,60 @@ export function endingProgress(graph: PlotGraph, unlocks: readonly UnlockRow[]):
     reached: endings.filter((e) => e.reached).length,
     total: endings.filter((e) => !e.hidden || e.reached).length,
     endings,
+  };
+}
+
+/** 手写剧本里出现过的所有 CG。 */
+export function scriptCgs(parsed: ReadonlyMap<string, AdvParseResult>): string[] {
+  const out = new Set<string>();
+  for (const p of parsed.values()) walkScript(p.commands, (c) => c.op === 'cg' && out.add(c.id));
+  return [...out];
+}
+
+/** 舞台第一次显示 CG 时记一笔（16.8）。这个事件的舞台指令里必须有这张 CG。返回 null 表示以前就解锁过了。 */
+export function recordCgShown(db: PlayDb, pt: string, eventId: string, cg: string, now = Date.now()): UnlockRow | null {
+  const ev = db.getEvent(pt, eventId);
+  if (!ev.stage?.some((c) => c.op === 'cg' && c.id === cg)) throw new Error('这个事件里没有这张 CG');
+  const row: UnlockRow = { kind: 'cg', id: cg, firstAt: now, playthroughId: pt, eventId };
+  return db.unlock(row) ? row : null;
+}
+
+/** 剧情 ADV 周目给界面看的状态。世界的剧情图有错误时仍然给出进度，但 error 不为空、不能继续。 */
+export function advView(
+  world: Pick<WorldData, 'graph' | 'variables' | 'scripts' | 'characters' | 'locations'>,
+  path: readonly PlayEvent[],
+  unlocks: readonly UnlockRow[],
+): AdvView | null {
+  const g = world.graph;
+  if (!g) return null;
+  const check = checkWorldPlot(world) as PlotCheckResult;
+  const s = foldPlot(g, world.variables, path);
+  const endScene = s.ending ? g.scenes.find((x) => x.id === s.ending) : undefined;
+  const chapter = s.scene?.chapter ? g.chapters.find((c) => c.id === s.scene?.chapter) : undefined;
+  const prog = endingProgress(g, unlocks);
+  const sceneIds = new Set(g.scenes.map((x) => x.id));
+  return {
+    scene: s.scene ? { id: s.scene.id, title: s.scene.title || s.scene.id, chapter: chapter ? chapter.title || chapter.id : null } : null,
+    menu: s.menu,
+    finished: s.finished,
+    ending: endScene?.ending
+      ? { id: endScene.id, title: endScene.title || endScene.id, kind: endScene.ending.kind, hidden: endScene.ending.hidden }
+      : null,
+    stuck: isStuck(s) ? `「${s.scene?.title || s.scene?.id}」的剧本演完了，但没有可以走的出口${s.notes.length ? `（${s.notes.join('；')}）` : ''}` : null,
+    error: check.ok
+      ? null
+      : `剧情图没有通过结构检查：${check.errors
+          .slice(0, 3)
+          .map((e) => e.message)
+          .join('；')}`,
+    vars: { ...s.vars },
+    progress: {
+      endings: prog.endings.map((e) => ({ ...e, title: e.hidden && !e.reached ? '？？？' : e.title })),
+      reached: prog.reached,
+      total: prog.total,
+      cgs: { unlocked: unlocks.filter((u) => u.kind === 'cg').map((u) => u.id), total: scriptCgs(parseScripts(world)).length },
+      scenes: { visited: unlocks.filter((u) => u.kind === 'scene' && sceneIds.has(u.id)).length, total: g.scenes.length },
+    },
   };
 }
 
@@ -145,6 +199,11 @@ export class AdvSession {
   rewind(pt: string, eventId: string): PlotState {
     this.db.setHead(pt, eventId);
     return this.state(pt);
+  }
+
+  /** 舞台第一次显示了某张 CG（命令行打印出来就算显示）。 */
+  markShown(pt: string, eventId: string, cg: string): UnlockRow | null {
+    return recordCgShown(this.db, pt, eventId, cg, this.now());
   }
 
   private act(pt: string, action: AdvAction): ActResult {

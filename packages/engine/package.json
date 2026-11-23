@@ -8,7 +8,8 @@
     ".": "./src/index.ts",
     "./api": "./src/api.ts",
     "./rpc": "./src/rpc/index.ts",
-    "./script": "./src/play/script.ts"
+    "./script": "./src/play/script.ts",
+    "./stage": "./src/plot/stage.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p ."

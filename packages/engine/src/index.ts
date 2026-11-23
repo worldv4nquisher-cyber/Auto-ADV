@@ -17,6 +17,7 @@ export * from './plot/dice.ts';
 export * from './plot/progress.ts';
 export * from './plot/runner.ts';
 export * from './plot/session.ts';
+export * from './plot/stage.ts';
 export * from './plot/transition.ts';
 export * from './plot/vars.ts';
 export { PlayDb, type UnlockKind, type UnlockRow } from './play/db.ts';

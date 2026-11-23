@@ -16,10 +16,10 @@ import type {
 } from '@auto-adv/schema';
 import type { PlayEvent, PlotMark, PlotMenu, Segment } from '../api.ts';
 import type { UnlockKind } from '../play/db.ts';
-import { matchByName } from '../world/render.ts';
 import { type ConditionContext, describeCondition, evalCondition } from './conditions.ts';
 import { rollCheck } from './dice.ts';
 import { type PlotState, reducePlot } from './progress.ts';
+import { resolveSpeaker } from './stage.ts';
 import { choosableExits, decideTransition } from './transition.ts';
 import { applyEffects, mergeChanges, type VarChange, type VarValues } from './vars.ts';
 
@@ -134,14 +134,6 @@ export function cloneState(s: PlotState): PlotState {
 
 export function conditionContext(s: PlotState, vars: VarValues = s.vars): ConditionContext {
   return { vars, visited: new Set(s.visited), check: s.lastCheck?.outcome ?? null };
-}
-
-/** 说话人：角色 id、去掉 char_ 前缀的 id、名字或别称都可以；都对不上就是临时人物。 */
-export function resolveSpeaker(token: string, cast: AdvWorld['characters']): { characterId: string | null; name: string } {
-  const c =
-    cast.find((x) => x.id === token || x.id === `char_${token}`) ??
-    matchByName(token, [...cast]);
-  return c ? { characterId: c.id, name: c.name } : { characterId: null, name: token };
 }
 
 /** 舞台指令转成文本段落（拼上下文、预览和命令行都用它）。 */
@@ -271,7 +263,6 @@ function playBeat(
   const unlocks: { kind: UnlockKind; id: string }[] = [];
   if (firstBeat) unlocks.push({ kind: 'scene', id: scene.id });
   if (mark.ending) unlocks.push({ kind: 'ending', id: mark.ending });
-  for (const c of stage) if (c.op === 'cg') unlocks.push({ kind: 'cg', id: c.id });
 
   return {
     draft: {

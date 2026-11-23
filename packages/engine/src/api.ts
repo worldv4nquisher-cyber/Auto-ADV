@@ -17,6 +17,7 @@ import type {
   PlotGraph,
   PlotOutline,
   RoleId,
+  Scalar,
   RoleRoute,
   StageCommand,
   StoryOpening,
@@ -25,11 +26,13 @@ import type {
   WorldBrief,
   WorldManifest,
 } from '@auto-adv/schema';
+import type { PlotCheckResult } from './plot/check.ts';
 import type { CheckResult } from './plot/dice.ts';
 import type { VarChange } from './plot/vars.ts';
 import type { Streaming, Unary } from './rpc/index.ts';
 
 export type { CheckResult } from './plot/dice.ts';
+export type { PlotCheckResult, PlotIssue } from './plot/check.ts';
 export type { CheckOutcome } from './plot/conditions.ts';
 export type { VarChange } from './plot/vars.ts';
 
@@ -175,6 +178,8 @@ export interface WorldDetail {
   plot: PlotOutline | null;
   /** 剧情图：原生的，或者从旧骨架自动迁移来的。 */
   graph: PlotGraph | null;
+  /** 剧情图的结构检查（带上手写剧本）；有错误时不能开始剧情 ADV 周目。 */
+  plotCheck: PlotCheckResult | null;
   variables: VariableDef[];
   opening: StoryOpening | null;
 }
@@ -354,6 +359,41 @@ export interface SaveInfo {
   eventId: string;
   preview: string;
   createdAt: number;
+  /** 剧情 ADV：存档时 VN 舞台播到哪一步（某个事件里的第 index 步，见 plot/stage.ts）。 */
+  at?: StagePos;
+  /** 存档缩略图：当时的背景、CG、在场角色和所在的幕。 */
+  thumb?: { bg: string | null; cg: string | null; chars: string[]; scene: string | null };
+}
+
+/** VN 舞台上的位置：路径上某个事件里的第 index 步。 */
+export interface StagePos {
+  eventId: string;
+  index: number;
+}
+
+/** 剧情 ADV 周目的状态（从事件折叠出来的，见 plot/progress.ts）。 */
+export interface AdvView {
+  /** 当前所在的幕。 */
+  scene: { id: string; title: string; chapter: string | null } | null;
+  /** 等玩家选的选项。 */
+  menu: PlotMenu | null;
+  /** 剧情图走完了。 */
+  finished: boolean;
+  /** 这个周目达成的结局。 */
+  ending: { id: string; title: string; kind: 'good' | 'normal' | 'bad'; hidden: boolean } | null;
+  /** 卡住的原因：剧本演完了但没有出口（剧情图被改过等）。 */
+  stuck: string | null;
+  /** 剧情图现在没有通过结构检查（世界文件被改坏了）：不能继续往下演。 */
+  error: string | null;
+  vars: Record<string, Scalar>;
+  /** 跨周目进度。隐藏结局达成之前不计入总数，标题显示为"？？？"。 */
+  progress: {
+    endings: { id: string; title: string; kind: 'good' | 'normal' | 'bad'; hidden: boolean; reached: boolean }[];
+    reached: number;
+    total: number;
+    cgs: { unlocked: string[]; total: number };
+    scenes: { visited: number; total: number };
+  };
 }
 
 export interface PlotProgress {
@@ -398,6 +438,8 @@ export interface PlayView {
   plot: PlotProgress;
   /** 观察模式的运行状态；自由对话为 null。 */
   observer: ObserverStatus | null;
+  /** 剧情 ADV 的状态；其他模式为 null。 */
+  adv: AdvView | null;
 }
 
 export interface PlayRef {
@@ -454,6 +496,8 @@ export type EngineContract = {
   listWorlds: Unary<void, WorldSummary[]>;
   getWorld: Unary<{ id: string }, WorldDetail>;
   deleteWorld: Unary<{ id: string }, void>;
+  /** 从文件夹导入一个世界（例如 examples/worlds/ 里的示例）。 */
+  importWorld: Unary<{ path: string }, WorldSummary>;
   createWorld: Streaming<CreateWorldParams, GenesisChunk, WorldSummary>;
   /** 续跑没完成的步骤；给了 from 则从这一步起（含下游）全部重新生成。 */
   runGenesis: Streaming<{ worldId: string; from?: GenesisStepId }, GenesisChunk, WorldSummary>;
@@ -473,9 +517,17 @@ export type EngineContract = {
   /** 删除某个事件及其后续。 */
   deleteBranch: Unary<PlayRef & { eventId: string }, PlayView>;
   setScene: Unary<PlayRef & SceneState, PlayView>;
-  saveSlot: Unary<PlayRef & { name?: string }, PlayView>;
+  /** 存档。剧情 ADV 可以带上舞台播到的位置（at），读档时回到那一句。 */
+  saveSlot: Unary<PlayRef & { name?: string; at?: StagePos }, PlayView>;
   loadSave: Unary<PlayRef & { saveId: string }, PlayView>;
   deleteSave: Unary<PlayRef & { saveId: string }, PlayView>;
+
+  /** 剧情 ADV：往下演（手写剧本不调模型，立刻返回）。 */
+  advNext: Unary<PlayRef, PlayView>;
+  /** 剧情 ADV：选第 index 个选项（从 0 开始），并演出选完之后的内容。 */
+  advChoose: Unary<PlayRef & { index: number }, PlayView>;
+  /** 剧情 ADV：舞台第一次显示了某张 CG（记跨周目解锁）。 */
+  advShown: Unary<PlayRef & { eventId: string; cg: string }, { unlocked: boolean }>;
 
   /** 观察模式：播放 / 暂停。 */
   observerControl: Unary<PlayRef & { action: 'play' | 'pause' }, PlayView>;

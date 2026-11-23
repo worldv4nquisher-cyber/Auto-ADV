@@ -1,9 +1,11 @@
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { HostContract } from '@auto-adv/engine/api';
 import { fromNodePort, serveRpc } from '@auto-adv/engine/rpc';
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   MessageChannelMain,
   safeStorage,
@@ -61,6 +63,26 @@ function startEngine(): UtilityProcess {
   });
   return child;
 }
+
+/** 自带的示例世界：安装包里在 resources/examples，开发时在仓库的 examples/worlds。 */
+function examplesDir(): string | undefined {
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, 'examples')]
+    : [path.resolve(app.getAppPath(), '../../examples/worlds'), path.resolve(process.cwd(), '../../examples/worlds')];
+  return candidates.find((d) => existsSync(d));
+}
+
+/** 选一个文件夹（导入世界用），默认打开示例世界所在的文件夹。返回 null 表示取消。 */
+ipcMain.handle('dialog:pickFolder', async (event, title: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const opts: Electron.OpenDialogOptions = {
+    title: typeof title === 'string' ? title : '选择文件夹',
+    defaultPath: examplesDir(),
+    properties: ['openDirectory'],
+  };
+  const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  return r.canceled ? null : (r.filePaths[0] ?? null);
+});
 
 /** 界面请求连接引擎：建一条新的 MessageChannel，两端分别交给引擎和界面，之后它们直接通信。 */
 ipcMain.on('engine:connect', (event) => {

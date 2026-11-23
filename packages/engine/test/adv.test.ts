@@ -112,20 +112,19 @@ describe('示例世界：旧书库的约定', () => {
     expect(end.events.at(-1)?.stage?.map((c) => c.op)).toEqual(['bg', 'bgm', 'cg', 'narrate', 'say', 'narrate']);
   });
 
-  it('隐藏结局：好感到 45 才打开', () => {
+  it('隐藏结局：好感到 45 才打开；CG 在舞台第一次显示时才解锁', () => {
     const { s, pt, db } = session();
     const r = play(s, pt, [0, 0, 1, 0, 2]);
     expect(r.state.ending).toBe('sc_08');
     expect(r.state.visited).toEqual(['sc_01', 'sc_02', 'sc_03', 'sc_08']);
     expect(r.state.points).toEqual(new Set(['sc_01_1', 'sc_01_2', 'sc_03_1', 'sc_03_2']));
-    expect(db.listUnlocks().map((u) => `${u.kind}:${u.id}`)).toEqual([
-      'scene:sc_01',
-      'scene:sc_02',
-      'scene:sc_03',
-      'scene:sc_08',
-      'ending:sc_08',
-      'cg:cg_book',
-    ]);
+    const kinds = () => db.listUnlocks().map((u) => `${u.kind}:${u.id}`);
+    expect(kinds()).toEqual(['scene:sc_01', 'scene:sc_02', 'scene:sc_03', 'scene:sc_08', 'ending:sc_08']);
+    const last = r.events.at(-1) as PlayEvent;
+    expect(() => s.markShown(pt, last.id, 'cg_reunion')).toThrow('这个事件里没有这张 CG');
+    expect(s.markShown(pt, last.id, 'cg_book')?.eventId).toBe(last.id);
+    expect(s.markShown(pt, last.id, 'cg_book')).toBeNull();
+    expect(kinds().at(-1)).toBe('cg:cg_book');
   });
 
   it('普通结局：门没打开，走进没有手写剧本的幕（占位旁白），唯一的出口自动走', () => {

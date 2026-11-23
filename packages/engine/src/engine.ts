@@ -26,6 +26,7 @@ import { CallLog } from './call-log.ts';
 import { GenesisRunner } from './genesis/pipeline.ts';
 import { ModelGateway } from './llm/gateway.ts';
 import { PlayService } from './play/runtime.ts';
+import { checkWorldPlot } from './plot/session.ts';
 import { assertWorldId, type WorldData, WorldStore } from './world/store.ts';
 import type { CallContext, Handlers } from './rpc/index.ts';
 import { endpointKeyId, type SecretStore } from './secrets.ts';
@@ -255,8 +256,16 @@ export class Engine {
   }
 
   async getWorld(id: string): Promise<WorldDetail> {
-    const { scripts: _scripts, ...d } = await this.worlds.load(id);
-    return { ...d, summary: this.summarize(d) };
+    const world = await this.worlds.load(id);
+    const { scripts: _scripts, ...d } = world;
+    return { ...d, plotCheck: checkWorldPlot(world), summary: this.summarize(d) };
+  }
+
+  /** 从文件夹导入世界。 */
+  async importWorld(src: string): Promise<WorldSummary> {
+    if (!path.isAbsolute(src)) throw new Error('请给出世界文件夹的完整路径');
+    const id = await this.worlds.importFolder(src);
+    return this.summarize(await this.worlds.load(id));
   }
 
   async deleteWorld(id: string): Promise<void> {
@@ -299,6 +308,7 @@ export class Engine {
       listWorlds: () => this.listWorlds(),
       getWorld: (p) => this.getWorld(p.id),
       deleteWorld: (p) => this.deleteWorld(p.id),
+      importWorld: (p) => this.importWorld(p.path),
       createWorld: (p, ctx) => this.createWorld(p, ctx),
       runGenesis: (p, ctx) => this.runGenesis(p.worldId, p.from, ctx),
 
@@ -313,9 +323,13 @@ export class Engine {
       rewind: (p) => this.play.rewind(p, p.eventId),
       deleteBranch: (p) => this.play.deleteBranch(p, p.eventId),
       setScene: (p) => this.play.setScene(p, { locationId: p.locationId, presentCharacterIds: p.presentCharacterIds }),
-      saveSlot: (p) => this.play.save(p, p.name),
+      saveSlot: (p) => this.play.save(p, p.name, p.at),
       loadSave: (p) => this.play.load(p, p.saveId),
       deleteSave: (p) => this.play.deleteSave(p, p.saveId),
+
+      advNext: (p) => this.play.advStep(p),
+      advChoose: (p) => this.play.advStep(p, p.index),
+      advShown: (p) => this.play.advShown(p, p.eventId, p.cg),
 
       observerControl: (p) => this.play.observerControl(p, p.action),
       observerSettings: (p) => this.play.observerSettings(p, p.settings),

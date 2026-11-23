@@ -2,7 +2,9 @@
  * 端到端冒烟测试：真正启动 Electron 应用，连一个本地模拟的 OpenAI 兼容服务，走一遍完整流程：
  * 添加接入点 → 拉取模型 → 能力探测 → 设置职责路由 → 调试台对话 → 查看调用日志（M0）
  * → 一键创世 → 开始周目 → 对话 → 重抽 / 切换分支 → 存档 → 继续 → 读档（M1）
- * → 观察模式：自动演出 → 导演指令 → 暂停 → 接管角色 → 交还（M2）。
+ * → 观察模式：自动演出 → 导演指令 → 暂停 → 接管角色 → 交还（M2）
+ * → 剧情 ADV：导入手写的示例世界 → VN 舞台上快进、自动、点击推进 → 选项和检定 → 存档 → 好结局
+ *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
@@ -18,6 +20,26 @@ import { _electron as electron, type Page } from 'playwright-core';
 const appDir = path.resolve(import.meta.dirname, '..');
 const shotsDir = process.env.E2E_SCREENSHOTS;
 const API_KEY = 'sk-e2e-secret-key';
+
+/** 点舞台（避开文本框里的按钮），一直到出现选项或周目结束。 */
+async function advUntil(page: Page, what: 'menu' | 'ending', max = 300) {
+  const sel = what === 'menu' ? '[data-testid="adv-menu"]' : '[data-testid="adv-ending"]';
+  for (let i = 0; i < max; i++) {
+    if (await page.$(sel)) return;
+    if (what === 'ending' && (await page.$('[data-testid="adv-menu"]'))) throw new Error('还没到结局就出现了选项');
+    await page.click('[data-testid="adv-stage"]', { position: { x: 12, y: 12 } });
+    await page.waitForTimeout(15);
+  }
+  throw new Error(`点了 ${max} 次还没有${what === 'menu' ? '出现选项' : '到结局'}`);
+}
+
+async function choose(page: Page, index: number, label: string) {
+  const opt = page.locator(`[data-testid="adv-option-${index}"]`);
+  assert.match((await opt.textContent()) ?? '', new RegExp(label));
+  await page.waitForTimeout(450); // 选项刚弹出时不接受点击（防止连点误选）
+  await opt.click();
+  await page.waitForSelector('[data-testid="adv-menu"]', { state: 'detached' });
+}
 
 async function shot(page: Page, name: string) {
   if (!shotsDir) return;
@@ -248,6 +270,97 @@ try {
   const worldJson = JSON.parse(await readFile(path.join(dataDir, 'worlds', worlds[0] as string, 'world.json'), 'utf8'));
   assert.equal(worldJson.status, 'ready');
   step(`世界文件夹已写入：worlds/${worlds[0]}`);
+
+  // ── 剧情 ADV：导入手写的示例世界（系统的选文件夹对话框换成直接返回示例目录）
+  const example = path.resolve(appDir, '../../examples/worlds/old_library');
+  await app.evaluate(({ dialog }, dir) => {
+    dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [dir] })) as unknown as typeof dialog.showOpenDialog;
+  }, example);
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="import-world"]');
+  await page.waitForSelector('text=已导入「旧书库的约定」');
+  await page.click('button:has-text("剧情图")');
+  await page.waitForSelector('[data-testid="plot-check"] >> text=剧情图检查通过');
+  await shot(page, '14-adv-world');
+  await page.click('[data-testid="start-play"]');
+  // 没有开场的手写世界只能玩剧情 ADV，默认就选中了
+  await page.waitForSelector('[data-testid="mode-chat"][disabled]');
+  await page.click('[data-testid="start-confirm"]');
+  await page.waitForSelector('[data-testid="adv-stage"]');
+  await page.waitForSelector('[data-testid="adv-card"] >> text=图书馆的偶遇');
+  await shot(page, '15-adv-title-card');
+  step('导入示例世界，开始剧情 ADV 周目（标题卡）');
+
+  // 自动播放：不点也会往下走
+  await page.click('[data-testid="adv-auto"]');
+  await page.waitForFunction(() => Number(document.querySelector('[data-testid="adv-stage"]')?.getAttribute('data-step')) >= 2, undefined, {
+    timeout: 20_000,
+  });
+  await page.click('[data-testid="adv-auto"]');
+  await page.waitForSelector('[data-testid="adv-sprite"][data-char="char_lin"][data-x="50"]');
+  await shot(page, '16-adv-stage');
+  // 快进：一直播到选项停下
+  await page.click('[data-testid="adv-skip"]');
+  await page.waitForSelector('[data-testid="adv-menu"]', { timeout: 20_000 });
+  assert.equal(await page.textContent('[data-testid="adv-name"]'), '林夕');
+  await shot(page, '17-adv-menu');
+  step('自动播放、快进到第一个选项');
+
+  await choose(page, 1, '随便看看');
+  await advUntil(page, 'menu');
+  assert.match((await page.textContent('[data-testid="adv-menu"]')) ?? '', /接下来去哪里/);
+  await choose(page, 0, '一起去旧书库');
+  await advUntil(page, 'menu');
+  assert.match((await page.textContent('[data-testid="adv-scene"]')) ?? '', /旧书库的门/);
+  await page.waitForSelector('[data-testid="adv-sprite"][data-char="char_lin"][data-x="28"]');
+  assert.match((await page.textContent('[data-testid="adv-option-0"]')) ?? '', /难度 12/);
+  // 存档：记住舞台播到哪一句
+  await page.click('[data-testid="adv-save"]');
+  await page.fill('[data-testid="adv-save-name"]', '门前');
+  await page.click('[data-testid="adv-save-confirm"]');
+  await page.waitForSelector('[data-testid="adv-save-slot"] >> text=旧书库的门');
+  await shot(page, '18-adv-save');
+  await page.click('[data-testid="adv-panel-close"]');
+  step('换幕、立绘站位、带检定的选项，存档');
+
+  await choose(page, 1, '去找管理员老周借钥匙');
+  await advUntil(page, 'menu');
+  await choose(page, 0, '把字条念给她听');
+  await advUntil(page, 'menu');
+  await shot(page, '19-adv-fork');
+  await choose(page, 0, '陪她去海堤找姐姐');
+  await page.waitForSelector('[data-testid="adv-cg"]', { timeout: 20_000 });
+  await advUntil(page, 'ending');
+  assert.equal(await page.textContent('[data-testid="adv-ending-title"]'), '潮汐归来');
+  assert.equal(await page.textContent('[data-testid="adv-progress-endings"]'), '1 / 3');
+  await shot(page, '20-adv-ending');
+  step('手写剧本玩到好结局「潮汐归来」，CG 显示');
+
+  await page.click('[data-testid="adv-ending-rewind"]');
+  await page.waitForSelector('[data-testid="adv-menu"]');
+  await choose(page, 1, '送她回家');
+  await advUntil(page, 'ending');
+  assert.equal(await page.textContent('[data-testid="adv-ending-title"]'), '各自的路');
+  assert.equal(await page.textContent('[data-testid="adv-progress-endings"]'), '2 / 3');
+  await page.click('[data-testid="adv-panel-close"]');
+  step('回到上一个选择，走到普通结局，跨周目进度 2 / 3');
+
+  await page.click('[data-testid="adv-load"]');
+  await page.click('[data-testid="adv-load-slot"]');
+  await page.waitForSelector('[data-testid="adv-menu"]');
+  assert.match((await page.textContent('[data-testid="adv-scene"]')) ?? '', /旧书库的门/);
+  assert.match((await page.textContent('[data-testid="adv-text"]')) ?? '', /试了一个星期都没打开/);
+  await page.click('[data-testid="adv-backlog"]');
+  await page.waitForSelector('[data-testid="adv-backlog-panel"] >> text=你选了：随便看看');
+  await shot(page, '21-adv-backlog');
+  await page.click('[data-testid="adv-panel-close"]');
+  step('读档回到门前那一句，回想里有之前的选择');
+
+  // 检定：选"研究门锁的机关"，引擎掷骰，舞台上单独一步显示结果
+  await choose(page, 0, '研究门锁的机关');
+  await page.waitForSelector('[data-testid="adv-check"] >> text=难度 12', { timeout: 20_000 });
+  await shot(page, '22-adv-check');
+  step('带检定的选项：舞台显示掷骰结果');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {
