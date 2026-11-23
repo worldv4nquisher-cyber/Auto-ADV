@@ -1,5 +1,5 @@
 import type { PlaythroughInfo, PlotCheckResult, StartPlaythroughParams, WorldDetail } from '@auto-adv/engine/api';
-import { type Character, GENESIS_STEPS, type GenesisStepId, type ObserverSettings, type PlotOutline } from '@auto-adv/schema';
+import { type Character, GENESIS_STEPS, type GenesisStepId, type ObserverSettings } from '@auto-adv/schema';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Badge,
@@ -135,7 +135,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
                 { value: 'overview', label: '概览' },
                 { value: 'characters', label: `角色 ${world.characters.length || ''}` },
                 { value: 'locations', label: `地点 ${world.locations.length || ''}` },
-                { value: 'plot', label: world.plot || !world.graph ? '剧情骨架' : '剧情图' },
+                { value: 'plot', label: '剧情图' },
                 { value: 'lore', label: `设定集 ${world.lore.length || ''}` },
                 { value: 'opening', label: '开场' },
               ]}
@@ -167,12 +167,10 @@ export function WorldPage({ worldId }: { worldId: string }) {
               </div>
             )}
             {tab === 'plot' &&
-              (world.plot ? (
-                <PlotView plot={world.plot} />
-              ) : world.graph ? (
+              (world.graph ? (
                 <GraphView world={world} />
               ) : (
-                <Empty title="剧情骨架还没有生成">观察模式会按剧情骨架推进故事。</Empty>
+                <Empty title="剧情图还没有生成">观察模式和剧情 ADV 都按剧情图一幕一幕推进故事。</Empty>
               ))}
             {tab === 'lore' && (
               <div className="grid gap-2">
@@ -319,7 +317,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
               </ul>
               {ready && incomplete && (
                 <p className="mt-3 border-t border-line pt-3 text-xs leading-relaxed text-faint">
-                  这个世界是旧版本生成的，缺少剧情骨架。点「继续生成」补上，观察模式会按它推进故事；已有的内容不会变。
+                  这个世界是旧版本生成的，缺少剧情图。点「继续生成」补上，观察模式和剧情 ADV 会按它推进故事；已有的内容不会变。
                 </p>
               )}
               {ready && protagonist && (
@@ -334,7 +332,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
       </div>
       {dialog && (
         <StartDialog
-          hasPlot={!!world.plot}
+          hasPlot={!!world.graph}
           hasOpening={!!world.opening}
           plotCheck={world.graph ? world.plotCheck : null}
           starting={starting}
@@ -400,7 +398,7 @@ function StartDialog({
         </div>
         {mode === 'adv' && (
           <p className="mt-4 text-xs leading-relaxed text-muted">
-            目前只播放手写剧本，没有剧本的幕先用一句占位旁白代替（接 AI 演出是下一步）。背景、立绘和 CG 先用占位图。
+            有手写剧本的幕照剧本播放；没有剧本的幕由 AI 演出，每一拍给你几个选项，你也可以直接输入想做的事（需要先在设置里配好模型）。背景、立绘和 CG 先用占位图。
           </p>
         )}
         {plotCheck && !plotCheck.ok && (
@@ -435,7 +433,7 @@ function StartDialog({
             </Field>
             {!hasPlot && (
               <p className="col-span-2 text-xs leading-relaxed text-warn">
-                这个世界还没有剧情骨架，导演只能自由发挥。建议先在「创世步骤」里点「继续生成」补上。
+                这个世界还没有剧情图，导演只能自由发挥。建议先在「创世步骤」里点「继续生成」补上。
               </p>
             )}
           </div>
@@ -455,72 +453,6 @@ function StartDialog({
           </Button>
         </div>
       </Card>
-    </div>
-  );
-}
-
-function PlotView({ plot }: { plot: PlotOutline }) {
-  return (
-    <div className="space-y-4">
-      {plot.premise && (
-        <Card className="p-5 text-sm leading-relaxed">
-          <div className="mb-1 text-xs text-faint">核心</div>
-          {plot.premise}
-        </Card>
-      )}
-      {plot.acts.map((act) => (
-        <Card key={act.id} className="p-5">
-          <div className="mb-3 font-medium">{act.title}</div>
-          <div className="space-y-4">
-            {act.chapters.map((ch, i) => (
-              <div key={ch.id}>
-                <div className="text-sm font-medium">
-                  <span className="mr-2 text-faint">第 {i + 1} 章</span>
-                  {ch.title}
-                </div>
-                <p className="mt-0.5 text-xs text-muted">{ch.goal}</p>
-                <ul className="mt-1.5 space-y-1">
-                  {ch.beats.map((b) => (
-                    <li key={b.id} className="flex gap-2 text-sm text-muted">
-                      <span className="text-faint">·</span>
-                      {b.text}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
-        </Card>
-      ))}
-      {(plot.threads.length > 0 || plot.endings.length > 0) && (
-        <Card className="grid grid-cols-2 gap-6 p-5 text-sm">
-          {plot.threads.length > 0 && (
-            <div>
-              <div className="mb-1.5 text-xs text-faint">伏笔</div>
-              <ul className="space-y-1.5 text-muted">
-                {plot.threads.map((t) => (
-                  <li key={t.id}>
-                    {t.text}
-                    {t.payoff && <span className="text-faint">（回收：{t.payoff}）</span>}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {plot.endings.length > 0 && (
-            <div>
-              <div className="mb-1.5 text-xs text-faint">可能的结局</div>
-              <ul className="space-y-1.5 text-muted">
-                {plot.endings.map((e) => (
-                  <li key={e.id}>
-                    <span className="text-fg">{e.title}</span>：{e.condition}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </Card>
-      )}
     </div>
   );
 }

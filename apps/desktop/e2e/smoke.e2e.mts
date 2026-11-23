@@ -3,6 +3,7 @@
  * 添加接入点 → 拉取模型 → 能力探测 → 设置职责路由 → 调试台对话 → 查看调用日志（M0）
  * → 一键创世 → 开始周目 → 对话 → 重抽 / 切换分支 → 存档 → 继续 → 读档（M1）
  * → 观察模式：自动演出 → 导演指令 → 暂停 → 接管角色 → 交还（M2）
+ * → 剧情 ADV（生成的世界，每一幕由 AI 演出）：AI 给的选项 → 自由输入 → 岔路 → 带检定的选项（M3 第 3 步）
  * → 剧情 ADV：导入手写的示例世界 → VN 舞台上快进、自动、点击推进 → 选项和检定 → 存档 → 好结局
  *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）。
  *
@@ -26,6 +27,11 @@ async function advUntil(page: Page, what: 'menu' | 'ending', max = 300) {
   const sel = what === 'menu' ? '[data-testid="adv-menu"]' : '[data-testid="adv-ending"]';
   for (let i = 0; i < max; i++) {
     if (await page.$(sel)) return;
+    // AI 在演这一拍：等它演完再点
+    if (await page.$('[data-testid="adv-stage"][data-busy="1"]')) {
+      await page.waitForSelector('[data-testid="adv-stage"][data-busy="0"]', { timeout: 60_000 });
+      continue;
+    }
     if (what === 'ending' && (await page.$('[data-testid="adv-menu"]'))) throw new Error('还没到结局就出现了选项');
     await page.click('[data-testid="adv-stage"]', { position: { x: 12, y: 12 } });
     await page.waitForTimeout(15);
@@ -163,8 +169,9 @@ try {
   await page.click('button:has-text("角色") >> nth=0');
   await page.waitForSelector('text=主角（你）');
   await shot(page, '09-world-characters');
-  await page.click('button:has-text("剧情骨架")');
-  await page.waitForSelector('text=第 1 章');
+  await page.click('button:has-text("剧情图")');
+  await page.waitForSelector('[data-scene="sc_01"]');
+  await page.waitForSelector('[data-testid="plot-check"] >> text=剧情图检查通过');
   await shot(page, '09b-world-plot');
   await page.click('button:has-text("概览")');
 
@@ -224,8 +231,8 @@ try {
     { timeout: 60_000 },
   );
   const plotText = (await page.textContent('[data-testid="observe-plot"]')) ?? '';
-  assert.match(plotText, /[1-9]\d*\/\d+ 个节拍/, `剧情进度应该在推进：${plotText}`);
-  step('观察模式自动演出，剧情骨架在推进');
+  assert.match(plotText, /✓|走过 [2-9] 幕/, `剧情进度应该在推进：${plotText}`);
+  step('观察模式自动演出，按剧情图一幕一幕推进');
 
   await page.fill('[data-testid="observe-input"]', '让白鸦突然出现');
   await page.click('[data-testid="observe-send"]');
@@ -263,6 +270,34 @@ try {
   });
   await page.click('[data-testid="observe-toggle"]');
   step('接管角色说话，交还后继续自动演出');
+
+  // ── 剧情 ADV：生成的世界没有手写剧本，每一幕由 AI 演出
+  await page.click('button:has-text("‹ 雾港谜灯")');
+  await page.click('[data-testid="start-play"]');
+  await page.click('[data-testid="mode-adv"]');
+  await page.click('[data-testid="start-confirm"]');
+  await page.waitForSelector('[data-testid="adv-stage"]');
+  await advUntil(page, 'menu');
+  const aiMenu = (await page.textContent('[data-testid="adv-menu"]')) ?? '';
+  assert.match(aiMenu, /仔细观察四周.*难度 12/, `AI 应该给出带检定的选项：${aiMenu}`);
+  await shot(page, '13b-adv-ai-menu');
+  step('剧情 ADV：AI 演出第一幕，给出选项');
+
+  await page.fill('[data-testid="adv-input"] input', '问她那晚看到了什么');
+  await page.press('[data-testid="adv-input"] input', 'Enter');
+  await page.waitForSelector('[data-testid="adv-text"] >> text=你决定：问她那晚看到了什么', { timeout: 60_000 });
+  await advUntil(page, 'menu');
+  assert.match((await page.textContent('[data-testid="adv-menu"]')) ?? '', /接下来去哪里/);
+  step('自由输入行动，演完这一幕后在岔路停下');
+
+  await choose(page, 0, '一起去灯塔');
+  await page.waitForSelector('[data-testid="adv-card"] >> text=同行', { timeout: 60_000 });
+  await advUntil(page, 'menu');
+  await choose(page, 1, '仔细观察四周');
+  await page.waitForSelector('[data-testid="adv-check"] >> text=仔细观察四周', { timeout: 60_000 });
+  await shot(page, '13c-adv-ai-check');
+  step('岔路由玩家选；AI 给的选项也能掷骰检定');
+  await page.click('[data-testid="adv-exit"]');
 
   // ── 世界文件夹
   const worlds = await readdir(path.join(dataDir, 'worlds'));

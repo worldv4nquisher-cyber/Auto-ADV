@@ -8,7 +8,8 @@ import type {
   Segment,
   WorldDetail,
 } from '@auto-adv/engine/api';
-import type { ObserverSettings, PlotOutline } from '@auto-adv/schema';
+import { foldPlot, type PlotState } from '@auto-adv/engine/progress';
+import type { ObserverSettings } from '@auto-adv/schema';
 import { type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { EventBlock, Segments, useColorOf } from '../components/story.tsx';
 import { Badge, Button, Card, cx, Field, Input, Markdown, Select, Spinner, Textarea, useToast } from '../components/ui.tsx';
@@ -68,7 +69,7 @@ function visibleAt(segs: Segment[], clock: number): Segment[] {
 }
 
 const PHASE_TEXT: Record<string, string> = {
-  arc: '剧情骨架演完了，导演正在构思新的篇章…',
+  arc: '剧情图走完了，导演正在续写新的篇章…',
   director: '导演正在安排下一拍…',
   writer: '演员们正在演出…',
   narrator: '旁白正在描写…',
@@ -97,18 +98,15 @@ interface Live {
 
 /** 读者看到的进度（不剧透还没播到的部分）。 */
 function storyAt(world: WorldDetail, seen: PlayEvent[]) {
-  const done = new Set(seen.flatMap((e) => e.beat?.done ?? []));
-  const acts: PlotOutline['acts'] = [...(world.plot?.acts ?? []), ...seen.flatMap((e) => (e.beat?.arc ? [e.beat.arc] : []))];
-  const chapters = acts.flatMap((a) => a.chapters);
-  const chapter = chapters.find((ch) => ch.beats.some((b) => !done.has(b.id))) ?? null;
+  // 剧情图加上这个周目续写出来的幕，折叠到读者看到的位置为止
+  const plot: PlotState | null = world.graph ? foldPlot(world.graph, world.variables, seen) : null;
   let scene: SceneState = { locationId: null, presentCharacterIds: [] };
   let time: string | null = null;
   for (const e of seen) {
     if (e.scene) scene = e.scene;
     if (e.beat?.time) time = e.beat.time;
   }
-  const total = chapters.reduce((n, ch) => n + ch.beats.length, 0);
-  return { done, chapter, chapters, scene, time, total };
+  return { plot, scene, time };
 }
 
 export function ObservePage({ world, initial, onBack }: { world: WorldDetail; initial: PlayView; onBack: () => void }) {
@@ -681,37 +679,45 @@ function LiveArea({
 }
 
 function PlotCard({ story }: { story: ReturnType<typeof storyAt> }) {
-  const ch = story.chapter;
+  const p = story.plot;
+  const sc = p?.scene;
+  const chapter = sc?.chapter ? p?.graph.chapters.find((c) => c.id === sc.chapter) : undefined;
+  const done = sc ? sc.points.filter((x) => p?.points.has(x.id)).length : 0;
   return (
     <Card className="p-4" data-testid="observe-plot">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-medium text-muted">剧情进度</span>
-        {story.total > 0 && (
-          <span className="text-[11px] text-faint">
-            {story.done.size}/{story.total} 个节拍
-          </span>
-        )}
+        {p && <span className="text-[11px] text-faint">走过 {p.visited.length} 幕</span>}
       </div>
-      {story.total > 0 && (
-        <div className="mb-3 h-1 overflow-hidden rounded bg-panel-2">
-          <div className="h-full bg-accent" style={{ width: `${Math.round((story.done.size / story.total) * 100)}%` }} />
-        </div>
-      )}
-      {ch ? (
-        <>
-          <div className="text-sm font-medium">{ch.title || '当前章节'}</div>
-          <p className="mt-0.5 text-xs leading-relaxed text-muted">{ch.goal}</p>
-          <ul className="mt-2 space-y-1">
-            {ch.beats.map((b) => (
-              <li key={b.id} className={cx('flex gap-1.5 text-xs', story.done.has(b.id) ? 'text-faint line-through' : 'text-muted')}>
-                <span className="shrink-0">{story.done.has(b.id) ? '✓' : '○'}</span>
-                {b.text}
-              </li>
-            ))}
-          </ul>
-        </>
+      {!p || !sc ? (
+        <p className="text-xs text-faint">这个世界没有剧情图，导演会自由发挥。</p>
       ) : (
-        <p className="text-xs text-faint">{story.total ? '骨架全部演完，导演会续写新的篇章。' : '这个世界没有剧情骨架，导演会自由发挥。'}</p>
+        <>
+          {sc.points.length > 0 && !sc.ending && (
+            <div className="mb-3 h-1 overflow-hidden rounded bg-panel-2">
+              <div className="h-full bg-accent" style={{ width: `${Math.round((done / sc.points.length) * 100)}%` }} />
+            </div>
+          )}
+          {chapter && <div className="text-[11px] text-faint">{chapter.title || chapter.id}</div>}
+          <div className="text-sm font-medium" data-testid="observe-scene">
+            {sc.title || sc.id}
+          </div>
+          {sc.what && <p className="mt-0.5 text-xs leading-relaxed text-muted">{sc.what}</p>}
+          {sc.ending ? (
+            <p className="mt-2 text-xs leading-relaxed text-accent-strong">
+              {p.finished ? '到达了一个结局。导演会接着续写新的篇章。' : '正在走向结局…'}
+            </p>
+          ) : (
+            <ul className="mt-2 space-y-1">
+              {sc.points.map((x) => (
+                <li key={x.id} className={cx('flex gap-1.5 text-xs', p.points.has(x.id) ? 'text-faint line-through' : 'text-muted')}>
+                  <span className="shrink-0">{p.points.has(x.id) ? '✓' : '○'}</span>
+                  {x.text}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </Card>
   );
@@ -733,20 +739,41 @@ function DirectorNotes({ world, e, story }: { world: WorldDetail; e: PlayEvent; 
   const b = e.beat;
   if (!b) return null;
   const name = (id: string) => world.characters.find((c) => c.id === id)?.name ?? id;
-  const beatText = (id: string) => story.chapters.flatMap((c) => c.beats).find((x) => x.id === id)?.text ?? id;
+  const g = story.plot?.graph;
+  const pointText = (id: string) => g?.scenes.flatMap((s) => s.points).find((x) => x.id === id)?.text ?? id;
+  const sceneTitle = (id: string) => g?.scenes.find((s) => s.id === id)?.title || id;
+  const m = e.plot;
   return (
     <Card className="p-4" data-testid="director-notes">
       <details>
         <summary className="cursor-pointer text-xs font-medium text-muted select-none">导演笔记（上一拍）</summary>
         <div className="mt-2 space-y-1.5 text-xs leading-relaxed text-muted">
           <p>{b.plan}</p>
+          {m?.append && (
+            <p className="text-accent-strong">
+              续写了新篇章：{m.append.chapters.map((c) => c.title || c.id).join('、') || `${m.append.scenes.length} 幕`}
+            </p>
+          )}
           {b.arc && <p className="text-accent-strong">续写了新篇章：{b.arc.title}</p>}
           {b.card && <p>事件卡：{b.card}</p>}
-          {b.done?.map((id) => (
+          {e.check && (
+            <p>
+              检定「{e.check.label}」：{e.check.total} 对难度 {e.check.dc}
+            </p>
+          )}
+          {m?.points?.map((id) => (
             <p key={id} className="text-ok">
-              ✓ {beatText(id)}
+              ✓ {pointText(id)}
             </p>
           ))}
+          {m?.vars?.map((v) => (
+            <p key={v.var}>
+              {world.variables.find((x) => x.id === v.var)?.label || v.var}：{String(v.from)} → {String(v.to)}
+            </p>
+          ))}
+          {m?.exit && <p className="text-accent-strong">→ 进入「{sceneTitle(m.exit.to)}」</p>}
+          {m?.ending && <p className="text-accent-strong">★ 到达结局「{sceneTitle(m.ending)}」</p>}
+          {m?.notes?.length ? <p className="text-faint">引擎：{m.notes.join('；')}</p> : null}
           {b.reveals?.map((r) => (
             <p key={r.characterId}>
               秘密揭开：{name(r.characterId)}的秘密被{r.to.map(name).join('、')}知道了
