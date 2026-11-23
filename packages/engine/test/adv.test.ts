@@ -3,7 +3,7 @@
  * 不调模型。
  */
 import path from 'node:path';
-import { migratePlotOutline, PlotGraph, PlotOutline } from '@auto-adv/schema';
+import { LegacyPlotOutline, migratePlotOutline, PlotGraph } from '@auto-adv/schema';
 import { beforeAll, describe, expect, it } from 'vitest';
 import type { PlayEvent } from '../src/api.ts';
 import { PlayDb } from '../src/play/db.ts';
@@ -53,7 +53,6 @@ const beatsIn = (events: PlayEvent[], scene: string) => events.filter((e) => e.k
 describe('示例世界：旧书库的约定', () => {
   it('读取剧情图、变量和手写剧本，结构检查没有错误也没有警告', () => {
     expect(world.graph?.scenes).toHaveLength(8);
-    expect(world.plot).toBeNull();
     expect(world.variables.map((v) => v.id)).toEqual(['affinity.char_lin', 'attr.wit', 'flags.door_open', 'flags.told_truth']);
     expect(Object.keys(world.scripts).sort()).toEqual(['sc_01', 'sc_02', 'sc_03', 'sc_05', 'sc_08']);
     expect(checkWorldPlot(world)).toEqual({ ok: true, errors: [], warnings: [] });
@@ -283,7 +282,7 @@ describe('开玩前的检查和旧周目兼容', () => {
 
   it('M2 观察模式的周目：只有"完成了哪些节拍"，当前幕 = 第一个还有要点没演完的幕', () => {
     const graph = migratePlotOutline(
-      PlotOutline.parse({
+      LegacyPlotOutline.parse({
         premise: '',
         acts: [
           {

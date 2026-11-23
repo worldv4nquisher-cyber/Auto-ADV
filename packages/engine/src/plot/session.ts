@@ -10,7 +10,7 @@ import type { WorldData } from '../world/store.ts';
 import { type AdvParseResult, parseAdv, walkScript } from './adv.ts';
 import { checkPlot, type PlotCheckResult } from './check.ts';
 import { foldPlot, isStuck, type PlotState } from './progress.ts';
-import { type AdvAction, type AdvWorld, compileScript, type Program, stepAdv } from './runner.ts';
+import { type AdvAction, type AdvWorld, type AiRequest, compileScript, type EventDraft, type Program, stepAdv } from './runner.ts';
 
 /** 解析世界里的手写剧本。 */
 export function parseScripts(world: Pick<WorldData, 'scripts'>): Map<string, AdvParseResult> {
@@ -97,14 +97,15 @@ export function advView(
   world: Pick<WorldData, 'graph' | 'variables' | 'scripts' | 'characters' | 'locations'>,
   path: readonly PlayEvent[],
   unlocks: readonly UnlockRow[],
+  opts: { ai?: boolean } = {},
 ): AdvView | null {
   const g = world.graph;
   if (!g) return null;
   const check = checkWorldPlot(world) as PlotCheckResult;
   const s = foldPlot(g, world.variables, path);
-  const endScene = s.ending ? g.scenes.find((x) => x.id === s.ending) : undefined;
-  const chapter = s.scene?.chapter ? g.chapters.find((c) => c.id === s.scene?.chapter) : undefined;
-  const prog = endingProgress(g, unlocks);
+  const endScene = s.ending ? s.graph.scenes.find((x) => x.id === s.ending) : undefined;
+  const chapter = s.scene?.chapter ? s.graph.chapters.find((c) => c.id === s.scene?.chapter) : undefined;
+  const prog = endingProgress(s.graph, unlocks);
   const sceneIds = new Set(g.scenes.map((x) => x.id));
   return {
     scene: s.scene ? { id: s.scene.id, title: s.scene.title || s.scene.id, chapter: chapter ? chapter.title || chapter.id : null } : null,
@@ -120,6 +121,8 @@ export function advView(
           .slice(0, 3)
           .map((e) => e.message)
           .join('；')}`,
+    aiScene: !!s.scene && !s.finished && !(s.scene.id in world.scripts),
+    needsModel: !opts.ai && !!s.scene && !s.finished && !(s.scene.id in world.scripts),
     vars: { ...s.vars },
     progress: {
       endings: prog.endings.map((e) => ({ ...e, title: e.hidden && !e.reached ? '？？？' : e.title })),
@@ -137,6 +140,15 @@ export interface ActResult {
   /** 这一步第一次解锁的东西。 */
   unlocked: UnlockRow[];
   state: PlotState;
+  /** 接下来这一拍要由 AI 演出（玩家的行动和检定已经写进去了），演完用 commit 写入。 */
+  ai?: AiRequest;
+}
+
+/** 周目的开场（树根）：生成的世界有开场白；手写的世界没有，树根是空的。 */
+export interface AdvOpening {
+  segments: PlayEvent['segments'];
+  stage?: PlayEvent['stage'];
+  scene: NonNullable<PlayEvent['scene']>;
 }
 
 export interface AdvSessionOptions {
@@ -157,8 +169,8 @@ export class AdvSession {
     this.now = opts.now ?? Date.now;
   }
 
-  /** 开一个新周目，返回周目 id。树根是一个空的开场事件，第一拍由 next() 演出。 */
-  start(title: string, protagonistId: string | null = null): string {
+  /** 开一个新周目，返回周目 id。树根是开场事件（没给开场时是空的），第一拍由 next() 演出。 */
+  start(title: string, protagonistId: string | null = null, opening?: AdvOpening): string {
     const now = this.now();
     const start = this.adv.graph.scenes.find((s) => s.id === this.adv.graph.start);
     const root: PlayEvent = {
@@ -166,8 +178,9 @@ export class AdvSession {
       parentId: null,
       kind: 'opening',
       createdAt: now,
-      segments: [],
-      scene: { locationId: start?.location ?? null, presentCharacterIds: start?.cast ?? [] },
+      segments: opening?.segments ?? [],
+      ...(opening?.stage?.length ? { stage: opening.stage } : {}),
+      scene: opening?.scene ?? { locationId: start?.location ?? null, presentCharacterIds: start?.cast ?? [] },
     };
     const id = this.newId('pt');
     this.db.createPlaythrough(
@@ -195,6 +208,20 @@ export class AdvSession {
     return this.act(pt, { kind: 'choose', index });
   }
 
+  /** AI 演完的一拍接在当前位置后面（act 返回 ai 请求之后）。 */
+  commit(pt: string, draft: EventDraft, unlocks: readonly { kind: UnlockRow['kind']; id: string }[] = []): ActResult {
+    const head = this.db.getPlaythrough(pt).headId;
+    const now = this.now();
+    const e: PlayEvent = { ...draft, id: this.newId('ev'), parentId: head, createdAt: now };
+    this.db.appendEvents(pt, [e]);
+    const unlocked: UnlockRow[] = [];
+    for (const u of unlocks) {
+      const row: UnlockRow = { kind: u.kind, id: u.id, firstAt: now, playthroughId: pt, eventId: e.id };
+      if (this.db.unlock(row)) unlocked.push(row);
+    }
+    return { events: [e], unlocked, state: this.state(pt) };
+  }
+
   /** 回到某个事件（之后的内容保留为分支）。回到岔路那一拍再选另一项，就是换一条路。 */
   rewind(pt: string, eventId: string): PlotState {
     this.db.setHead(pt, eventId);
@@ -206,7 +233,7 @@ export class AdvSession {
     return recordCgShown(this.db, pt, eventId, cg, this.now());
   }
 
-  private act(pt: string, action: AdvAction): ActResult {
+  act(pt: string, action: AdvAction): ActResult {
     const head = this.db.getPlaythrough(pt).headId;
     const state = foldPlot(this.adv.graph, this.adv.variables, this.db.path(pt, head));
     const step = stepAdv(this.adv, state, action, { playthroughId: pt, headId: head });
@@ -230,6 +257,6 @@ export class AdvSession {
       };
       if (this.db.unlock(row)) unlocked.push(row);
     }
-    return { events, unlocked, state: this.state(pt) };
+    return { events, unlocked, state: this.state(pt), ...(step.ai ? { ai: step.ai } : {}) };
   }
 }

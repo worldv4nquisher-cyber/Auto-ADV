@@ -7,7 +7,6 @@ import {
   type GenesisStepState,
   type Location,
   type LoreEntry,
-  type PlotOutline,
   type StoryOpening,
   WorldManifest,
 } from '@auto-adv/schema';
@@ -28,7 +27,8 @@ import {
   type SeedInput,
   worldviewPrompt,
 } from './prompts.ts';
-import { briefSpec, castSpec, locationsSpec, loreSpec, openingSpec, type PlotOut, plotSpec } from './specs.ts';
+import { checkGraphOut, graphSpec } from './graph.ts';
+import { briefSpec, castSpec, locationsSpec, loreSpec, openingSpec } from './specs.ts';
 
 type Emit = (chunk: GenesisChunk) => void;
 
@@ -43,21 +43,6 @@ interface StepContext {
 
 const STEP_IDS = GENESIS_STEPS.map((s) => s.id);
 const pad = (i: number) => String(i + 1).padStart(2, '0');
-
-/** 把模型给出的一个篇章转换成骨架里的一幕。actIndex 决定 id 前缀，续写的新篇章不会和旧 id 冲突。 */
-export function toAct(value: PlotOut, actIndex: number): PlotOutline['acts'][number] {
-  const a = pad(actIndex);
-  return {
-    id: `act_${a}`,
-    title: value.arcTitle || `第 ${actIndex + 1} 篇`,
-    chapters: value.chapters.map((ch, ci) => ({
-      id: `ch_${a}_${pad(ci)}`,
-      title: ch.title || `第 ${ci + 1} 章`,
-      goal: ch.goal,
-      beats: ch.beats.map((text, bi) => ({ id: `b_${a}_${pad(ci)}_${pad(bi)}`, text, required: true })),
-    })),
-  };
-}
 
 function isAbort(err: unknown, signal: AbortSignal): boolean {
   return signal.aborted || (err as { aborted?: boolean })?.aborted === true || (err as Error)?.name === 'AbortError';
@@ -403,23 +388,21 @@ export class GenesisRunner {
     await this.store.writeLore(c.worldId, entries);
   }
 
+  /** 剧情图和数值：结构检查不过时把问题反馈给模型重写（最多重写 2 次）。 */
   private async plot(c: StepContext): Promise<void> {
+    const ctx = { world: c.data };
     const { value } = await generateJson(this.gateway, c.handle, {
       system: GENESIS_SYSTEM,
       user: plotPrompt(c.data, c.seed.options),
-      spec: plotSpec,
+      spec: graphSpec,
       signal: c.signal,
       onProgress: c.progress,
+      validate: (v) => checkGraphOut(v, ctx).problem,
     });
-    await this.store.writePlot(c.worldId, {
-      formatVersion: FORMAT_VERSION,
-      premise: value.premise,
-      control: 'guided',
-      acts: [toAct(value, 0)],
-      endings: value.endings.map((e, i) => ({ id: `end_${pad(i)}`, title: e.title, condition: e.condition })),
-      threads: value.threads.map((t, i) => ({ id: `thread_${pad(i)}`, text: t.text, payoff: t.payoff || undefined })),
-      _meta: { locked: [], generatedBy: c.handle.model },
-    });
+    const { graph, variables } = checkGraphOut(value, ctx);
+    graph._meta = { locked: [], generatedBy: c.handle.model };
+    await this.store.writeVariables(c.worldId, variables);
+    await this.store.writePlot(c.worldId, graph);
   }
 
   private async opening(c: StepContext): Promise<void> {

@@ -255,8 +255,13 @@ async function genesis() {
     for (const c of w.characters) console.log(`  · ${c.name}（${c.role}）${c.summary}`);
     console.log(`  地点：${w.locations.map((l) => l.name).join('、')}`);
     console.log(`  设定集：${w.lore.map((l) => l.title).join('、')}`);
-    if (w.plot) {
-      for (const ch of w.plot.acts.flatMap((a) => a.chapters)) console.log(`  [${ch.title}] ${ch.goal}`);
+    if (w.graph) {
+      console.log(`  剧情图：${w.graph.scenes.length} 幕，${w.graph.scenes.filter((s) => s.ending).length} 个结局，${w.variables.length} 个变量`);
+      for (const s of w.graph.scenes) {
+        const exits = s.exits.map((e) => `${e.to}${e.if ? '*' : ''}`).join(' / ');
+        console.log(`  [${s.id}] ${s.title}${s.ending ? `（结局：${s.ending.kind}）` : `：${s.what}${exits ? ` → ${exits}` : ''}`}`);
+      }
+      if (w.plotCheck && !w.plotCheck.ok) console.log(`  ⚠ 结构检查：${w.plotCheck.errors.map((e) => e.message).join('；')}`);
     }
     if (w.opening) console.log(`\n${w.opening.narration}`);
     const usage = engine.calls.summary();
@@ -372,7 +377,7 @@ async function observe() {
       ['停滞', `最长连续 ${r.longestStall} 拍没有推进，抽了 ${r.cards} 张事件卡`],
       [
         '剧情',
-        `完成节拍 ${r.plot.done}/${r.plot.total}，续写篇章 ${r.plot.arcs} 次，当前章节：${r.plot.currentChapter ?? '（全部完成）'}${r.time ? `，故事时间：${r.time}` : ''}`,
+        `走过 ${r.plot.scenes} 幕，演到要点 ${r.plot.points}/${r.plot.total}，续写篇章 ${r.plot.arcs} 次，达成结局：${r.plot.endings.join('、') || '无'}，当前幕：${r.plot.currentScene ?? '（走完了）'}${r.time ? `，故事时间：${r.time}` : ''}`,
       ],
       ['场景', `换了 ${r.sceneChanges} 次地点：${r.locations.join('、')}`],
       ['台词', r.speakers.map((s) => `${s.name} ${s.lines}`).join(' · ') || '（无）'],

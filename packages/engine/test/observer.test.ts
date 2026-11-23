@@ -101,7 +101,7 @@ describe('观察模式', () => {
     // 没有玩家：主角也在场
     expect(start.scene.presentCharacterIds).toEqual(['char_01', 'char_02']);
     expect(start.observer).toMatchObject({ running: false, activity: 'idle', ahead: 0, readId: start.path[0]?.id });
-    expect(start.plot.currentChapterId).toBe('ch_01_01');
+    expect(start.plot).toMatchObject({ scene: 'sc_01', sceneBeats: 0, points: [], visited: ['sc_01'] });
 
     const chunks: ObserverChunk[] = [];
     const ac = new AbortController();
@@ -114,14 +114,22 @@ describe('观察模式', () => {
     const [b1, b2] = beats(v);
     expect(b1?.beat?.plan).toContain('模拟导演');
     expect(b1?.beat?.strategy).toBe('merged');
-    expect(b1?.beat?.done).toEqual(['b_01_01_01']);
-    expect(b2?.beat?.done).toEqual(['b_01_01_02']);
+    // 剧情图：一拍演到一个要点；第二拍演完这一幕（已经演够 2 拍），导演选了第一个出口
+    expect(b1?.plot).toMatchObject({ scene: 'sc_01', points: ['sc_01_1'], vars: [{ var: 'affinity.char_02', from: 30, to: 33 }] });
+    expect(b1?.plot?.exit).toBeUndefined();
+    expect(b2?.plot).toMatchObject({ scene: 'sc_01', points: ['sc_01_2'], exit: { to: 'sc_02', by: 'director' } });
     expect(typeof b2?.beat?.similarity).toBe('number');
     // 台词都对应到了在场的角色
     const speakers = b1?.segments?.flatMap((s) => (s.kind === 'line' ? [s.characterId] : [])) ?? [];
     expect(speakers.length).toBeGreaterThan(0);
     for (const id of speakers) expect(['char_01', 'char_02', 'char_03']).toContain(id);
-    expect(v.plot.done).toEqual(['b_01_01_01', 'b_01_01_02']);
+    expect(v.plot).toMatchObject({ scene: 'sc_02', sceneBeats: 0, points: ['sc_01_1', 'sc_01_2'], visited: ['sc_01', 'sc_02'] });
+    // 导演只看到当前幕和打开的出口，看不到后面的幕
+    const directorReq = JSON.stringify(requests().find((r) => JSON.stringify(r).includes('director_plan')));
+    expect(directorReq).toContain('当前这一幕：[sc_01] 归乡');
+    expect(directorReq).toContain('sc_03「档案馆」');
+    expect(directorReq).not.toContain('sc_04');
+    expect(directorReq).not.toContain('两人一起点亮灯塔');
 
     // 实时推送：开始一拍、导演、编剧、流式内容、完成
     await until(
@@ -207,6 +215,22 @@ describe('观察模式', () => {
     await watching;
   });
 
+  it('导演安排里的检定：引擎先掷骰，结果交给演员；结果记在这一拍上', async () => {
+    const { ref } = await observerReady({ bufferAhead: 1 });
+    await client.call('directive', { ...ref, text: '来一次检定' });
+    await client.call('observerControl', { ...ref, action: 'play' });
+    const v = await until(
+      () => client.call('getPlaythrough', ref),
+      (x) => x.observer?.activity === 'buffered',
+    );
+    const b = beats(v)[0] as PlayEvent;
+    expect(b.check).toMatchObject({ id: 'sc_01:plan', label: '仔细观察', var: 'skill.insight', modifier: 1, dc: 12 });
+    expect(b.check?.total).toBe((b.check?.roll ?? 0) + 1);
+    const writer = requests().find((r) => systemOf(r).includes('演员兼旁白'));
+    expect(JSON.stringify(writer)).toContain('［检定］仔细观察');
+    expect(JSON.stringify(writer)).toContain('［这一幕］归乡');
+  });
+
   it('分演模式：旁白和各个演员分开生成，演员只知道自己该知道的事', async () => {
     const { ref, world } = await observerReady({ strategy: 'split', bufferAhead: 1 });
     await client.call('observerControl', { ...ref, action: 'play' });
@@ -246,7 +270,7 @@ describe('观察模式', () => {
     expect(logs.items.some((c) => c.tag === 'observer.actor' && c.role === 'actor')).toBe(true);
   });
 
-  it('骨架演完自动续写新篇章；记忆整理出每个角色各自的记忆', async () => {
+  it('按剧情图一幕一幕推进，走到结局后续写新篇章；记忆整理出每个角色各自的记忆', async () => {
     const old = { ...MEMORY };
     Object.assign(MEMORY, { triggerEvents: 6, keepEvents: 2 });
     try {
@@ -258,26 +282,36 @@ describe('观察模式', () => {
         20000,
       );
       await client.call('observerControl', { ...ref, action: 'pause' });
-      const metas = beats(v).map((b) => b.beat);
-      // 第一篇章 3 + 3 + 2 个节拍，按顺序一拍一个
-      expect(metas.slice(0, 8).flatMap((m) => m?.done ?? [])).toEqual([
-        'b_01_01_01',
-        'b_01_01_02',
-        'b_01_01_03',
-        'b_01_02_01',
-        'b_01_02_02',
-        'b_01_02_03',
-        'b_01_03_01',
-        'b_01_03_02',
+      const marks = beats(v).map((b) => b.plot);
+      // 每幕两个要点，演两拍；好感每拍 +3，到第四幕时超过 40，打开了好结局的出口
+      expect(marks.slice(0, 7).map((m) => [m?.scene, m?.points?.join() ?? '', m?.exit?.to ?? ''])).toEqual([
+        ['sc_01', 'sc_01_1', ''],
+        ['sc_01', 'sc_01_2', 'sc_02'],
+        ['sc_02', 'sc_02_1', ''],
+        ['sc_02', 'sc_02_2', 'sc_04'],
+        ['sc_04', 'sc_04_1', ''],
+        ['sc_04', 'sc_04_2', 'sc_05'],
+        ['sc_05', '', ''],
       ]);
-      expect(metas.slice(0, 8).some((m) => m?.arc)).toBe(false);
-      // 第 9 拍：骨架走完，续写第二篇章并接着推进
-      expect(metas[8]?.arc?.id).toBe('act_02');
-      expect(metas[8]?.arc?.title).toContain('续篇');
-      expect(metas[8]?.done).toEqual(['b_02_01_01']);
+      // 结局幕：第一拍就算达成结局
+      expect(marks[6]).toMatchObject({ ending: 'sc_05', finished: true });
+      expect(marks.slice(0, 7).some((m) => m?.append)).toBe(false);
+      // 第 8 拍：剧情图走完，续写新篇章（重新编号接在后面），从新篇章的第一幕接着演
+      const add = marks[7]?.append;
+      expect(add?.chapters.map((c) => c.id)).toEqual(['ch_03']);
+      expect(add?.scenes.map((x) => [x.id, x.exits.map((e) => e.to)])).toEqual([
+        ['sc_07', ['sc_08']],
+        ['sc_08', ['sc_09']],
+        ['sc_09', []],
+      ]);
+      expect(add?.scenes[0]?.title).toContain('续篇');
+      expect(marks[7]).toMatchObject({ scene: 'sc_07', points: ['sc_07_1'] });
+      expect(marks[8]).toMatchObject({ scene: 'sc_07', points: ['sc_07_2'], exit: { to: 'sc_08' } });
       v = await client.call('getPlaythrough', ref);
-      expect(v.plot.outline?.acts.map((a) => a.id)).toEqual(['act_01', 'act_02']);
-      expect(v.plot.currentChapterId).toBe('ch_02_01');
+      expect(v.plot.appended.scenes.map((x) => x.id)).toEqual(['sc_07', 'sc_08', 'sc_09']);
+      expect(v.plot.visited.slice(0, 5)).toEqual(['sc_01', 'sc_02', 'sc_04', 'sc_05', 'sc_07']);
+      expect(v.plot.finished).toBe(false);
+      expect(v.plot.ending).toBe('sc_05');
       expect(v.plot.time).toMatch(/第 \d+ 天夜里/);
       const logs = await client.call('listCalls', {});
       expect(logs.items.some((c) => c.tag === 'observer.arc' && c.role === 'director')).toBe(true);
@@ -382,8 +416,8 @@ describe('观察模式', () => {
     const again = beats(v)[0];
     expect(again?.id).not.toBe(b1.id);
     expect(again?.siblingIds).toEqual([b1.id, again?.id]);
-    expect(again?.beat?.done).toEqual(['b_01_01_01']);
-    expect(v.plot.done).toEqual(['b_01_01_01']);
+    expect(again?.plot?.points).toEqual(['sc_01_1']);
+    expect(v.plot.points).toEqual(['sc_01_1']);
 
     await client.call('observerControl', { ...ref, action: 'play' });
     await client.call('deletePlaythrough', ref);
@@ -391,8 +425,10 @@ describe('观察模式', () => {
   });
 });
 
+const noReport = { points: [], sceneDone: false, exit: '', offTrack: false, set: [], check: null };
+
 describe('观察模式的纯逻辑', () => {
-  it('validatePlan：不存在的地点和角色、跳章的节拍、没有秘密的揭示都被驳回', async () => {
+  it('validatePlan：不存在的地点和角色、没有秘密的揭示都被驳回', async () => {
     const { ref } = await observerReady();
     const world = await engine.worlds.load(ref.worldId);
     const v = await client.call('getPlaythrough', ref);
@@ -403,7 +439,7 @@ describe('观察模式的纯逻辑', () => {
       present: ['林夕', '路人甲'],
       time: '',
       speakers: [{ name: '白鸦', intent: '' }],
-      completeBeats: ['b_01_01_02', 'b_01_02_01', ''],
+      ...noReport,
       reveals: [
         { owner: '阿远', to: ['林夕'] },
         { owner: '林夕', to: ['白鸦', '林夕', '路人甲'] },
@@ -412,9 +448,8 @@ describe('观察模式的纯逻辑', () => {
     expect(plan.scene.locationId).toBe(state.scene.locationId);
     // 白鸦被安排说话：视为登场
     expect(plan.scene.presentCharacterIds).toEqual(['char_02', 'char_03']);
-    expect(plan.done).toEqual(['b_01_01_02']);
     expect(plan.reveals).toEqual([{ characterId: 'char_02', to: ['char_03'] }]);
-    expect(plan.rejected.join('\n')).toMatch(/月球[\s\S]*路人甲[\s\S]*b_01_02_01[\s\S]*阿远/);
+    expect(plan.rejected.join('\n')).toMatch(/月球[\s\S]*路人甲[\s\S]*阿远/);
 
     // 已经知道的人不再算一次揭开；全都知道了就整条丢掉（不算驳回）
     state.reveals.set('char_02', new Set(['char_03']));
@@ -424,7 +459,7 @@ describe('观察模式的纯逻辑', () => {
       present: [],
       time: '',
       speakers: [],
-      completeBeats: [],
+      ...noReport,
       reveals: [
         { owner: '林夕', to: ['白鸦'] },
         { owner: '林夕', to: ['白鸦', '阿远'] },
@@ -449,23 +484,24 @@ describe('观察模式的纯逻辑', () => {
       opening as PlayEvent,
       ev('directive', { text: '旧指令' }),
       ev('ai', {
+        plot: { scene: 'sc_01', points: ['sc_01_1'] },
         beat: {
           plan: '',
           strategy: 'merged',
-          done: ['b_01_01_01'],
           time: '黄昏',
           card: '停电',
           reveals: [{ characterId: 'char_02', to: ['char_03'] }],
         },
       }),
-      ev('ai', { beat: { plan: '', strategy: 'merged' } }),
-      ev('ai', { beat: { plan: '', strategy: 'merged' } }),
+      ev('ai', { plot: { scene: 'sc_01' }, beat: { plan: '', strategy: 'merged' } }),
+      ev('ai', { plot: { scene: 'sc_01' }, beat: { plan: '', strategy: 'merged' } }),
       ev('directive', { text: '新指令' }),
       ev('whisper', { text: '悄悄话', characterId: 'char_02' }),
     ];
     const s = foldState(world, path);
-    expect([...s.done]).toEqual(['b_01_01_01']);
-    expect(s.currentChapter?.id).toBe('ch_01_01');
+    expect([...(s.plot?.points ?? [])]).toEqual(['sc_01_1']);
+    expect(s.plot?.scene?.id).toBe('sc_01');
+    expect(s.plot?.sceneBeats).toBe(3);
     expect(s.time).toBe('黄昏');
     expect(s.beatsSinceProgress).toBe(2);
     expect(s.recentCards).toEqual(['停电']);

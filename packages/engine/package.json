@@ -9,6 +9,7 @@
     "./api": "./src/api.ts",
     "./rpc": "./src/rpc/index.ts",
     "./script": "./src/play/script.ts",
+    "./progress": "./src/plot/progress.ts",
     "./stage": "./src/plot/stage.ts"
   },
   "scripts": {

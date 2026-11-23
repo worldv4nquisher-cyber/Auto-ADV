@@ -327,8 +327,9 @@ export class Engine {
       loadSave: (p) => this.play.load(p, p.saveId),
       deleteSave: (p) => this.play.deleteSave(p, p.saveId),
 
-      advNext: (p) => this.play.advStep(p),
-      advChoose: (p) => this.play.advStep(p, p.index),
+      advNext: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'continue' }, emit, ctx.signal)),
+      advChoose: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'choose', index: p.index }, emit, ctx.signal)),
+      advInput: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'input', text: p.text }, emit, ctx.signal)),
       advShown: (p) => this.play.advShown(p, p.eventId, p.cg),
 
       observerControl: (p) => this.play.observerControl(p, p.action),

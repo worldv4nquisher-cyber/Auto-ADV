@@ -57,6 +57,13 @@ export class ModelGateway {
     this.o = opts;
   }
 
+  /** 这个职责（或「默认」）有没有指定模型，接入点还在不在。 */
+  async configured(role: RoleId): Promise<boolean> {
+    const s = await this.o.settings.get();
+    const route = s.roles[role] ?? s.roles.default;
+    return !!route && s.endpoints.some((e) => e.id === route.endpointId);
+  }
+
   /** 按职责取模型；该职责没配置时用「默认」。 */
   async forRole(role: RoleId, tag: string | null = null, meter?: Meter): Promise<ModelHandle> {
     const s = await this.o.settings.get();

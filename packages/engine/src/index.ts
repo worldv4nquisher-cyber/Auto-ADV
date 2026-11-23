@@ -14,6 +14,7 @@ export * from './plot/adv.ts';
 export * from './plot/check.ts';
 export * from './plot/conditions.ts';
 export * from './plot/dice.ts';
+export * from './plot/judge.ts';
 export * from './plot/progress.ts';
 export * from './plot/runner.ts';
 export * from './plot/session.ts';

@@ -154,8 +154,8 @@ async function playTo(ref: { worldId: string; playthroughId: string }, v: PlayVi
   for (let guard = 0; guard < 50 && v.adv && !v.adv.finished; guard++) {
     if (v.adv.menu && !queue.length) break;
     v = v.adv.menu
-      ? await client.call('advChoose', { ...ref, index: queue.shift() as number })
-      : await client.call('advNext', ref);
+      ? await client.stream('advChoose', { ...ref, index: queue.shift() as number }, () => {})
+      : await client.stream('advNext', ref, () => {});
   }
   return v;
 }
@@ -183,8 +183,8 @@ describe('应用里的剧情 ADV', () => {
     expect(v.adv?.menu?.options.map((o) => o.label)).toEqual(['我是来找你的', '随便看看', '那本书根本不存在吧']);
     expect(v.adv?.progress).toMatchObject({ reached: 0, total: 3, cgs: { unlocked: [], total: 2 }, scenes: { visited: 1, total: 8 } });
     expect(v.adv?.progress.endings.find((e) => e.id === 'sc_08')?.title).toBe('？？？');
-    await expect(client.call('advNext', ref)).rejects.toThrow('请先做出选择');
-    await expect(client.stream('send', { ...ref, text: '你好' }, () => {})).rejects.toThrow('只能用选项推进');
+    await expect(client.stream('advNext', ref, () => {})).rejects.toThrow('请先做出选择');
+    await expect(client.stream('send', { ...ref, text: '你好' }, () => {})).rejects.toThrow('请用选项推进');
 
     v = await playTo(ref, v, [1, 0, 1, 0, 0]);
     expect(v.adv).toMatchObject({ finished: true, ending: { id: 'sc_05', title: '潮汐归来', kind: 'good' } });
@@ -257,6 +257,6 @@ describe('应用里的剧情 ADV', () => {
     await expect(client.call('startPlaythrough', { worldId, mode: 'adv' })).rejects.toThrow('没有通过结构检查');
     const after = await client.call('getPlaythrough', ref);
     expect(after.adv?.error).toContain('没有通过结构检查');
-    await expect(client.call('advChoose', { ...ref, index: 0 })).rejects.toThrow('没有通过结构检查');
+    await expect(client.stream('advChoose', { ...ref, index: 0 }, () => {})).rejects.toThrow('没有通过结构检查');
   });
 });

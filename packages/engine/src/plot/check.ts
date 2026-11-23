@@ -37,6 +37,11 @@ export interface PlotCheckInput {
   /** 世界里的角色和地点（给了才检查剧本里的说话人、幕的地点和出场角色）。 */
   characters?: readonly { id: string; name: string; aliases?: string[] }[];
   locations?: readonly { id: string }[];
+  /**
+   * 续写时已有的幕：新幕的条件和出口可以引用它们（不在这张图里，也不检查它们）。
+   * 通往已有幕的出口算作能走到结局（已有的剧情图已经检查过了）。
+   */
+  known?: ReadonlySet<string>;
 }
 
 const nonAuto = (s: PlotScene) => s.exits.filter((e) => !e.auto);
@@ -56,6 +61,7 @@ function reachable(byId: Map<string, PlotScene>, from: string): Set<string> {
 
 export function checkPlot(input: PlotCheckInput): PlotCheckResult {
   const { graph, variables } = input;
+  const known = input.known ?? new Set<string>();
   const errors: PlotIssue[] = [];
   const warnings: PlotIssue[] = [];
   const err = (message: string, scene?: string, line?: number) =>
@@ -96,7 +102,7 @@ export function checkPlot(input: PlotCheckInput): PlotCheckResult {
   const checkCondition = (c: Condition | undefined, where: string, scene: string, line?: number) => {
     for (const leaf of conditionLeaves(c)) {
       if (leaf.kind === 'visited') {
-        if (!byId.has(leaf.scene)) err(`${where}引用了不存在的幕 ${leaf.scene}`, scene, line);
+        if (!byId.has(leaf.scene) && !known.has(leaf.scene)) err(`${where}引用了不存在的幕 ${leaf.scene}`, scene, line);
         continue;
       }
       if (leaf.kind === 'check') continue;
@@ -146,7 +152,7 @@ export function checkPlot(input: PlotCheckInput): PlotCheckResult {
 
   // ── 整体 ──
   if (!byId.has(graph.start)) err(`起始幕 ${graph.start} 不存在`);
-  if (!endings.length) err('剧情图里没有结局幕');
+  if (!endings.length && !known.size) err('剧情图里没有结局幕');
   const migrated = graph._meta.generatedBy === MIGRATED_FROM_OUTLINE;
 
   // ── 每一幕 ──
@@ -169,7 +175,7 @@ export function checkPlot(input: PlotCheckInput): PlotCheckResult {
 
     s.exits.forEach((e, i) => {
       const where = `出口 ${i + 1}（→ ${e.to}）`;
-      if (!byId.has(e.to)) err(`${where}指向不存在的幕`, s.id);
+      if (!byId.has(e.to) && !known.has(e.to)) err(`${where}指向不存在的幕`, s.id);
       if (e.to === s.id) warn(`${where}指向自己`, s.id);
       checkCondition(e.if, where, s.id);
       checkEffects(e.set, where, s.id);
@@ -250,13 +256,15 @@ export function checkPlot(input: PlotCheckInput): PlotCheckResult {
   if (byId.has(graph.start)) {
     const fromStart = reachable(byId, graph.start);
     for (const s of graph.scenes) if (!fromStart.has(s.id)) err(`从起始幕 ${graph.start} 走不到这一幕`, s.id);
-    if (endings.length && !endings.some((e) => fromStart.has(e.id))) err('从起始幕出发走不到任何结局');
+    /** 能走出去：到了结局，或者通往已有的幕（续写）。 */
+    const out = (ids: Set<string>) =>
+      endings.some((e) => ids.has(e.id)) || [...ids].some((id) => byId.get(id)?.exits.some((e) => known.has(e.to)));
+    if ((endings.length || known.size) && !out(fromStart)) err('从起始幕出发走不到任何结局');
     else {
       for (const id of fromStart) {
         const s = byId.get(id) as PlotScene;
         if (s.ending || !s.exits.length) continue;
-        const ahead = reachable(byId, id);
-        if (!endings.some((e) => ahead.has(e.id))) err('从这一幕出发走不到任何结局（会在几幕之间绕圈）', id);
+        if (!out(reachable(byId, id))) err('从这一幕出发走不到任何结局（会在几幕之间绕圈）', id);
       }
     }
   }

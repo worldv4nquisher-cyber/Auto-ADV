@@ -1,11 +1,10 @@
 /**
- * 剧情图（M3 起的 plot/outline.json）、条件、数值定义和 Script IR。
- * 设计见 docs/ARCHITECTURE.md 16 节；M2 的"篇章 / 章节 / 节拍"骨架读取时自动迁移（16.7）。
+ * 剧情图（格式版本 1 起的 plot/outline.json）、条件、数值定义和 Script IR。
+ * 设计见 docs/ARCHITECTURE.md 16 节；M2 的"篇章 / 章节 / 节拍"骨架（格式版本 0）读取时自动迁移（16.7）。
  */
 import { z } from 'zod';
 import { EntityMeta, Id } from './common.ts';
 import { FORMAT_VERSION } from './version.ts';
-import type { PlotOutline } from './world.ts';
 
 // ───────────── 变量 ─────────────
 
@@ -185,12 +184,33 @@ export const PlotGraph = z.object({
 });
 export type PlotGraph = z.infer<typeof PlotGraph>;
 
-/** outline.json 是剧情图还是 M2 的旧骨架：按结构区分（有 scenes 的是剧情图）。 */
-export function isPlotGraph(data: unknown): boolean {
-  return typeof data === 'object' && data !== null && Array.isArray((data as { scenes?: unknown }).scenes);
-}
-
 // ───────────── 旧骨架迁移（16.7） ─────────────
+
+const LegacyBeat = z.object({ id: Id, text: z.string(), required: z.boolean().default(false) });
+const LegacyChapter = z.object({ id: Id, title: z.string().default(''), goal: z.string(), beats: z.array(LegacyBeat).default([]) });
+export const LegacyAct = z.object({ id: Id, title: z.string(), chapters: z.array(LegacyChapter).default([]) });
+export type LegacyAct = z.infer<typeof LegacyAct>;
+
+/** M2 的 plot/outline.json（格式版本 0）："篇章 / 章节 / 节拍"骨架。只在迁移和折叠旧周目时用。 */
+export const LegacyPlotOutline = z.object({
+  formatVersion: z.number().int().default(0),
+  premise: z.string().default(''),
+  control: z.enum(['sandbox', 'guided', 'linear']).default('guided'),
+  acts: z.array(LegacyAct).default([]),
+  endings: z.array(z.object({ id: Id, title: z.string(), condition: z.string().default('') })).default([]),
+  threads: z
+    .array(z.object({ id: Id, text: z.string(), plant: z.string().optional(), payoff: z.string().optional() }))
+    .default([]),
+  _meta: EntityMeta.default({ locked: [] }),
+});
+export type LegacyPlotOutline = z.infer<typeof LegacyPlotOutline>;
+
+/** outline.json 是不是 M2 的旧骨架：按结构区分（有 acts、没有 scenes）。 */
+export function isLegacyOutline(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false;
+  const d = data as { scenes?: unknown; acts?: unknown };
+  return !Array.isArray(d.scenes) && Array.isArray(d.acts);
+}
 
 /** 迁移得到的剧情图在 _meta.generatedBy 里记这个标记，结构检查据此提示改成结构化条件。 */
 export const MIGRATED_FROM_OUTLINE = 'migrate:outline-v1';
@@ -203,7 +223,7 @@ const pad = (n: number) => String(n).padStart(2, '0');
  * 幕之间按原顺序用单出口串起来，最后一幕通往各个结局幕；
  * 字符串结局条件原样写进出口的 when，交给导演判断；节拍 id 原样保留为要点 id。
  */
-export function migratePlotOutline(old: PlotOutline): PlotGraph {
+export function migratePlotOutline(old: LegacyPlotOutline): PlotGraph {
   const scenes: PlotScene[] = [];
   /** 旧章节 id → 它变成的第一幕（伏笔的埋设 / 回收写的是旧章节 id 时换过来）。 */
   const chapterScene = new Map<string, string>();

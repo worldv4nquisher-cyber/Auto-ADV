@@ -79,13 +79,7 @@ function directorPlan(user: string, count: number): string {
   const here = now?.[1] && now[1] !== '未指定' ? now[1] : (locations[0] ?? '');
   const location = count % 5 === 0 && locations.length > 1 ? pick(locations.filter((l) => l !== here), count) : here;
 
-  // 当前章节第一个没完成的节拍
-  const chapter = /当前章节：\[(\w+)\]/.exec(user)?.[1];
-  let beat: string | undefined;
-  if (chapter) {
-    const block = user.slice(user.indexOf(`### [${chapter}]`)).split(/\n###? /)[0] ?? '';
-    beat = /- \[ \] (\w+)：/.exec(block)?.[1];
-  }
+  const report = plotReport(user);
   const directive = /# 观众的导演指令（尽量满足）\n- (.+)/.exec(user)?.[1];
   const card = /事件卡来打破僵局：「(.+?)」/.exec(user)?.[1];
   const plan = directive
@@ -102,8 +96,107 @@ function directorPlan(user: string, count: number): string {
     present,
     time: count % 3 === 0 ? `第 ${Math.ceil(count / 3)} 天夜里` : '',
     speakers,
-    completeBeats: beat ? [beat] : [],
     reveals: count % 6 === 0 && present.length >= 2 ? [{ owner: present[1], to: [present[0]] }] : [],
+    ...report,
+    check: directive?.includes('检定') ? { var: report.attribute ?? '', dc: 12, label: '仔细观察' } : null,
+  });
+}
+
+/**
+ * 剧情 ADV 的导演：和观察模式一样报告进度，再给玩家三个选项（其中一个带检定）。
+ * 岔路演完时引擎会弹出出口菜单，这里不替玩家选路。
+ */
+function advBeat(user: string, count: number): string {
+  const plan = JSON.parse(directorPlan(user, count)) as Record<string, unknown> & { present: string[] };
+  const report = plotReport(user);
+  const ending = user.includes('这是结局幕');
+  const who = plan.present[0] ?? '对方';
+  const options = ending
+    ? []
+    : [
+        { label: `追问${who}灯塔的事`, exit: '', check: null },
+        { label: '仔细观察四周', exit: '', check: { var: report.attribute ?? '', dc: 12, label: '仔细观察四周' } },
+        { label: '先把话题岔开', exit: '', check: null },
+      ];
+  return JSON.stringify({ ...plan, options });
+}
+
+/**
+ * 从导演提示词里的「# 剧情图」读出当前幕：每拍报告一个还没演到的要点，最后一个要点演到时说演完了、走第一个出口；
+ * 有关系类数值就每拍 +3。ADV 的岔路不替玩家选（提示词里写了"由玩家决定"）。
+ */
+function plotReport(user: string) {
+  const at = user.indexOf('# 剧情图');
+  const block = at >= 0 ? (user.slice(at).split(/\n# /)[0] ?? '') : '';
+  const undone = [...block.matchAll(/^- \[ \] (\S+)：/gm)].map((m) => m[1] as string);
+  const exits = [...(block.split('## 出口')[1] ?? '').matchAll(/^- (sc_\d+)「/gm)].map((m) => m[1] as string);
+  const fork = block.includes('由玩家决定');
+  const sceneDone = !!block && !block.includes('这是结局幕') && undone.length <= 1;
+  const relation = /^- (affinity\.\S+|trust\.\S+)（/m.exec(block)?.[1];
+  const attribute = /^- (skill\.\S+)（/m.exec(block)?.[1];
+  return {
+    points: undone.slice(0, 1),
+    sceneDone,
+    exit: sceneDone && !fork ? (exits[0] ?? '') : '',
+    offTrack: false,
+    set: relation ? [{ var: relation, op: '+', value: 3 }] : [],
+    ...(attribute ? { attribute } : {}),
+  };
+}
+
+/** 剧情图：创世时 6 幕（一个岔路、一个看好感的结局分歧），续写时 3 幕。 */
+function plotGraph(user: string, sequel: boolean, count: number): string {
+  const cast = [...user.matchAll(/^- (char_\d+)：([^\s（\n]+)(（主角)?/gm)].map((m) => ({ id: m[1] as string, name: m[2] as string, hero: !!m[3] }));
+  const heroine = cast.find((c) => !c.hero) ?? cast[0] ?? { id: 'char_02', name: '林夕' };
+  const locBlock = user.slice(user.indexOf('# 地点')).split(/\n# /)[0] ?? '';
+  const locs = [...locBlock.matchAll(/^- ([^：\n（]+)[：（]/gm)].map((m) => (m[1] as string).trim());
+  const loc = (i: number) => locs[i % Math.max(1, locs.length)] ?? '';
+  if (sequel) {
+    const t = `续篇 ${count}`;
+    return JSON.stringify({
+      premise: '',
+      chapters: [{ title: `${t}：新的潮汐` }],
+      variables: [],
+      scenes: [
+        { id: 'n1', chapter: 1, title: `${t}：余波`, what: '平静之下，新的异常出现了', points: ['新的线索', '旧日的约定'], done: '主角决定追查', location: loc(0), cast: [heroine.name], exits: [{ to: 'n2' }] },
+        { id: 'n2', chapter: 1, title: `${t}：风暴前夜`, what: '风暴逼近雾港', points: ['风暴逼近', '众人做出选择'], done: '风暴来临', location: loc(1), exits: [{ to: 'n3' }] },
+        { id: 'n3', chapter: 1, title: `${t}：潮汐归来`, what: '风暴过去，雾港迎来新的早晨', ending: { kind: 'good', text: '写出风暴过后的清晨' } },
+      ],
+      threads: [],
+    });
+  }
+  const aff = `affinity.${heroine.id}`;
+  return JSON.stringify({
+    premise: '灯塔重新亮起，牵出十年前守灯人失踪的真相，以及整个雾港守护的秘密。',
+    chapters: [{ title: '归乡' }, { title: '雾潮之夜' }],
+    variables: [
+      { id: aff, label: `${heroine.name}的好感`, type: 'number', initial: 30, min: 0, max: 100, category: 'relationship' },
+      { id: 'flag.found_log', label: '找到了守灯人日志', type: 'boolean', initial: false, category: 'other' },
+      { id: 'skill.insight', label: '洞察', type: 'number', initial: 1, min: -2, max: 5, category: 'attribute' },
+    ],
+    scenes: [
+      {
+        id: 'sc_01', chapter: 1, title: '归乡', what: '主角回到雾港，察觉所有人都在隐瞒灯塔的事', points: ['码头重逢', '灯塔又亮了'],
+        done: '主角决定怎么调查灯塔', location: loc(0), cast: [heroine.name],
+        exits: [
+          { to: 'sc_02', label: `和${heroine.name}一起去灯塔`, when: '主角邀请同伴同行' },
+          { to: 'sc_03', label: '独自去档案馆', when: '主角决定一个人查' },
+        ],
+      },
+      { id: 'sc_02', chapter: 1, title: '同行', what: `主角和${heroine.name}在雾里走向灯塔`, points: ['并肩走过栈桥', '她说出那晚看到的人影'], done: '两人到了灯塔下', location: loc(1), cast: [heroine.name], exits: [{ to: 'sc_04' }] },
+      { id: 'sc_03', chapter: 1, title: '档案馆', what: '主角独自翻查港口的旧档案', points: ['被撕掉的卷宗', '守灯人日志的线索'], done: '找到通往灯塔的线索', location: loc(3), exits: [{ to: 'sc_04' }] },
+      {
+        id: 'sc_04', chapter: 2, title: '雾潮之夜', what: '在雾潮之夜登上灯塔，直面真相', points: ['登上灯塔', '真相的一角'], done: '真相揭开', location: loc(1),
+        exits: [
+          { to: 'sc_05', label: '告诉她真相', when: '两人彼此信任', if: { gte: [aff, 40] } },
+          { to: 'sc_06', label: '独自承担', when: '其他情况' },
+        ],
+        default: 'sc_06',
+      },
+      { id: 'sc_05', chapter: 2, title: '守望', what: '主角留下，成为新的守灯人', ending: { kind: 'good', text: '两人一起点亮灯塔' } },
+      { id: 'sc_06', chapter: 2, title: '离港', what: '主角公开真相后离开雾港', ending: { kind: 'normal', text: '渡船离开时灯塔熄灭' } },
+    ],
+    threads: [{ text: '日志缺失的最后三页', payoff: '在灯塔顶层找到' }],
   });
 }
 
@@ -178,31 +271,13 @@ export function storyReply(info: MockRequestInfo): string | undefined {
           { title: '守灯人', category: '历史', content: '灯塔最后一任守灯人十年前失踪，留下一本残缺的日志。', keys: ['守灯人', '日志'] },
         ],
       });
-    case 'plot_outline': {
+    case 'plot_graph':
       // 观察模式续写新篇章时，系统提示是导演
-      const sequel = system.includes('导演') ? `续篇 ${info.count}：` : '';
-      const chapter = (i: number, title: string, goal: string) => ({
-        title: `${sequel}${title}`,
-        goal,
-        beats: [`${title}：发现异常`, `${title}：追查线索`, `${title}：真相的一角`].slice(0, i === 2 ? 2 : 3),
-      });
-      return JSON.stringify({
-        premise: '灯塔重新亮起，牵出十年前守灯人失踪的真相，以及整个雾港守护的秘密。',
-        arcTitle: sequel ? `${sequel}新的潮汐` : '第一篇章：午夜灯光',
-        chapters: [
-          chapter(0, '归乡', '主角回到雾港，察觉所有人都在隐瞒灯塔的事'),
-          chapter(1, '暗流', '主角找到守灯人日志的线索，引起港务局的警觉'),
-          chapter(2, '雾潮之夜', '在雾潮之夜登上灯塔，直面真相'),
-        ],
-        endings: [
-          { title: '守望', condition: '主角选择留下，成为新的守灯人' },
-          { title: '离港', condition: '主角公开真相后离开雾港' },
-        ],
-        threads: [{ text: '日志缺失的最后三页', payoff: '在灯塔顶层找到' }],
-      });
-    }
+      return plotGraph(firstUser, system.includes('导演'), info.count);
     case 'director_plan':
       return directorPlan(lastUser, info.count);
+    case 'adv_beat':
+      return advBeat(lastUser, info.count);
     case 'story_memory': {
       const names = [...firstUser.slice(0, firstUser.indexOf('# 之前的前情提要')).matchAll(/^- (\S+)/gm)].map((m) => m[1]);
       return JSON.stringify({
@@ -252,6 +327,23 @@ export function storyReply(info: MockRequestInfo): string | undefined {
       `【${a}】（${pick(ACTIONS, n)}）${pick(LINES, n)}`,
       `【${b}】（${pick(ACTIONS, n + 3)}）${pick(LINES, n + 5)}`,
     ].join('\n');
+  }
+
+  // 剧情 ADV：演员兼旁白演出玩家的行动和检定结果
+  if (system.includes('剧情 ADV（视觉小说）的「演员兼旁白」')) {
+    const present = namesUnder(system, '在场角色');
+    const a = present[info.count % Math.max(1, present.length)] ?? '林夕';
+    const act = /［玩家(?:选择|输入的行动（[^）]*）)：([^］\n]+)］/.exec(lastUser)?.[1];
+    const check = /［检定］(.+?)：掷出[^，]*，难度 \d+，([^。]+)。/.exec(lastUser);
+    const ending = /［结局］(.+?)：/.exec(lastUser)?.[1];
+    return [
+      act ? `你决定：${act}。` : pick(NARRATION, info.count),
+      check ? `（${check[1]}——${check[2]}）` : '',
+      `【${a}】（${pick(ACTIONS, info.count)}）${pick(LINES, info.count)}`,
+      ending ? `故事在这里落下帷幕：${ending}。` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
   }
 
   // 观察模式：分演模式的旁白和演员

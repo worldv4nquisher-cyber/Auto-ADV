@@ -1,7 +1,8 @@
-import { GENESIS_PRESETS, type GenesisPresetId, type PlotOutline } from '@auto-adv/schema';
+import { GENESIS_PRESETS, type GenesisPresetId } from '@auto-adv/schema';
 import type { GenesisOptions } from '../api.ts';
 import { clip, ratingText, renderBrief, renderCharacter, renderLocation, renderRelationships } from '../world/render.ts';
 import type { WorldData } from '../world/store.ts';
+import { GRAPH_RULES } from './graph.ts';
 
 export const GENESIS_SYSTEM = `你是一位经验丰富的视觉小说、文字冒险游戏编剧，也是世界观设计师。
 你在为一个由 AI 驱动的互动故事应用创作世界：玩家会进入这个世界，和其中的角色自由对话、经历故事。
@@ -114,20 +115,17 @@ ${d.locations.map((l) => renderLocation(l, 'short')).join('\n')}
 - 不要为角色本身建条目（角色另有角色卡），但可以写角色所属的组织、物品、事件。${extraNotes(o)}`;
 }
 
-export function renderOutline(plot: PlotOutline, done: ReadonlySet<string> = new Set()): string {
-  const out: string[] = [];
-  if (plot.premise) out.push(`核心：${plot.premise}`);
-  for (const act of plot.acts) {
-    out.push(`## ${act.title}`);
-    for (const ch of act.chapters) {
-      const allDone = ch.beats.length > 0 && ch.beats.every((b) => done.has(b.id));
-      out.push(`### [${ch.id}] ${ch.title}${allDone ? '（已完成）' : ''}\n目标：${ch.goal}`);
-      for (const b of ch.beats) out.push(`- [${done.has(b.id) ? 'x' : ' '}] ${b.id}：${b.text}`);
-    }
-  }
-  if (plot.threads.length) out.push(`## 伏笔\n${plot.threads.map((t) => `- ${t.text}${t.payoff ? `（回收：${t.payoff}）` : ''}`).join('\n')}`);
-  if (plot.endings.length) out.push(`## 可能的结局\n${plot.endings.map((e) => `- ${e.title}：${e.condition}`).join('\n')}`);
-  return out.join('\n');
+/** 剧情图的规模：按简报里的篇幅。 */
+const GRAPH_SIZE: Record<string, string> = {
+  short: '5～7 幕（含 2 个结局），2 章',
+  medium: '8～12 幕（含 2～3 个结局），2～3 章',
+  long: '12～16 幕（含 3～4 个结局），3～4 章',
+  endless: '8～12 幕（含 2～3 个结局），2～3 章（之后观察模式会接着续写新的篇章）',
+};
+
+/** 角色名和 id 的对照（变量 id 里用角色 id）。 */
+export function castIds(d: Pick<WorldData, 'characters'>): string {
+  return d.characters.map((c) => `- ${c.id}：${c.name}${c.role === 'protagonist' ? '（主角，玩家扮演）' : ''}`).join('\n');
 }
 
 export function plotPrompt(d: WorldData, o: GenesisOptions): string {
@@ -138,17 +136,24 @@ ${worldviewOf(d, 3000)}
 # 角色
 ${d.characters.map((c) => renderCharacter(c)).join('\n\n')}
 
+# 角色 id
+${castIds(d)}
+
 # 角色关系
 ${renderRelationships(d.characters) || '（无）'}
 
 # 地点
 ${d.locations.map((l) => renderLocation(l)).join('\n')}
 
-请设计第一篇章的剧情骨架。它是骨架，不是剧本：只规定"必须发生什么"，具体怎么发生留给演出时即兴发挥。
-- 3～5 章，每章一个清晰的戏剧目标和 3～4 个关键节拍，节拍之间有因果，难度和紧张度逐步升级。
-- 充分利用角色的目标、秘密和彼此之间的张力，让每个重要角色都有自己的戏份。
-- 埋下 2～4 条伏笔，写明在哪里回收；给出 2～3 个可能的结局。
-- 第一章的第一个节拍要能在开场后马上展开。${extraNotes(o)}`;
+请设计这个故事的剧情图。
+${GRAPH_RULES}
+
+这一次的要求：
+- 规模：${GRAPH_SIZE[d.brief?.length ?? 'medium'] ?? GRAPH_SIZE.medium}。至少有一处让玩家做选择的岔路，不同的选择和数值通往不同的结局。
+- variables：2～5 个数值或标记。关系类（category: relationship）用 0～100，id 写成 affinity.<角色 id> 或 trust.<角色 id>；
+  属性类（category: attribute）是检定时的修正值，范围 -2～5，比如 skill.insight；标记用 boolean，比如 flag.found_log。
+- 充分利用角色的目标、秘密和彼此之间的张力，让每个重要角色都有自己的戏份。埋下 2～4 条伏笔，写明在哪一幕回收。
+- 第一幕要能在开场后马上展开。${extraNotes(o)}`;
 }
 
 export function openingPrompt(d: WorldData, o: GenesisOptions): string {
@@ -178,7 +183,9 @@ ${openingPlotHint(d)}
 }
 
 function openingPlotHint(d: WorldData): string {
-  const ch = d.plot?.acts[0]?.chapters[0];
-  if (!ch) return '';
-  return `\n# 第一章\n「${ch.title}」目标：${ch.goal}\n第一个节拍：${ch.beats[0]?.text ?? '（无）'}\n开场要自然地引向这一章，但不要提前把节拍演完。\n`;
+  const g = d.graph;
+  const sc = g?.scenes.find((s) => s.id === g.start);
+  if (!sc) return '';
+  const points = sc.points.map((p) => `- ${p.text}`).join('\n');
+  return `\n# 第一幕\n「${sc.title || sc.id}」：${sc.what}${points ? `\n要点：\n${points}` : ''}\n开场要自然地引向这一幕，但不要提前把要点演完。\n`;
 }
