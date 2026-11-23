@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   Condition,
-  isPlotGraph,
+  isLegacyOutline,
+  LegacyPlotOutline,
   MIGRATED_FROM_OUTLINE,
   migratePlotOutline,
   PlotGraph,
-  PlotOutline,
   VariableDef,
 } from '../src/index.ts';
 
@@ -34,8 +34,8 @@ describe('剧情图', () => {
   it('幕只填必填项时补齐默认值（minBeats 默认 2）', () => {
     const g = PlotGraph.parse({ start: 'sc_01', scenes: [{ id: 'sc_01', ending: {} }] });
     expect(g.scenes[0]).toMatchObject({ minBeats: 2, maxBeats: 8, exits: [], points: [], ending: { kind: 'normal', hidden: false } });
-    expect(isPlotGraph(g)).toBe(true);
-    expect(isPlotGraph({ premise: '', acts: [] })).toBe(false);
+    expect(isLegacyOutline(g)).toBe(false);
+    expect(isLegacyOutline({ premise: '', acts: [] })).toBe(true);
   });
 
   it('剧本文件名不能跳出 plot/scenes/', () => {
@@ -52,7 +52,7 @@ describe('剧情图', () => {
 describe('旧骨架迁移（16.7）', () => {
   const beats = (prefix: string, n: number) =>
     Array.from({ length: n }, (_, i) => ({ id: `${prefix}_${String(i + 1).padStart(2, '0')}`, text: `节拍 ${i + 1}` }));
-  const old = PlotOutline.parse({
+  const old = LegacyPlotOutline.parse({
     premise: '灯塔重新亮起',
     acts: [
       {
@@ -97,7 +97,7 @@ describe('旧骨架迁移（16.7）', () => {
   });
 
   it('没有结局时补一个终章，没有章节时直接从结局开始', () => {
-    const g = migratePlotOutline(PlotOutline.parse({ premise: '', acts: [] }));
+    const g = migratePlotOutline(LegacyPlotOutline.parse({ premise: '', acts: [] }));
     expect(g.scenes).toHaveLength(1);
     expect(g.start).toBe(g.scenes[0]?.id);
     expect(g.scenes[0]?.ending).toBeDefined();

@@ -22,6 +22,8 @@ export interface GenerateJsonParams<T> {
   onProgress?: (chars: number) => void;
   /** 校验失败后最多重试几次，默认 2。 */
   maxRetries?: number;
+  /** 结构对了之后的内容检查：返回给模型看的修改意见，没问题返回 null。有意见时和格式错误一样反馈给模型重写。 */
+  validate?: (value: T) => string | null;
 }
 
 export interface GenerateJsonResult<T> {
@@ -141,8 +143,11 @@ export async function generateJson<T>(
     let problem: string;
     try {
       const parsed = p.spec.schema.safeParse(extractJson(raw));
-      if (parsed.success) return { value: parsed.data, raw, callIds };
-      problem = `JSON 不符合要求：\n${z.prettifyError(parsed.error)}`;
+      if (parsed.success) {
+        const issue = p.validate?.(parsed.data) ?? null;
+        if (!issue) return { value: parsed.data, raw, callIds };
+        problem = issue;
+      } else problem = `JSON 不符合要求：\n${z.prettifyError(parsed.error)}`;
     } catch (err) {
       problem = result.finishReason === 'length' ? '输出被截断了（超过长度上限）' : (err as Error).message;
       if (result.finishReason === 'length') problem += '，请把内容写得更精炼一些';

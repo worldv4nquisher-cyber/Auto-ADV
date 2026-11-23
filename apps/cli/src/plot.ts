@@ -54,7 +54,7 @@ export async function checkPlotCommand(arg: string | undefined, o: PlotCliOption
   }
   const g = world.graph;
   const endings = g.scenes.filter((s) => s.ending);
-  console.log(`《${world.manifest.title}》的剧情图${world.plot ? '（从 M2 的旧骨架自动迁移）' : ''}`);
+  console.log(`《${world.manifest.title}》的剧情图${world.graph?._meta.generatedBy?.startsWith('migrate:') ? '（从 M2 的旧骨架自动迁移）' : ''}`);
   console.log(
     `  ${g.scenes.length} 幕（${endings.length} 个结局，其中隐藏 ${endings.filter((s) => s.ending?.hidden).length} 个）` +
       ` · ${g.chapters.length} 章 · ${world.variables.length} 个变量 · ${Object.keys(world.scripts).length} 份手写剧本`,

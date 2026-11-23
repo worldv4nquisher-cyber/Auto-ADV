@@ -234,6 +234,11 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
       if (ev.plot?.vars) vars.push(...ev.plot.vars);
       continue;
     }
+    // 剧情 ADV 里玩家的自由输入：和选项一样记进回想，可以回到输入之前
+    if (ev.kind === 'player') {
+      backlog.push({ kind: 'choice', step: steps.length, label: `「${ev.text ?? ''}」`, rewindTo: ev.parentId });
+      continue;
+    }
     if (ev.kind === 'check' && ev.check) {
       push(ev, { kind: 'check', check: ev.check });
       backlog.push({ kind: 'check', step: steps.length - 1, check: ev.check });
@@ -249,6 +254,11 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
         push(ev, { kind: 'card', card });
         backlog.push({ kind: 'scene', step: steps.length - 1, ...card });
       }
+    }
+    // 导演安排里的检定和这一拍记在同一个事件上：先出检定结果，再演
+    if (ev.check) {
+      push(ev, { kind: 'check', check: ev.check });
+      backlog.push({ kind: 'check', step: steps.length - 1, check: ev.check });
     }
     if (ev.plot?.vars) vars.push(...ev.plot.vars);
     if (ev.stage) {
@@ -286,4 +296,53 @@ export function stepText(s: StageStep | undefined): string {
   if (s.card) return s.card.chapter ? `${s.card.chapter} · ${s.card.title}` : s.card.title;
   if (s.check) return `检定「${s.check.label}」`;
   return '';
+}
+
+// ───────────── AI 演出的一拍 → 舞台指令 ─────────────
+
+export interface SegmentsToStageOptions {
+  characters: Cast;
+  /** 这一拍之前的画面（时间线末尾）。 */
+  before: StageView;
+  /** 这一拍的地点和在场角色。 */
+  scene: { locationId: string | null; presentCharacterIds: readonly string[] };
+  /** 主角（玩家）：VN 里一般不给主角立绘，主角说话只出名字牌。 */
+  protagonistId: string | null;
+}
+
+/** 同时在台上的立绘最多几个。 */
+const MAX_SPRITES = 4;
+
+/**
+ * AI 演出的台词和旁白（Segment）转成舞台指令：换地点时换背景（同时清场），在场的角色上场、离场的下场，
+ * 开口的角色没在台上就先上场。背景 id 用地点 id，立绘用角色 id（素材以后按 id 找）。
+ */
+export function stageFromSegments(segments: readonly Segment[], o: SegmentsToStageOptions): StageCommand[] {
+  const out: StageCommand[] = [];
+  const loc = o.scene.locationId;
+  let shown: string[] = o.before.sprites.map((s) => s.characterId ?? s.key);
+  if (loc && o.before.bg?.id !== loc) {
+    out.push({ op: 'bg', id: loc });
+    shown = [];
+  }
+  const present = o.scene.presentCharacterIds.filter((id) => id !== o.protagonistId);
+  for (const id of shown) {
+    if (!present.includes(id) && o.characters.some((c) => c.id === id)) out.push({ op: 'hide', char: id });
+  }
+  shown = shown.filter((id) => present.includes(id) || !o.characters.some((c) => c.id === id));
+  const enter = (id: string) => {
+    if (shown.includes(id) || shown.length >= MAX_SPRITES) return;
+    out.push({ op: 'show', char: id });
+    shown.push(id);
+  };
+  for (const id of present.slice(0, 3)) enter(id);
+  for (const s of segments) {
+    if (s.kind === 'narration') {
+      out.push({ op: 'narrate', text: s.text });
+      continue;
+    }
+    if (s.characterId && s.characterId !== o.protagonistId) enter(s.characterId);
+    out.push({ op: 'say', char: s.characterId ?? s.name, text: s.text });
+  }
+  return out;
 }

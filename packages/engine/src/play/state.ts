@@ -1,17 +1,15 @@
-import type { PlotOutline } from '@auto-adv/schema';
 import type { PlayEvent, PlotProgress, SceneState } from '../api.ts';
+import { foldPlot, type PlotState } from '../plot/progress.ts';
 import type { WorldData } from '../world/store.ts';
 import { sceneAt } from './context.ts';
 
 /** 把路径上的事件折叠成当前的故事状态（事件溯源：状态永远可以从事件重新算出来）。 */
 export interface StoryState {
   scene: SceneState;
-  /** 世界骨架 + 路径上续写的篇章。 */
-  outline: PlotOutline | null;
-  done: Set<string>;
-  currentChapter: PlotOutline['acts'][number]['chapters'][number] | null;
+  /** 剧情图上的进度（含续写追加的幕）；世界没有剧情图时为 null，导演自由发挥。 */
+  plot: PlotState | null;
   time: string | null;
-  /** 连续多少拍没有推进骨架、也没有换地点。 */
+  /** 连续多少拍没有推进剧情（演到要点、换幕、续写）、也没有换地点。 */
   beatsSinceProgress: number;
   recentCards: string[];
   /** 秘密的主人 → 已经知道这个秘密的角色。 */
@@ -22,14 +20,7 @@ export interface StoryState {
   whispers: PlayEvent[];
 }
 
-/** extraActs：还没写进事件树、但这一拍要用的新篇章。 */
-export function foldState(
-  world: WorldData,
-  path: PlayEvent[],
-  extraActs: PlotOutline['acts'] = [],
-): StoryState {
-  const done = new Set<string>();
-  const acts = [...(world.plot?.acts ?? [])];
+export function foldState(world: WorldData, path: PlayEvent[]): StoryState {
   let time: string | null = null;
   let beatsSinceProgress = 0;
   const cards: string[] = [];
@@ -52,8 +43,6 @@ export function foldState(
     whispers = [];
     const b = e.beat;
     if (!b) continue;
-    if (b.arc) acts.push(b.arc);
-    for (const id of b.done ?? []) done.add(id);
     if (b.time) time = b.time;
     if (b.card) cards.push(b.card);
     for (const r of b.reveals ?? []) {
@@ -63,18 +52,14 @@ export function foldState(
     }
     const moved = !!e.scene && e.scene.locationId !== location;
     if (e.scene) location = e.scene.locationId;
-    beatsSinceProgress = (b.done?.length ?? 0) > 0 || moved ? 0 : beatsSinceProgress + 1;
+    const p = e.plot;
+    const advanced = !!p?.points?.length || !!p?.exit || !!p?.append || !!p?.ending || (b.done?.length ?? 0) > 0;
+    beatsSinceProgress = advanced || moved ? 0 : beatsSinceProgress + 1;
   }
 
-  acts.push(...extraActs);
-  const outline = world.plot ? { ...world.plot, acts } : null;
-  const chapters = acts.flatMap((a) => a.chapters);
-  const currentChapter = chapters.find((ch) => ch.beats.some((b) => !done.has(b.id))) ?? null;
   return {
     scene: sceneAt(path),
-    outline,
-    done,
-    currentChapter,
+    plot: world.graph ? foldPlot(world.graph, world.variables, path) : null,
     time,
     beatsSinceProgress,
     recentCards: cards.slice(-8),
@@ -85,10 +70,15 @@ export function foldState(
 }
 
 export function plotProgress(s: StoryState): PlotProgress {
+  const p = s.plot;
   return {
-    outline: s.outline,
-    done: [...s.done],
-    currentChapterId: s.currentChapter?.id ?? null,
+    scene: p?.scene?.id ?? null,
+    sceneBeats: p?.sceneBeats ?? 0,
+    points: p ? [...p.points] : [],
+    visited: p ? [...p.visited] : [],
+    appended: p?.appended ?? { chapters: [], scenes: [] },
+    ending: p?.ending ?? null,
+    finished: p?.finished ?? false,
     time: s.time,
   };
 }

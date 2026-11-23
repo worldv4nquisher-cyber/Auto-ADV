@@ -15,7 +15,8 @@ import type {
   ObserverSettings,
   PlayMode,
   PlotGraph,
-  PlotOutline,
+  LegacyAct,
+  PlotScene,
   RoleId,
   Scalar,
   RoleRoute,
@@ -174,9 +175,7 @@ export interface WorldDetail {
   characters: Character[];
   locations: Location[];
   lore: LoreEntry[];
-  /** M2 的旧骨架（观察模式在 M3 第 3 步切到剧情图之前还用它）；剧情图格式的世界为 null。 */
-  plot: PlotOutline | null;
-  /** 剧情图：原生的，或者从旧骨架自动迁移来的。 */
+  /** 剧情图：原生的，或者从 M2 的旧骨架自动迁移来的。 */
   graph: PlotGraph | null;
   /** 剧情图的结构检查（带上手写剧本）；有错误时不能开始剧情 ADV 周目。 */
   plotCheck: PlotCheckResult | null;
@@ -235,7 +234,7 @@ export interface BeatMeta {
   strategy: ObserverSettings['strategy'];
   /** 时间推进后的时间描述。 */
   time?: string;
-  /** 这一拍完成的骨架节拍 id。 */
+  /** M2 的周目：这一拍完成的骨架节拍 id（M3 起改记在 plot.points 上）。 */
   done?: string[];
   /** 这一拍揭示的秘密：谁的秘密，告诉了谁。 */
   reveals?: { characterId: string; to: string[] }[];
@@ -243,8 +242,8 @@ export interface BeatMeta {
   card?: string;
   /** 被引擎驳回的导演动作和理由。 */
   rejected?: string[];
-  /** 骨架走完后，这一拍续写出的新篇章。 */
-  arc?: PlotOutline['acts'][number];
+  /** M2 的周目：骨架走完后这一拍续写出的新篇章（M3 起改记在 plot.append 上）。 */
+  arc?: LegacyAct;
   /** 与之前内容的最高相似度（0～1），用于检测重复。 */
   similarity?: number;
 }
@@ -254,16 +253,24 @@ export type ExitReason = 'auto' | 'script' | 'choice' | 'single' | 'default' | '
 
 /** 一拍结束时弹出的选项（等玩家选）。 */
 export interface PlotMenu {
-  /** script：手写剧本里的 choice；exits：剧情图的岔路（选项文字来自出口的 label）。 */
-  source: 'script' | 'exits';
+  /** script：手写剧本里的 choice；exits：剧情图的岔路（选项文字来自出口的 label）；ai：AI 演出的一拍结束时导演给的选项。 */
+  source: 'script' | 'exits' | 'ai';
   options: {
     label: string;
     enabled: boolean;
     /** 锁住的原因（条件写成的一句话）。 */
     lockedBy?: string;
-    /** 选这一项要掷骰。 */
-    check?: { var?: string; dc: number };
+    /** 选这一项要掷骰。label 是检定的名字（AI 给的选项才有）。 */
+    check?: { var?: string; dc: number; label?: string };
+    /** ai：选这一项就走这个出口（目标幕 id，引擎核对过是当前幕打开的出口）。 */
+    exit?: string;
   }[];
+}
+
+/** 续写追加到这个周目剧情图上的章和幕（只追加，不改已有的幕）。 */
+export interface PlotAppend {
+  chapters: { id: string; title: string }[];
+  scenes: PlotScene[];
 }
 
 /** 剧情图上的进度（M3），记在 script / ai / choice 事件上，由 plot/progress.ts 折叠。 */
@@ -286,6 +293,10 @@ export interface PlotMark {
   ending?: string;
   /** 剧情图走完了（结局幕演完）。 */
   finished?: boolean;
+  /** 续写：这一拍开始前追加的章和幕（观察模式剧情图走完后导演续写的新篇章），scene 是新篇章的起始幕。 */
+  append?: PlotAppend;
+  /** 导演标记这一拍偏离了当前幕（16.6）。 */
+  offTrack?: boolean;
 }
 
 /**
@@ -318,7 +329,7 @@ export interface PlayEvent {
   stage?: StageCommand[];
   /** choice：选了第几项（从 0 开始）和选项文字。 */
   choice?: { index: number; label: string };
-  /** check：检定结果。 */
+  /** check：检定结果；ai：导演安排里的检定（先掷骰，再演出结果）。 */
   check?: CheckResult;
 }
 
@@ -385,6 +396,10 @@ export interface AdvView {
   stuck: string | null;
   /** 剧情图现在没有通过结构检查（世界文件被改坏了）：不能继续往下演。 */
   error: string | null;
+  /** 当前这一幕由 AI 演出（没有手写剧本）：可以输入自由行动。 */
+  aiScene: boolean;
+  /** 这一幕要由 AI 演出，但还没有配置模型（只能看到占位旁白）。 */
+  needsModel: boolean;
   vars: Record<string, Scalar>;
   /** 跨周目进度。隐藏结局达成之前不计入总数，标题显示为"？？？"。 */
   progress: {
@@ -396,11 +411,22 @@ export interface AdvView {
   };
 }
 
+/** 剧情图上的进度（从事件折叠出来的，见 plot/progress.ts）。世界没有剧情图时除了 time 都是空的。 */
 export interface PlotProgress {
-  /** 世界的骨架加上游玩中续写的篇章。 */
-  outline: PlotOutline | null;
-  done: string[];
-  currentChapterId: string | null;
+  /** 当前所在的幕。 */
+  scene: string | null;
+  /** 当前幕里演了几拍。 */
+  sceneBeats: number;
+  /** 演到的要点（整条路径）。 */
+  points: string[];
+  /** 走过的幕，按进入顺序。 */
+  visited: string[];
+  /** 这个周目续写追加的章和幕。 */
+  appended: PlotAppend;
+  /** 最近达成的结局。 */
+  ending: string | null;
+  /** 剧情图走完了。 */
+  finished: boolean;
   /** 故事里的当前时间（导演推进过时间才有）。 */
   time: string | null;
 }
@@ -522,10 +548,12 @@ export type EngineContract = {
   loadSave: Unary<PlayRef & { saveId: string }, PlayView>;
   deleteSave: Unary<PlayRef & { saveId: string }, PlayView>;
 
-  /** 剧情 ADV：往下演（手写剧本不调模型，立刻返回）。 */
-  advNext: Unary<PlayRef, PlayView>;
+  /** 剧情 ADV：往下演（手写剧本不调模型，立刻返回；AI 演出的幕推送生成进度）。 */
+  advNext: Streaming<PlayRef, PlayChunk, PlayView>;
   /** 剧情 ADV：选第 index 个选项（从 0 开始），并演出选完之后的内容。 */
-  advChoose: Unary<PlayRef & { index: number }, PlayView>;
+  advChoose: Streaming<PlayRef & { index: number }, PlayChunk, PlayView>;
+  /** 剧情 ADV：在 AI 演出的幕里输入一句自由行动（代替选项）。 */
+  advInput: Streaming<PlayRef & { text: string }, PlayChunk, PlayView>;
   /** 剧情 ADV：舞台第一次显示了某张 CG（记跨周目解锁）。 */
   advShown: Unary<PlayRef & { eventId: string; cg: string }, { unlocked: boolean }>;
 

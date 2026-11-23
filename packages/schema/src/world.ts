@@ -130,24 +130,6 @@ export const Location = z.object({
 });
 export type Location = z.infer<typeof Location>;
 
-const Beat = z.object({ id: Id, text: z.string(), required: z.boolean().default(false) });
-const Chapter = z.object({ id: Id, title: z.string().default(''), goal: z.string(), beats: z.array(Beat).default([]) });
-const Act = z.object({ id: Id, title: z.string(), chapters: z.array(Chapter).default([]) });
-
-/** plot/outline.json：剧情骨架（是骨架，不是剧本）。 */
-export const PlotOutline = z.object({
-  formatVersion: z.number().int().default(FORMAT_VERSION),
-  premise: z.string(),
-  control: z.enum(['sandbox', 'guided', 'linear']).default('guided'),
-  acts: z.array(Act).default([]),
-  endings: z.array(z.object({ id: Id, title: z.string(), condition: z.string().default('') })).default([]),
-  threads: z
-    .array(z.object({ id: Id, text: z.string(), plant: z.string().optional(), payoff: z.string().optional() }))
-    .default([]),
-  _meta: EntityMeta.default({ locked: [] }),
-});
-export type PlotOutline = z.infer<typeof PlotOutline>;
-
 /** style/style.json：文风、画风、音乐风格指南。 */
 export const StyleGuide = z.object({
   formatVersion: z.number().int().default(FORMAT_VERSION),

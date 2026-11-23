@@ -1,8 +1,10 @@
 import type { Character, ObserverSettings } from '@auto-adv/schema';
-import type { BeatMeta, ObserverChunk, PlayEvent, SceneState, Segment } from '../../api.ts';
-import { toAct } from '../../genesis/pipeline.ts';
-import { plotSpec } from '../../genesis/specs.ts';
+import type { BeatMeta, ObserverChunk, PlayEvent, PlotAppend, PlotMark, SceneState, Segment } from '../../api.ts';
+import { checkGraphOut, graphSpec } from '../../genesis/graph.ts';
 import type { Meter, ModelGateway } from '../../llm/gateway.ts';
+import type { CheckResult } from '../../plot/dice.ts';
+import { checkSpecOf, judgeBeat, rollFor } from '../../plot/judge.ts';
+import { continueWith, maxIdNumber, type PlotState } from '../../plot/progress.ts';
 import { generateJson, stripThinking } from '../../llm/structured.ts';
 import { shortId } from '../../util.ts';
 import { matchByName } from '../../world/render.ts';
@@ -10,11 +12,12 @@ import type { WorldData } from '../../world/store.ts';
 import { eventText, sceneAt, transcriptOf } from '../context.ts';
 import type { SummaryRow } from '../db.ts';
 import { parseScript, ScriptStream } from '../script.ts';
+import { checkInstruction, sceneBrief } from '../plotprompt.ts';
 import { foldState, type StoryState } from '../state.ts';
 import {
   actorMessages,
-  arcPrompt,
   beatInstruction,
+  continuationPrompt,
   DIRECTOR_SYSTEM,
   type DirectorOut,
   directorPrompt,
@@ -27,6 +30,8 @@ import { drawCard, maxSimilarity, QUALITY } from './quality.ts';
 export interface BeatInput {
   gateway: ModelGateway;
   world: WorldData;
+  /** 周目 id（检定的种子）。 */
+  playthroughId: string;
   /** 从开场到这一拍的父节点。 */
   path: PlayEvent[];
   summary: SummaryRow | null;
@@ -76,16 +81,6 @@ export function validatePlan(world: WorldData, state: StoryState, plan: Director
     speakers.push({ character: c, intent: s.intent });
   }
 
-  const allowed = new Set(state.currentChapter?.beats.filter((b) => !state.done.has(b.id)).map((b) => b.id) ?? []);
-  const done: string[] = [];
-  for (const id of plan.completeBeats) {
-    const clean = id.trim();
-    if (!clean) continue;
-    if (allowed.has(clean)) done.push(clean);
-    else if (state.done.has(clean)) rejected.push(`节拍 ${clean} 已经完成过了`);
-    else rejected.push(`节拍 ${clean} 不在当前章节里，不能跳着完成`);
-  }
-
   const reveals: NonNullable<BeatMeta['reveals']> = [];
   for (const r of plan.reveals) {
     const owner = matchByName(r.owner, world.characters);
@@ -103,7 +98,7 @@ export function validatePlan(world: WorldData, state: StoryState, plan: Director
   }
 
   const scene: SceneState = { locationId, presentCharacterIds: present };
-  return { scene, speakers, done: [...new Set(done)], reveals, rejected };
+  return { scene, speakers, reveals, rejected };
 }
 
 /** 一个角色是否亲眼见到了某个事件（事件发生时他在场）。 */
@@ -144,18 +139,29 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
   let state = foldState(world, p.path);
   const meta: BeatMeta = { plan: '', strategy: settings.strategy };
 
-  // 1. 骨架走完了：续写新篇章
-  if (state.outline && !state.currentChapter) {
+  // 1. 剧情图走完了：续写新篇章（只追加新的幕，过结构检查）
+  let append: PlotAppend | undefined;
+  if (state.plot && (state.plot.finished || !state.plot.scene)) {
     p.emit({ type: 'phase', phase: 'arc' });
+    const plot = state.plot;
+    const ctx = {
+      world,
+      variables: world.variables,
+      sceneOffset: maxIdNumber(plot.graph.scenes, 'sc'),
+      chapterOffset: maxIdNumber(plot.graph.chapters, 'ch'),
+      known: plot.graph.scenes.map((x) => ({ id: x.id, title: x.title })),
+    };
     const h = await gateway.forRole('director', 'observer.arc', p.meter);
     const { value } = await generateJson(gateway, h, {
       system: DIRECTOR_SYSTEM,
-      user: arcPrompt(world, state, p.summary?.text ?? null, transcriptOf(world, recent, pName)),
-      spec: plotSpec,
+      user: continuationPrompt(world, state, p.summary?.text ?? null, transcriptOf(world, recent, pName)),
+      spec: graphSpec,
       signal: p.signal,
+      validate: (v) => checkGraphOut(v, ctx).problem,
     });
-    meta.arc = toAct(value, state.outline.acts.length);
-    state = foldState(world, p.path, [meta.arc]);
+    const { graph } = checkGraphOut(value, ctx);
+    append = { chapters: graph.chapters, scenes: graph.scenes };
+    state = { ...state, plot: continueWith(plot, append, graph.start) };
   }
 
   // 2. 防崩坏：上一拍和之前太像，或者好几拍没有推进
@@ -194,14 +200,34 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
   const v = validatePlan(world, state, plan);
   meta.plan = plan.plan;
   if (plan.time.trim()) meta.time = plan.time.trim();
-  if (v.done.length) meta.done = v.done;
   if (v.reveals.length) meta.reveals = v.reveals;
+
+  // 剧情图：导演安排里的检定先掷骰，再核对要点、数值和出口
+  const plot: PlotState | null = state.plot?.scene ? state.plot : null;
+  let check: CheckResult | null = null;
+  let mark: PlotMark | undefined;
+  if (plot?.scene) {
+    if (!plot.scene.ending) {
+      const c = checkSpecOf(plan.check, world.variables);
+      if (c.note) v.rejected.push(c.note);
+      if (c.spec) check = rollFor(c.spec, `${plot.scene.id}:plan`, plot, { playthroughId: p.playthroughId, parentId });
+    }
+    mark = judgeBeat({
+      state: plot,
+      variables: world.variables,
+      mode: 'observer',
+      report: plan,
+      playerAction: false,
+      check,
+      ...(append ? { append } : {}),
+    }).mark;
+  }
   if (v.rejected.length) meta.rejected = v.rejected;
   const sceneChanged =
     v.scene.locationId !== state.scene.locationId ||
     v.scene.presentCharacterIds.join() !== state.scene.presentCharacterIds.join();
   const playState: StoryState = { ...state, scene: v.scene, time: meta.time ?? state.time };
-  const instruction = beatInstruction(world, plan, card);
+  const instruction = beatInstruction(world, plan, card, [sceneBrief(plot), check ? checkInstruction(check) : '']);
 
   // 4. 演出
   let segments: Segment[] = [];
@@ -315,6 +341,8 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
     callId,
     beat: meta,
   };
+  if (mark) ev.plot = mark;
+  if (check) ev.check = check;
   if (sceneChanged || !sceneAt(p.path).presentCharacterIds.length) ev.scene = v.scene;
   return ev;
 }

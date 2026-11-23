@@ -1,7 +1,8 @@
 /**
  * 剧情 ADV 模式的一步（不调模型的部分）：播放手写剧本、处理选项和检定、按规则换幕。
  * 纯函数：给定当前进度和玩家的行动，返回要写进事件树的新事件；落库由 session.ts 负责。
- * 没有手写剧本的幕在 M3 第 3 步交给 AI 演出；在那之前用一句占位旁白代替，方便先把剧情图走通。
+ * 没有手写剧本的幕交给 AI 演出（AdvWorld.ai 为 true 时）：这里只记下玩家的行动和检定，返回 ai 请求，
+ * 由调用方调模型演出这一拍（play/adv.ts）。没有 AI 时（命令行、没配模型）用一句占位旁白代替，方便先把剧情图走通。
  */
 import type {
   ChoiceOption,
@@ -18,7 +19,7 @@ import type { PlayEvent, PlotMark, PlotMenu, Segment } from '../api.ts';
 import type { UnlockKind } from '../play/db.ts';
 import { type ConditionContext, describeCondition, evalCondition } from './conditions.ts';
 import { rollCheck } from './dice.ts';
-import { type PlotState, reducePlot } from './progress.ts';
+import { cloneState, type PlotState, reducePlot, sceneById } from './progress.ts';
 import { resolveSpeaker } from './stage.ts';
 import { choosableExits, decideTransition } from './transition.ts';
 import { applyEffects, mergeChanges, type VarChange, type VarValues } from './vars.ts';
@@ -102,9 +103,20 @@ export interface AdvWorld {
   programs: ReadonlyMap<string, Program>;
   characters: readonly { id: string; name: string; aliases?: string[] }[];
   mode: PlayMode;
+  /** 没有手写剧本的幕交给 AI 演出（返回 ai 请求）；false 时用占位旁白。 */
+  ai?: boolean;
 }
 
-export type AdvAction = { kind: 'continue' } | { kind: 'choose'; index: number };
+/** continue：往下演；choose：选第 index 项；input：剧情 ADV 里的自由行动（只在 AI 演出的幕里可以用）。 */
+export type AdvAction = { kind: 'continue' } | { kind: 'choose'; index: number } | { kind: 'input'; text: string };
+
+/** 接下来这一拍要由 AI 演出。 */
+export interface AiRequest {
+  /** 这一拍有没有玩家行动（ADV 的岔路只能由玩家决定）。 */
+  playerAction: boolean;
+  /** 玩家的行动：选了哪一项，或者输入了什么。 */
+  action?: { kind: 'choice' | 'input'; text: string };
+}
 
 /** 还没写进事件树的事件（id / parentId / createdAt 由落库的一方补上）。 */
 export type EventDraft = Omit<PlayEvent, 'id' | 'parentId' | 'createdAt'>;
@@ -113,6 +125,10 @@ export interface StepResult {
   events: EventDraft[];
   /** 这一步解锁的东西（16.8）：event 是 events 里的下标。 */
   unlocks: { event: number; kind: UnlockKind; id: string }[];
+  /** 接下来这一拍要由 AI 演出（events 已经写进去之后的进度是 state）。 */
+  ai?: AiRequest;
+  /** 把 events 折叠进去之后的进度。 */
+  state: PlotState;
 }
 
 /** 玩家的行动不合法（比如选了锁住的选项）。 */
@@ -121,16 +137,8 @@ export class AdvError extends Error {}
 /** 剧本最多连续执行这么多条指令（防止写错的剧本卡死）。 */
 const MAX_OPS = 10_000;
 
-export function cloneState(s: PlotState): PlotState {
-  return {
-    ...s,
-    pendingChoice: s.pendingChoice && { ...s.pendingChoice },
-    points: new Set(s.points),
-    visited: [...s.visited],
-    vars: { ...s.vars },
-    notes: [...s.notes],
-  };
-}
+/** 这一幕由 AI 演出：没有手写剧本，而且调用方能调模型。 */
+export const aiScene = (w: AdvWorld, s: PlotState) => !!w.ai && !!s.scene && !w.programs.has(s.scene.id);
 
 export function conditionContext(s: PlotState, vars: VarValues = s.vars): ConditionContext {
   return { vars, visited: new Set(s.visited), check: s.lastCheck?.outcome ?? null };
@@ -243,7 +251,7 @@ function playBeat(
       beats: s.sceneBeats + 1,
       ctx,
       variables: w.variables,
-      lookup: (id) => w.graph.scenes.find((x) => x.id === id),
+      lookup: (id) => sceneById(s, id),
       // 剧本 jump 被驳回时当作播完，按"演完了"的规则找路
       report: { by: 'script', done: stop !== 'menu', ...(jumpTo ? { exit: jumpTo } : {}), playerAction },
     });
@@ -287,18 +295,31 @@ export function stepAdv(
   const push = (draft: EventDraft, u: { kind: UnlockKind; id: string }[] = [], parentId: string | null = null) => {
     for (const x of u) unlocks.push({ event: events.length, ...x });
     events.push(draft);
-    reducePlot(w.graph, s, { ...draft, id: '', parentId, createdAt: 0 } as PlayEvent);
+    reducePlot(s, { ...draft, id: '', parentId, createdAt: 0 } as PlayEvent);
+  };
+  const done = (ai?: AiRequest): StepResult => ({ events, unlocks, state: s, ...(ai ? { ai } : {}) });
+  /** 演下一拍：AI 演出的幕交给调用方，手写剧本的幕（或者没有 AI 时）在这里播。 */
+  const beat = (start: number, pre: readonly VarEffect[], playerAction: boolean, act?: AiRequest['action']) => {
+    if (aiScene(w, s)) return done({ playerAction, ...(act ? { action: act } : {}) });
+    const b = playBeat(w, s, start, pre, playerAction);
+    push(b.draft, b.unlocks);
+    return done();
   };
   const scene = s.scene;
   if (!scene) throw new AdvError('当前所在的幕在剧情图里找不到了');
   if (s.finished) throw new AdvError('剧情已经结束了');
 
-  /** 剧本里的选项已经记下：（要检定且还没掷就先掷骰）演出选完之后的一拍。 */
+  /** 选项已经记下：（要检定且还没掷就先掷骰）演出选完之后的一拍。 */
   const afterChoice = () => {
     const pending = s.pendingChoice;
+    if (!pending) throw new AdvError('找不到刚才选的选项');
+    if (pending.source === 'ai') {
+      // AI 给的选项：检定在选的时候已经掷过；选完之后的一拍由 AI 演（选项带着出口、新的幕是手写剧本时播剧本）
+      return beat(s.pc ?? 0, [], true, { kind: 'choice', text: pending.label });
+    }
     const op = w.programs.get(scene.id)?.ops[s.pc ?? -1];
-    const entry = pending && op?.k === 'menu' ? op.options[pending.index] : undefined;
-    if (!pending || !entry) throw new AdvError('找不到刚才选的选项');
+    const entry = op?.k === 'menu' ? op.options[pending.index] : undefined;
+    if (!entry) throw new AdvError('找不到刚才选的选项');
     const spec = entry.opt.check;
     if (spec && !pending.rolled) {
       const mod = spec.var ? s.vars[spec.var] : 0;
@@ -310,25 +331,36 @@ export function stepAdv(
       });
       push({ kind: 'check', check });
     }
-    const beat = playBeat(w, s, entry.body, entry.opt.set, true);
-    push(beat.draft, beat.unlocks);
-    return { events, unlocks };
+    const b = playBeat(w, s, entry.body, entry.opt.set, true);
+    push(b.draft, b.unlocks);
+    return done();
   };
+
+  if (action.kind === 'input') {
+    const text = action.text.trim();
+    if (!text) throw new AdvError('请输入你想做的事');
+    if (!aiScene(w, s)) throw new AdvError('这一幕是手写剧本，只能用选项推进');
+    push({ kind: 'player', text }, [], seed.headId);
+    return done({ playerAction: true, action: { kind: 'input', text } });
+  }
 
   if (action.kind === 'continue') {
     if (s.menu) throw new AdvError('请先做出选择');
-    // 选项已经记下、选完之后的内容还没演（上次中途失败，或者回退到了选项事件上）：接着演
+    // 选项或输入已经记下、之后的内容还没演（上次中途失败，或者回退到了选项事件上）：接着演
     if (s.pendingChoice) return afterChoice();
-    if (s.pc === -1) throw new AdvError('这一幕演完了，但没有可以走的出口');
-    const beat = playBeat(w, s, s.pc ?? 0, [], false);
-    push(beat.draft, beat.unlocks);
-    return { events, unlocks };
+    if (s.pendingInput !== null) {
+      if (!aiScene(w, s)) throw new AdvError('这一幕是手写剧本，只能用选项推进');
+      return done({ playerAction: true, action: { kind: 'input', text: s.pendingInput } });
+    }
+    if (!aiScene(w, s) && s.pc === -1) throw new AdvError('这一幕演完了，但没有可以走的出口');
+    return beat(s.pc ?? 0, [], false);
   }
 
   const menu = s.menu;
   if (!menu) throw new AdvError('现在没有可以选的选项');
   const shown = menu.options[action.index];
   if (!shown) throw new AdvError(`没有第 ${action.index + 1} 个选项`);
+  if (!shown.enabled) throw new AdvError(`「${shown.label}」现在选不了`);
   const ctx = conditionContext(s);
   const choice = { index: action.index, label: shown.label };
 
@@ -341,9 +373,34 @@ export function stepAdv(
     if (r.notes.length) Object.assign(plot, { notes: r.notes });
     push({ kind: 'choice', choice, plot }, [], seed.headId);
     if (!s.scene) throw new AdvError(`出口指向的幕 ${exit.to} 不存在`);
-    const beat = playBeat(w, s, 0, [], false);
-    push(beat.draft, beat.unlocks);
-    return { events, unlocks };
+    return beat(0, [], false, { kind: 'choice', text: shown.label });
+  }
+
+  if (menu.source === 'ai') {
+    const plot: PlotMark = { scene: scene.id };
+    if (shown.exit) {
+      // 选项带着出口：岔路由玩家的选择决定，选完就换幕，下一拍在新的幕里演出选择的结果
+      const exit = choosableExits(scene).find((x) => x.to === shown.exit);
+      if (!exit || !evalCondition(exit.if, ctx)) throw new AdvError(`「${shown.label}」现在选不了`);
+      const r = applyEffects(w.variables, s.vars, exit.set, { source: 'author' });
+      plot.exit = { to: exit.to, by: 'choice' };
+      if (r.changes.length) plot.vars = r.changes;
+      if (r.notes.length) plot.notes = r.notes;
+    }
+    push({ kind: 'choice', choice, plot }, [], seed.headId);
+    const spec = shown.check;
+    if (spec) {
+      const mod = spec.var ? s.vars[spec.var] : 0;
+      const id = `${scene.id}:ai:${action.index}`;
+      const check = rollCheck(
+        { ...(spec.var ? { var: spec.var } : {}), dc: spec.dc, label: spec.label || shown.label, id },
+        typeof mod === 'number' ? mod : 0,
+        { playthroughId: seed.playthroughId, parentId: seed.headId },
+      );
+      push({ kind: 'check', check });
+    }
+    if (!s.scene) throw new AdvError(`出口指向的幕 ${shown.exit} 不存在`);
+    return afterChoice();
   }
 
   const op = w.programs.get(scene.id)?.ops[s.pc ?? -1];

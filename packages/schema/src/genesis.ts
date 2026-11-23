@@ -4,9 +4,9 @@ export const GENESIS_STEPS = [
   { id: 'worldview', name: '世界观', hint: '历史、势力、规则、当前局势' },
   { id: 'cast', name: '角色', hint: '主角与其他角色、关系网' },
   { id: 'locations', name: '地点', hint: '故事会发生的地方' },
-  { id: 'plot', name: '剧情骨架', hint: '章节、关键节拍、伏笔与结局' },
+  { id: 'plot', name: '剧情图', hint: '幕、岔路、数值、伏笔与结局' },
   { id: 'lore', name: '设定集', hint: '对话中按关键词触发的设定条目' },
-  { id: 'opening', name: '开场', hint: '第一个场景，引向第一章' },
+  { id: 'opening', name: '开场', hint: '第一个场景，引向第一幕' },
 ] as const;
 
 export type GenesisStepId = (typeof GENESIS_STEPS)[number]['id'];

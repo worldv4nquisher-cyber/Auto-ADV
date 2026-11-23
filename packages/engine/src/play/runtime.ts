@@ -19,12 +19,14 @@ import type {
 } from '../api.ts';
 import type { Meter, ModelGateway } from '../llm/gateway.ts';
 import { generateJson, stripThinking } from '../llm/structured.ts';
+import type { AdvAction } from '../plot/runner.ts';
 import { AdvSession, advView, loadAdvWorld, recordCgShown } from '../plot/session.ts';
-import { buildTimeline, findStep, stepText } from '../plot/stage.ts';
+import { buildTimeline, findStep, stageFromSegments, stepText } from '../plot/stage.ts';
 import { shortId } from '../util.ts';
 import { matchByName } from '../world/render.ts';
 import type { WorldData, WorldStore } from '../world/store.ts';
 import { buildMessages, eventText, protagonistOf, sceneAt, summaryPrompt } from './context.ts';
+import { runAdvBeat } from './adv.ts';
 import { PlayDb, type PlaythroughRow } from './db.ts';
 import { runBeat } from './observer/beat.ts';
 import { memoryPrompt, memorySpec } from './observer/prompts.ts';
@@ -223,29 +225,79 @@ export class PlayService {
     return this.view({ worldId: p.worldId, playthroughId: pt.id });
   }
 
-  /** 剧情 ADV：按剧情图从起始幕开始，第一拍直接演出来（手写剧本不调模型）。 */
-  private startAdv(world: WorldData, p: StartPlaythroughParams): Promise<PlayView> {
+  /**
+   * 剧情 ADV：按剧情图从起始幕开始。生成的世界把开场白放在树根；
+   * 第一幕是手写剧本（或者没配模型）时第一拍直接演出来，交给 AI 演的第一拍由界面接着调 advNext（流式）。
+   */
+  private async startAdv(world: WorldData, p: StartPlaythroughParams): Promise<PlayView> {
+    const ai = await this.gateway.configured('director');
     const { adv } = loadAdvWorld(world);
     const db = this.db(p.worldId);
-    const session = new AdvSession(db, adv);
+    const session = new AdvSession(db, { ...adv, ai });
     const title = p.title?.trim() || `周目 ${db.listPlaythroughs().length + 1}`;
-    const id = session.start(title, protagonistOf(world, null)?.id ?? null);
-    session.next(id);
+    const protagonist = protagonistOf(world, null);
+    let opening: Parameters<AdvSession['start']>[2];
+    if (world.opening) {
+      const segments = openingSegments(world);
+      const scene: SceneState = {
+        locationId: world.opening.locationId ?? world.locations[0]?.id ?? null,
+        presentCharacterIds: world.opening.presentCharacterIds,
+      };
+      const stage = stageFromSegments(segments, {
+        characters: world.characters,
+        before: { bg: null, sprites: [], cg: null, bgm: null },
+        scene,
+        protagonistId: protagonist?.id ?? null,
+      });
+      opening = { segments, stage, scene };
+    }
+    const id = session.start(title, protagonist?.id ?? null, opening);
+    const start = adv.graph.scenes.find((s) => s.id === adv.graph.start);
+    if (!ai || (start && adv.programs.has(start.id))) session.next(id);
     return this.view({ worldId: p.worldId, playthroughId: id });
   }
 
-  /** 剧情 ADV：往下演一拍（choose 不给），或者选一个选项。 */
-  advStep(ref: PlayRef, choose?: number): Promise<PlayView> {
-    return this.exclusive(ref, async () => {
-      const world = await this.store.load(ref.worldId);
-      const db = this.db(ref.worldId);
-      const pt = db.getPlaythrough(ref.playthroughId);
-      if (pt.mode !== 'adv') throw new Error('这个周目不是剧情 ADV 模式');
-      const session = new AdvSession(db, loadAdvWorld(world).adv);
-      if (choose === undefined) session.next(pt.id);
-      else session.choose(pt.id, choose);
-      return this.view(ref);
-    });
+  /**
+   * 剧情 ADV 的一步：往下演、选一个选项，或者输入一句自由行动。
+   * 手写剧本的幕不调模型；AI 演出的幕先把玩家的行动和检定写进树，再调模型演这一拍（中途失败可以"继续"重试）。
+   */
+  advAct(ref: PlayRef, action: AdvAction, emit: Emit, signal: AbortSignal): Promise<PlayView> {
+    return this.exclusive(
+      ref,
+      async () => {
+        const world = await this.store.load(ref.worldId);
+        const db = this.db(ref.worldId);
+        const pt = db.getPlaythrough(ref.playthroughId);
+        if (pt.mode !== 'adv') throw new Error('这个周目不是剧情 ADV 模式');
+        const ai = await this.gateway.configured('director');
+        const session = new AdvSession(db, { ...loadAdvWorld(world).adv, ai });
+        const r = session.act(pt.id, action);
+        if (r.ai) {
+          const head = db.getPlaythrough(pt.id).headId;
+          const events = db.path(pt.id, head);
+          const out = await runAdvBeat({
+            gateway: this.gateway,
+            world,
+            playthroughId: pt.id,
+            path: events,
+            request: r.ai,
+            protagonist: protagonistOf(world, pt.protagonistId),
+            summary: db.latestSummary(
+              pt.id,
+              events.map((e) => e.id),
+            ),
+            signal,
+            meter: this.meter(ref),
+            emit,
+          });
+          signal.throwIfAborted();
+          session.commit(pt.id, out.draft, out.unlocks);
+          this.scheduleMemory(ref);
+        }
+        return this.view(ref);
+      },
+      () => emit({ type: 'phase', phase: 'memory' }),
+    );
   }
 
   /** 剧情 ADV：舞台第一次显示了某张 CG。 */
@@ -282,7 +334,7 @@ export class PlayService {
       saves: db.listSaves(pt.id),
       plot: plotProgress(foldState(world, events)),
       observer: pt.mode === 'observer' ? this.status(ref) : null,
-      adv: pt.mode === 'adv' ? advView(world, events, db.listUnlocks()) : null,
+      adv: pt.mode === 'adv' ? advView(world, events, db.listUnlocks(), { ai: await this.gateway.configured('director') }) : null,
     };
   }
 
@@ -346,7 +398,7 @@ export class PlayService {
         const db = this.db(p.worldId);
         const pt = db.getPlaythrough(p.playthroughId);
         const controlled = controlledOf(pt);
-        if (pt.mode === 'adv') throw new Error('剧情 ADV 模式现在只能用选项推进，自由输入要等接上 AI 之后');
+        if (pt.mode === 'adv') throw new Error('剧情 ADV 模式请用选项推进，或者在 AI 演出的幕里输入行动');
         if (pt.mode === 'observer' && !controlled) throw new Error('观察模式下请先接管一个角色，或者给导演下指令');
         let parentId = p.parentId ?? pt.headId;
         db.getEvent(pt.id, parentId);
@@ -483,6 +535,7 @@ export class PlayService {
       {
         gateway: this.gateway,
         world,
+        playthroughId: pt.id,
         path: events,
         summary,
         settings: settingsOf(pt),

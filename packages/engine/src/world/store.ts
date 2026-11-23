@@ -2,13 +2,10 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   Character,
-  isPlotGraph,
   Location,
   LoreEntry,
   migrate,
-  migratePlotOutline,
   PlotGraph,
-  PlotOutline,
   StoryOpening,
   StyleGuide,
   type VariableDef,
@@ -28,9 +25,7 @@ export interface WorldData {
   characters: Character[];
   locations: Location[];
   lore: LoreEntry[];
-  /** M2 的旧骨架：观察模式在 M3 第 3 步切到剧情图之前还用它。outline.json 已经是剧情图时为 null。 */
-  plot: PlotOutline | null;
-  /** 剧情图：原生的，或者从旧骨架自动迁移来的（16.7，只在内存里迁移，不改文件）。 */
+  /** 剧情图（plot/outline.json）。M2 的旧骨架读取时自动迁移成剧情图（16.7，只在内存里迁移，下次写入时才改文件）。 */
   graph: PlotGraph | null;
   /** systems/variables.json */
   variables: VariableDef[];
@@ -197,13 +192,13 @@ export class WorldStore {
         this.readDir(this.file(id, 'characters'), Character, 'character.json'),
         this.readDir(this.file(id, 'locations'), Location),
         this.readDir(this.file(id, 'setting', 'lore'), LoreEntry),
-        this.readOutline(id),
+        this.read(this.file(id, 'plot', 'outline.json'), PlotGraph),
         this.read(this.file(id, 'systems', 'variables.json'), VariablesFile),
         this.read(this.file(id, 'story', 'opening.json'), StoryOpening),
       ]);
     // 角色按创建顺序（id 里带序号），主角排第一
     characters.sort((a, b) => Number(b.role === 'protagonist') - Number(a.role === 'protagonist'));
-    const scripts = outline.graph ? await this.readScripts(id, outline.graph) : {};
+    const scripts = outline ? await this.readScripts(id, outline) : {};
     return {
       manifest,
       brief,
@@ -212,22 +207,11 @@ export class WorldStore {
       characters,
       locations,
       lore,
-      plot: outline.plot,
-      graph: outline.graph,
+      graph: outline,
       variables: variables?.variables ?? [],
       scripts,
       opening,
     };
-  }
-
-  /** plot/outline.json：按结构区分剧情图和 M2 的旧骨架，旧骨架同时给出迁移后的剧情图。 */
-  private async readOutline(id: string): Promise<{ plot: PlotOutline | null; graph: PlotGraph | null }> {
-    const raw = await readJsonFile(this.file(id, 'plot', 'outline.json'));
-    if (raw === undefined) return { plot: null, graph: null };
-    const data = migrate(raw);
-    if (isPlotGraph(data)) return { plot: null, graph: PlotGraph.parse(data) };
-    const plot = PlotOutline.parse(data);
-    return { plot, graph: migratePlotOutline(plot) };
   }
 
   /** plot/scenes/ 下的手写剧本：幕的 script 字段指定的文件，没指定就找 <幕 id>.adv。 */
@@ -264,8 +248,12 @@ export class WorldStore {
     return writeFileAtomic(this.file(id, 'setting', 'worldview.md'), text.endsWith('\n') ? text : `${text}\n`);
   }
 
-  writePlot(id: string, plot: PlotOutline) {
-    return writeFileAtomic(this.file(id, 'plot', 'outline.json'), json(PlotOutline.parse(plot)));
+  writePlot(id: string, graph: PlotGraph) {
+    return writeFileAtomic(this.file(id, 'plot', 'outline.json'), json(PlotGraph.parse(graph)));
+  }
+
+  writeVariables(id: string, variables: VariableDef[]) {
+    return writeFileAtomic(this.file(id, 'systems', 'variables.json'), json(VariablesFile.parse({ variables })));
   }
 
   writeOpening(id: string, opening: StoryOpening) {

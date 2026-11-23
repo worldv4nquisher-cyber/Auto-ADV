@@ -1,5 +1,5 @@
 {
-  "formatVersion": 0,
+  "formatVersion": 1,
   "premise": "主角帮林夕寻找失踪的姐姐，线索指向图书馆地下的旧书库和一本不存在的书。",
   "control": "guided",
   "start": "sc_01",

@@ -1,22 +1,28 @@
 /**
- * 剧情 ADV 的 VN 舞台（M3 第 2 步）：背景、立绘站位、文本框、回想、自动播放、快进、存读档。
+ * 剧情 ADV 的 VN 舞台（M3 第 2、3 步）：背景、立绘站位、文本框、回想、自动播放、快进、存读档。
  * 素材还没有生成（M4），背景、立绘、CG 都用占位图。
  *
  * 舞台本身不保存状态：引擎给出事件路径，plot/stage.ts 把它展开成一步一步的画面，这里只记"播到第几步"。
- * 播到最后一步时再找引擎要下一拍（手写剧本不调模型，立刻返回）。
+ * 播到最后一步时再找引擎要下一拍：手写剧本不调模型，立刻返回；没有剧本的幕由 AI 演出（流式返回进度），
+ * 这时除了选项还可以直接输入想做的事。
  */
-import type { PlayView, SaveInfo, WorldDetail } from '@auto-adv/engine/api';
+import type { PlayChunk, PlayView, SaveInfo, WorldDetail } from '@auto-adv/engine/api';
 import { buildTimeline, findStep, type StageStep, type StageView, type Timeline } from '@auto-adv/engine/stage';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import { PlaceholderBg, PlaceholderCg, PlaceholderSprite } from '../components/placeholder.tsx';
 import { useColorOf } from '../components/story.tsx';
 import { Button, ConfirmButton, cx, Input, Select, Spinner, useToast } from '../components/ui.tsx';
-import { engine, errorMessage } from '../lib/engine.ts';
+import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatTime } from '../lib/format.ts';
 import { useRouter } from '../lib/router.tsx';
 
 const OUTCOME = { crit: '大成功', success: '成功', narrow: '险胜', fail: '失败' } as const;
 const ENDING_KIND = { good: '好结局', normal: '普通结局', bad: '坏结局' } as const;
+const PHASE_TEXT: Record<string, string> = {
+  thinking: '导演正在安排这一拍…',
+  writing: '演员们正在演出…',
+  memory: '书记正在整理前情提要…',
+};
 
 const SPEED_KEY = 'auto-adv:adv-text-speed';
 const AUTO_KEY = 'auto-adv:adv-auto-delay';
@@ -84,6 +90,10 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const [panel, setPanel] = useState<Panel>(null);
   const [hidden, setHidden] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** AI 演出时的进度（导演 / 演出 / 整理前情提要）。 */
+  const [phase, setPhase] = useState<string | null>(null);
+  const [action, setAction] = useState('');
+  const controller = useRef<AbortController | null>(null);
   const [speed, setSpeed] = useState(() => readStore(SPEED_KEY, isNum, 45));
   const [autoDelay, setAutoDelay] = useState(() => readStore(AUTO_KEY, isNum, 1.2));
   const stageRef = useRef<HTMLDivElement>(null);
@@ -154,23 +164,41 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     return () => clearTimeout(t);
   }, [stepKey]);
 
+  // 离开页面时取消还在生成的一拍
+  useEffect(() => () => controller.current?.abort(), []);
+
   /** 换一个新的 PlayView，place 算出舞台停在哪一步。 */
-  const call = async (fn: () => Promise<PlayView>, place: (t: Timeline) => number): Promise<boolean> => {
+  const call = async (fn: (signal: AbortSignal) => Promise<PlayView>, place: (t: Timeline) => number): Promise<boolean> => {
     if (busy) return false;
     setBusy(true);
+    const ac = new AbortController();
+    controller.current = ac;
     try {
-      const v = await fn();
+      const v = await fn(ac.signal);
       const t = buildTimeline(v.path, opts);
       setView(v);
       setCursor(place(t));
       return true;
     } catch (err) {
-      toast('err', errorMessage(err));
+      if (!isAborted(err)) toast('err', errorMessage(err));
       setMode('normal');
       return false;
     } finally {
+      if (controller.current === ac) controller.current = null;
       setBusy(false);
+      setPhase(null);
     }
+  };
+  const onChunk = (c: PlayChunk) => {
+    if (c.type === 'phase') setPhase(c.phase);
+  };
+  /** 往下演、选选项、自由输入：AI 演出的幕会流式返回进度。新内容从第一条新步骤开始播。 */
+  const act = (method: 'advNext' | 'advChoose' | 'advInput', extra: { index?: number; text?: string } = {}) => {
+    const len = steps.length;
+    const place = (t: Timeline) => Math.min(len, t.steps.length - 1);
+    if (method === 'advChoose') return call((sig) => engine.stream('advChoose', { ...ref, index: extra.index ?? 0 }, onChunk, sig), place);
+    if (method === 'advInput') return call((sig) => engine.stream('advInput', { ...ref, text: extra.text ?? '' }, onChunk, sig), place);
+    return call((sig) => engine.stream('advNext', ref, onChunk, sig), place);
   };
 
   const complete = () => {
@@ -193,12 +221,16 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
       setMode('normal');
       return;
     }
-    const len = steps.length;
-    void call(
-      () => engine.call('advNext', ref),
-      (t) => Math.min(len, t.steps.length - 1),
-    );
+    void act('advNext');
   };
+
+  // 开场是空的（世界没有开场、第一幕由 AI 演出）：直接要第一拍
+  const kicked = useRef(false);
+  useEffect(() => {
+    if (kicked.current || steps.length || !adv || adv.menu || adv.finished || adv.error) return;
+    kicked.current = true;
+    advance();
+  }, [steps.length]);
 
   // 选项刚弹出来的一小会儿不接受点击：连点推进剧情时不会误选
   const menuAt = useRef(0);
@@ -208,11 +240,15 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
 
   const choose = (index: number) => {
     if (!menuOpen || Date.now() - menuAt.current < 400) return;
-    const len = steps.length;
-    void call(
-      () => engine.call('advChoose', { ...ref, index }),
-      (t) => Math.min(len, t.steps.length - 1),
-    );
+    void act('advChoose', { index });
+  };
+
+  /** AI 演出的幕里可以不选选项，直接输入想做的事。 */
+  const inputOpen = !!adv?.aiScene && !adv.needsModel && !adv.finished && !adv.error && atEnd && typed && !busy;
+  const submitAction = () => {
+    const text = action.trim();
+    if (!text || !inputOpen) return;
+    void act('advInput', { text }).then((ok) => ok && setAction(''));
   };
 
   /** 回到某个选项之前重新选（之后的内容保留为分支）。 */
@@ -299,6 +335,33 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const lastChoice = timeline.backlog.findLast((b) => b.kind === 'choice' && b.step <= cursor + 1);
   const textVisible = !hidden && step?.kind === 'text';
 
+  const actionForm = (
+    <form
+      className="flex w-[52%] gap-[0.6cqw]"
+      data-testid="adv-input"
+      onClick={(e) => e.stopPropagation()}
+      onSubmit={(e) => {
+        e.preventDefault();
+        submitAction();
+      }}
+    >
+      <input
+        value={action}
+        onChange={(e) => setAction(e.target.value)}
+        maxLength={200}
+        placeholder={menuOpen ? '或者，直接写下你想做的事…' : '写下你想做的事，或者点击画面继续…'}
+        className="min-w-0 flex-1 rounded-[0.6cqw] border border-white/15 bg-[#10121a]/85 px-[1.2cqw] py-[0.6cqw] text-[max(12px,1.25cqw)] text-white placeholder:text-white/35 focus:border-accent focus:outline-none"
+      />
+      <button
+        type="submit"
+        disabled={!action.trim()}
+        className="rounded-[0.6cqw] border border-white/15 bg-[#2a2550]/90 px-[1.4cqw] text-[max(12px,1.25cqw)] disabled:opacity-40"
+      >
+        行动
+      </button>
+    </form>
+  );
+
   const toolbar = (
     <div className="flex items-center gap-[0.2em]" onClick={(e) => e.stopPropagation()}>
       <ToolButton testId="adv-backlog" onClick={() => setPanel('backlog')}>
@@ -338,7 +401,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
         data-busy={busy ? '1' : '0'}
         className="relative cursor-default overflow-hidden bg-black text-white select-none"
         style={{ width: 'min(100cqw, calc(100cqh * 16 / 9))', aspectRatio: '16 / 9', containerType: 'inline-size' }}
-        onClick={() => (hidden ? setHidden(false) : menuOpen ? undefined : advance())}
+        onClick={() => (hidden ? setHidden(false) : menuOpen || (inputOpen && action.trim()) ? undefined : advance())}
         onContextMenu={(e) => {
           e.preventDefault();
           setHidden((h) => !h);
@@ -492,6 +555,12 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                 {!o.enabled && o.lockedBy && <span className="mt-[0.2em] block text-[0.7em] text-white/35">🔒 需要：{o.lockedBy}</span>}
               </button>
             ))}
+            {inputOpen && actionForm}
+          </div>
+        )}
+        {inputOpen && !menuOpen && !hidden && (
+          <div className="absolute inset-x-0 bottom-[32%] flex justify-center" data-testid="adv-actions">
+            {actionForm}
           </div>
         )}
 
@@ -524,12 +593,27 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                   </>
                 )}
                 {!step && !adv?.menu && <span className="text-white/50">（还没有内容）</span>}
+                {!step && busy && <span className="text-white/50">{PHASE_TEXT[phase ?? ''] ?? '准备中…'}</span>}
                 {atEnd && typed && adv?.stuck && <span className="text-err">✕ {adv.stuck}</span>}
                 {atEnd && typed && adv?.error && <span className="text-err">✕ {adv.error}</span>}
               </div>
               <div className="flex items-center justify-between text-[max(11px,0.95cqw)] text-white/55">
                 <span className="flex items-center gap-2">
                   {busy && <Spinner className="size-3" />}
+                  {busy && phase && <span data-testid="adv-phase">{PHASE_TEXT[phase] ?? phase}</span>}
+                  {adv?.needsModel && atEnd && !busy && (
+                    <button
+                      type="button"
+                      className="text-warn underline-offset-2 hover:underline"
+                      data-testid="adv-needs-model"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate({ page: 'settings' });
+                      }}
+                    >
+                      没配模型，这一幕先用占位旁白 · 去设置
+                    </button>
+                  )}
                   {mode === 'auto' && <span className="text-accent-strong">自动</span>}
                   {skipping && <span className="text-warn">快进中</span>}
                   {typed && !menuOpen && !busy && step && <span className="stage-blink text-white/70">▼</span>}

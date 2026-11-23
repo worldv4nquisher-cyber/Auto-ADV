@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { type MockServer, type MockServerOptions, startMockServer } from '@auto-adv/providers/testing';
@@ -14,7 +14,6 @@ import {
   serveRpc,
 } from '../src/index.ts';
 import { MEMORY } from '../src/play/runtime.ts';
-import { checkPlot } from '../src/plot/check.ts';
 
 let dir: string;
 let server: MockServer;
@@ -76,31 +75,44 @@ describe('一键创世', () => {
     expect(w.opening?.presentCharacterIds).toEqual(['char_02']);
     expect(w.opening?.lines[0]?.characterId).toBe('char_02');
     expect(w.worldview).toContain('## 当前局势');
-    // 剧情骨架：章节和节拍都有稳定的 id，开场提示词里带上了第一章
-    const act = w.plot?.acts[0];
-    expect(act?.id).toBe('act_01');
-    expect(act?.chapters.map((c) => c.id)).toEqual(['ch_01_01', 'ch_01_02', 'ch_01_03']);
-    expect(act?.chapters[0]?.beats.map((b) => b.id)).toEqual(['b_01_01_01', 'b_01_01_02', 'b_01_01_03']);
-    expect(w.plot?.endings[0]?.id).toBe('end_01');
-    // 旧骨架读取时自动迁移成剧情图（16.7）：节拍 id 原样保留为要点 id，能通过结构检查
-    expect(w.graph?.scenes.map((s) => [s.id, s.points.map((p) => p.id), s.exits.map((e) => e.to)])).toEqual([
-      ['sc_01', ['b_01_01_01', 'b_01_01_02', 'b_01_01_03'], ['sc_02']],
-      ['sc_02', ['b_01_02_01', 'b_01_02_02', 'b_01_02_03'], ['sc_03']],
-      ['sc_03', ['b_01_03_01', 'b_01_03_02'], ['sc_04', 'sc_05']],
-      ['sc_04', [], []],
+    // 剧情图：幕重新编号成 sc_NN，要点是 sc_NN_N，地点和角色换成 id，条件按结构解析；能通过结构检查
+    const g = w.graph as PlotGraph;
+    expect(g.start).toBe('sc_01');
+    expect(g.chapters.map((c) => c.id)).toEqual(['ch_01', 'ch_02']);
+    expect(g.scenes.map((s) => [s.id, s.points.map((p) => p.id), s.exits.map((e) => e.to)])).toEqual([
+      ['sc_01', ['sc_01_1', 'sc_01_2'], ['sc_02', 'sc_03']],
+      ['sc_02', ['sc_02_1', 'sc_02_2'], ['sc_04']],
+      ['sc_03', ['sc_03_1', 'sc_03_2'], ['sc_04']],
+      ['sc_04', ['sc_04_1', 'sc_04_2'], ['sc_05', 'sc_06']],
       ['sc_05', [], []],
+      ['sc_06', [], []],
     ]);
-    const check = checkPlot({ graph: w.graph as PlotGraph, variables: w.variables });
-    expect(check.ok).toBe(true);
-    expect(check.warnings.every((x) => x.message.includes('迁移来的文字'))).toBe(true);
+    expect(g.scenes[0]).toMatchObject({ location: 'loc_01', cast: ['char_02'], chapter: 'ch_01' });
+    expect(g.scenes[3]?.exits[0]?.if).toEqual({ gte: ['affinity.char_02', 40] });
+    expect(g.scenes[3]?.default).toBe('sc_06');
+    expect(g.scenes[4]?.ending).toMatchObject({ kind: 'good' });
+    expect(w.variables.map((v) => [v.id, v.category, v.initial])).toEqual([
+      ['affinity.char_02', 'relationship', 30],
+      ['flag.found_log', 'other', false],
+      ['skill.insight', 'attribute', 1],
+    ]);
+    expect(w.plotCheck?.ok).toBe(true);
+    // 开场提示词里带上了第一幕
     const openingReq = server.requests.find((r) => JSON.stringify(r).includes('story_opening'));
-    expect(JSON.stringify(openingReq)).toContain('归乡');
+    expect(JSON.stringify(openingReq)).toContain('# 第一幕');
+    expect(JSON.stringify(openingReq)).toContain('码头重逢');
 
     const worldDir = path.join(dir, 'worlds', summary.id);
     const manifest = JSON.parse(await readFile(path.join(worldDir, 'world.json'), 'utf8'));
     expect(manifest.models).toEqual(['模拟服务 / mock-chat']);
     await readFile(path.join(worldDir, 'characters', 'char_01', 'character.json'), 'utf8');
     await readFile(path.join(worldDir, 'setting', 'worldview.md'), 'utf8');
+    // 写出来的文件是格式版本 1
+    const outline = JSON.parse(await readFile(path.join(worldDir, 'plot', 'outline.json'), 'utf8'));
+    expect(outline.formatVersion).toBe(1);
+    expect(outline.scenes).toHaveLength(6);
+    const vars = JSON.parse(await readFile(path.join(worldDir, 'systems', 'variables.json'), 'utf8'));
+    expect(vars.variables).toHaveLength(3);
 
     const logs = await client.call('listCalls', {});
     const tags = new Set(logs.items.map((c) => c.tag));
@@ -142,6 +154,56 @@ describe('一键创世', () => {
     const rerun = await client.stream('runGenesis', { worldId: summary.id, from: 'locations' }, () => {});
     expect(rerun.status).toBe('ready');
     expect(server.requests.length - before2).toBe(4); // locations、plot、lore、opening
+  });
+
+  it('剧情图过不了结构检查时，把问题反馈给模型重写', async () => {
+    let broken = 1;
+    await setup({
+      reply: (_last, info) => {
+        if (info.schemaName !== 'plot_graph' || broken-- <= 0) return undefined;
+        // 第二幕是死路，条件写成了字符串表达式，出口指向不存在的幕
+        return JSON.stringify({
+          scenes: [
+            { id: 'a', title: '开头', exits: [{ to: 'b' }, { to: 'x', label: '去不存在的地方', if: 'affinity >= 3' }] },
+            { id: 'b', title: '死路' },
+            { id: 'c', title: '结局', ending: { kind: 'good' } },
+          ],
+        });
+      },
+    });
+    const { summary } = await createWorld();
+    expect(summary.status).toBe('ready');
+    const plots = server.requests.filter((r) => JSON.stringify(r).includes('plot_graph'));
+    expect(plots).toHaveLength(2);
+    const feedback = JSON.stringify(plots[1]);
+    expect(feedback).toContain('剧情图有这些问题');
+    expect(feedback).toContain('不存在的幕「x」');
+    expect(feedback).toContain('死路');
+    expect(feedback).toContain('走不到这一幕');
+    const w = await client.call('getWorld', { id: summary.id });
+    expect(w.graph?.scenes).toHaveLength(6);
+  });
+
+  it('M2 的旧骨架（格式版本 0）读取时迁移成剧情图', async () => {
+    await setup();
+    const { summary } = await createWorld();
+    const file = path.join(dir, 'worlds', summary.id, 'plot', 'outline.json');
+    await writeFile(
+      file,
+      JSON.stringify({
+        formatVersion: 0,
+        premise: '旧的骨架',
+        acts: [{ id: 'act_01', title: '第一篇', chapters: [{ id: 'ch_01_01', title: '归乡', goal: '回到故乡', beats: [{ id: 'b_01', text: '下船' }] }] }],
+        endings: [{ id: 'end_01', title: '守望', condition: '留下' }],
+      }),
+    );
+    const w = await client.call('getWorld', { id: summary.id });
+    expect(w.graph?.formatVersion).toBe(1);
+    expect(w.graph?.scenes.map((s) => [s.id, s.points.map((p) => p.id)])).toEqual([
+      ['sc_01', ['b_01']],
+      ['sc_02', []],
+    ]);
+    expect(w.plotCheck?.ok).toBe(true);
   });
 
   it('中途取消后状态保留，之后可以续跑', async () => {

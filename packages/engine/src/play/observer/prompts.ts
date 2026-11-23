@@ -2,15 +2,56 @@ import type { ChatMessage } from '@auto-adv/providers';
 import type { Character, ObserverSettings } from '@auto-adv/schema';
 import { z } from 'zod';
 import type { PlayEvent } from '../../api.ts';
-import { renderOutline } from '../../genesis/prompts.ts';
-import { list, required, text } from '../../genesis/specs.ts';
+import { GRAPH_RULES, renderScenes } from '../../genesis/graph.ts';
+import { castIds } from '../../genesis/prompts.ts';
+import { bool, list, required, text } from '../../genesis/specs.ts';
 import type { JsonSpec } from '../../llm/structured.ts';
 import { clip, renderBrief, renderCharacter, renderLocation, renderRelationships } from '../../world/render.ts';
 import type { WorldData } from '../../world/store.ts';
 import { BUDGET, selectLore, transcriptOf } from '../context.ts';
+import { plotSection } from '../plotprompt.ts';
 import type { StoryState } from '../state.ts';
 
 // ───────────── 导演 ─────────────
+
+/** 导演提议的一条数值变化。 */
+export const VarProposal = z.object({
+  var: required,
+  op: z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.string()).catch('=').default('='),
+  value: z.unknown(),
+});
+
+/** 导演安排里的检定（可选）。 */
+export const CheckProposal = z
+  .object({ var: text.default(''), dc: z.unknown(), label: text.default('') })
+  .nullable()
+  .catch(null)
+  .default(null);
+
+/** 导演对剧情图进度的报告（观察模式和剧情 ADV 共用）。 */
+export const plotReportFields = {
+  points: list,
+  sceneDone: bool.default(false),
+  exit: text.default(''),
+  offTrack: bool.default(false),
+  set: z.array(VarProposal).catch([]).default([]),
+  check: CheckProposal,
+};
+
+export const plotReportExample = {
+  points: ['这一拍演到的要点 id（只能是当前这一幕里还没演到的；没有就留空）'],
+  sceneDone: false,
+  exit: '这一幕演完了、要走的出口（目标幕 id）；还不走就留空',
+  offTrack: false,
+  set: [{ var: '变量 id', op: '+', value: 2 }],
+  check: null,
+};
+
+export const PLOT_REPORT_RULES = `剧情图（如果有）：
+- points 写这一拍真正演到的要点 id；sceneDone 在这一幕演完时写 true；exit 写要走的出口（目标幕 id），只能从「出口」里选，还不想走就留空。引擎会核对：没演够最少拍数、条件不成立的出口都会被驳回。
+- offTrack：这一拍的戏偏离了当前这一幕要讲的事就写 true。
+- set：剧情里发生了影响数值的事才写，op 是 + / - / =；一拍的变化要小，引擎会截到上限。没有就写空数组。
+- check：只有结果不确定、值得掷骰的关键行动才写 {"var": "属性变量 id（纯运气就留空）", "dc": 难度 8～18, "label": "行动，例如：撬开铁门"}；引擎先掷骰，再让演员按结果演。大多数拍写 null。`;
 
 export const DirectorOut = z.object({
   plan: required,
@@ -21,11 +62,11 @@ export const DirectorOut = z.object({
     .array(z.object({ name: required, intent: text.default('') }))
     .catch([])
     .default([]),
-  completeBeats: list,
   reveals: z
     .array(z.object({ owner: required, to: list }))
     .catch([])
     .default([]),
+  ...plotReportFields,
 });
 export type DirectorOut = z.infer<typeof DirectorOut>;
 
@@ -38,20 +79,21 @@ export const directorSpec: JsonSpec<DirectorOut> = {
     present: ['这一拍在场的角色名'],
     time: '时间推进了才填，例如：当晚十点；不推进就留空',
     speakers: [{ name: '这一拍开口或行动的角色名，按顺序', intent: '他这一拍想做什么、想说什么' }],
-    completeBeats: ['这一拍演完后达成的骨架节拍 id（只能是当前章节里还没完成的）'],
     reveals: [{ owner: '秘密的主人', to: ['这一拍得知这个秘密的角色名'] }],
+    ...plotReportExample,
   },
 };
 
-export const DIRECTOR_SYSTEM = `你是一部持续上演的互动故事的导演。你看得到一切：剧情骨架、所有角色的秘密、到目前为止发生的事。
+export const DIRECTOR_SYSTEM = `你是一部持续上演的互动故事的导演。你看得到一切：剧情图、所有角色的秘密、到目前为止发生的事。
 你的工作是决定"下一拍"发生什么。一拍是一个小场面：几句对话、一个动作、一次小转折，大约 200～400 字的戏。
 原则：
-- 按剧情骨架推进，但不要急：一个节拍可以用几拍来铺垫，确实演到了才标记完成。
+- 按剧情图推进当前这一幕，但不要急：一个要点可以用几拍来铺垫，确实演到了才报告。这一幕的事演完了再走出口。
 - 每一拍都要有变化：新信息、关系变化、决定、意外。不要让角色原地打转、重复说过的话。
 - 控制节奏：紧张和舒缓交替，适时换场景、推进时间。
 - 让角色按自己的目标和性格行动，利用他们之间的张力和秘密。秘密要慢慢揭开，揭开时在 reveals 里写明；只写这一拍第一次得知的人，之前已经知道的不要重复写。
 - location 只能填「地点」里列出的名字；present、speakers、reveals 只能填「角色」里列出的名字。路人、守卫、伙计这类临时人物不要写进这些字段，在 plan 里交代就行，演出时可以让他们说一两句。
-- 观众给的导演指令要尽量满足，同时保持故事合理。`;
+- 观众给的导演指令要尽量满足，同时保持故事合理。
+${PLOT_REPORT_RULES}`;
 
 export interface DirectorInput {
   world: WorldData;
@@ -77,11 +119,7 @@ export function directorPrompt(p: DirectorInput): string {
     `# 角色（全部信息，包括秘密）\n${world.characters.map((c) => renderCharacter(c)).join('\n\n')}`,
     `# 角色关系\n${renderRelationships(world.characters) || '（无）'}`,
     `# 地点\n${world.locations.map((l) => renderLocation(l)).join('\n')}`,
-    state.outline
-      ? `# 剧情骨架（[x] 是已完成的节拍）\n${renderOutline(state.outline, state.done)}\n\n当前章节：${
-          state.currentChapter ? `[${state.currentChapter.id}] ${state.currentChapter.title}：${state.currentChapter.goal}` : '（全部完成）'
-        }`
-      : '# 剧情骨架\n（没有骨架，自由发展）',
+    state.plot?.scene ? plotSection(world, state.plot, 'observer') : '# 剧情图\n（没有剧情图，自由发展）',
     p.settings.focus === 'protagonist'
       ? `# 视角\n故事围绕${pName}展开。没有玩家，${pName}也由演员扮演，和其他角色一样主动行动。`
       : '# 视角\n群像剧：没有固定的主角，轮流聚焦不同的角色，让每个人都有自己的故事线。',
@@ -144,8 +182,9 @@ export function writerSystem(
   return parts.join('\n\n');
 }
 
-export function beatInstruction(world: WorldData, plan: DirectorOut, card: string | null): string {
-  const lines = [`［导演安排］${plan.plan}`];
+/** 交给演出一方的这一拍安排。extras：当前幕的梗概、检定结果等（空字符串跳过）。 */
+export function beatInstruction(world: WorldData, plan: DirectorOut, card: string | null, extras: string[] = []): string {
+  const lines = [...extras.filter(Boolean), `［导演安排］${plan.plan}`];
   if (plan.time) lines.push(`［时间］${plan.time}`);
   if (plan.speakers.length) {
     lines.push(`［出场顺序］\n${plan.speakers.map((s) => `- ${s.name}${s.intent ? `：${s.intent}` : ''}`).join('\n')}`);
@@ -254,18 +293,29 @@ export function actorMessages(p: ActorInput): ChatMessage[] {
 
 // ───────────── 续写新篇章 ─────────────
 
-export function arcPrompt(world: WorldData, state: StoryState, memory: string | null, recent: string): string {
+/** 剧情图走完后续写新篇章：只追加新的幕，只能用已有的变量。 */
+export function continuationPrompt(world: WorldData, state: StoryState, memory: string | null, recent: string): string {
+  const plot = state.plot;
+  const ended = plot?.ending ? plot.graph.scenes.find((s) => s.id === plot.ending) : undefined;
+  const vars = world.variables.map((v) => `- ${v.id}（${v.label}，${v.type}${v.min !== undefined || v.max !== undefined ? `，${v.min ?? '-∞'}～${v.max ?? '∞'}` : ''}）：现在是 ${JSON.stringify(plot?.vars[v.id] ?? v.initial)}`);
   return `# 世界
 ${world.brief ? renderBrief(world.manifest, world.brief, world.style) : world.manifest.title}
 
 # 角色
 ${world.characters.map((c) => renderCharacter(c, 'short')).join('\n')}
 
+# 角色 id
+${castIds(world)}
+
 # 地点
 ${world.locations.map((l) => renderLocation(l, 'short')).join('\n')}
 
-# 已经演完的篇章
-${state.outline ? renderOutline(state.outline, state.done) : '（无）'}
+# 已经演过的幕
+${plot ? renderScenes(plot.graph.scenes.filter((s) => plot.visited.includes(s.id))) : '（无）'}
+${ended ? `\n上一个篇章以「${ended.title || ended.id}」收尾。` : ''}
+
+# 可以用的变量（不能新增变量；variables 写空数组）
+${vars.join('\n') || '（没有变量，条件只能用 visited）'}
 
 # 前情提要
 ${memory ?? '（无）'}
@@ -273,10 +323,13 @@ ${memory ?? '（无）'}
 # 最近发生的事
 ${recent}
 
-已有的剧情骨架全部演完了，但故事还要继续。请根据现在的局面设计下一个篇章：
-- 2～4 章，每章一个清晰的戏剧目标和 3～4 个关键节拍。
-- 从当前局面自然生长出新的冲突：可以引入新的威胁、新的谜团、关系的新阶段，回收或延续还没解决的伏笔。
-- 不要重复已经演过的情节。`;
+剧情图已经走完了，但故事还要继续。请根据现在的局面续写下一个篇章，写成新的剧情图片段。
+${GRAPH_RULES}
+
+这一次的要求：
+- 3～6 幕（含 1～2 个结局），1～2 章。新幕的 id 随便写，引擎会重新编号；第一幕就是新篇章的开始。
+- 从当前局面自然生长出新的冲突：新的威胁、新的谜团、关系的新阶段，回收或延续还没解决的伏笔。不要重复已经演过的情节。
+- 条件里的 visited 可以引用已经演过的幕的 id。`;
 }
 
 // ───────────── 角色视角的记忆 ─────────────

@@ -27,7 +27,22 @@ describe('原生格式 v0', () => {
 
 describe('migrate', () => {
   it('当前版本原样返回，并保留未知字段', () => {
-    expect(migrate({ formatVersion: 0, foo: 1 })).toEqual({ formatVersion: 0, foo: 1 });
+    expect(migrate({ formatVersion: FORMAT_VERSION, foo: 1 })).toEqual({ formatVersion: FORMAT_VERSION, foo: 1 });
+  });
+
+  it('v0 → v1：其他文件只改版本号，旧骨架变成剧情图', () => {
+    expect(migrate({ formatVersion: 0, foo: 1 })).toEqual({ formatVersion: 1, foo: 1 });
+    expect(migrate({ id: 'x' })).toEqual({ id: 'x', formatVersion: 1 });
+    const g = migrate({
+      formatVersion: 0,
+      premise: '前提',
+      acts: [{ id: 'act_01', title: '第一篇', chapters: [{ id: 'ch_01_01', goal: '目标', beats: [{ id: 'b_01', text: '节拍' }] }] }],
+      endings: [{ id: 'end_01', title: '结局', condition: '' }],
+    });
+    expect(g.formatVersion).toBe(1);
+    expect(g.start).toBe('sc_01');
+    expect((g.scenes as { id: string }[]).map((s) => s.id)).toEqual(['sc_01', 'sc_02']);
+    expect(g.acts).toBeUndefined();
   });
 
   it('来自更新版本的文件给出提示', () => {

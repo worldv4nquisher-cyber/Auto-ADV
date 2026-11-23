@@ -1,5 +1,5 @@
 {
-  "formatVersion": 0,
+  "formatVersion": 1,
   "variables": [
     { "id": "affinity.char_lin", "label": "林夕的好感", "type": "number", "initial": 30, "min": 0, "max": 100, "category": "relationship" },
     { "id": "attr.wit", "label": "机智", "type": "number", "initial": 1, "min": -2, "max": 5, "category": "attribute" },
