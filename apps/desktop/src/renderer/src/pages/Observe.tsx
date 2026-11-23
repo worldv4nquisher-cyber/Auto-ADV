@@ -15,6 +15,7 @@ import { EventBlock, Segments, useColorOf } from '../components/story.tsx';
 import { Badge, Button, Card, cx, Field, Input, Markdown, Select, Spinner, Textarea, useToast } from '../components/ui.tsx';
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatCost, formatTokens } from '../lib/format.ts';
+import { ObserveStage } from './ObserveStage.tsx';
 
 // ───────────── 自动播放的节奏 ─────────────
 
@@ -33,6 +34,17 @@ const SPEEDS = [
   { value: 0, label: '即时' },
 ];
 const SPEED_KEY = 'auto-adv:observer-speed';
+const VIEW_KEY = 'auto-adv:observer-view';
+type ViewMode = 'stage' | 'text';
+
+/** 舞台看法还是文本看法，默认舞台。 */
+function loadViewMode(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_KEY) === 'text' ? 'text' : 'stage';
+  } catch {
+    return 'stage';
+  }
+}
 
 function loadSpeed(): number {
   try {
@@ -126,6 +138,7 @@ export function ObservePage({ world, initial, onBack }: { world: WorldDetail; in
   const [clock, setClock] = useState(0);
   const [playing, setPlaying] = useState(!!initial.observer?.running);
   const [speed, setSpeed] = useState(loadSpeed);
+  const [viewMode, setViewMode] = useState<ViewMode>(loadViewMode);
   const [busy, setBusy] = useState<null | { kind: 'regenerate'; baseLen: number } | { kind: 'send'; text: string; segs: Segment[] }>(null);
   const [input, setInput] = useState('');
   const [target, setTarget] = useState<string>('director');
@@ -195,7 +208,7 @@ export function ObservePage({ world, initial, onBack }: { world: WorldDetail; in
   }, [ref, shown]);
 
   useEffect(() => {
-    if (!playing || !current || busy) return;
+    if (viewMode !== 'text' || !playing || !current || busy) return;
     if (speed === 0 || total === 0 || finished) {
       const t = setTimeout(advance, speed === 0 || total === 0 ? 0 : GAP / speed);
       return () => clearTimeout(t);
@@ -208,7 +221,29 @@ export function ObservePage({ world, initial, onBack }: { world: WorldDetail; in
       last = now;
     }, 50);
     return () => clearInterval(timer);
-  }, [playing, current, busy, speed, total, finished, advance]);
+  }, [viewMode, playing, current, busy, speed, total, finished, advance]);
+
+  /** 舞台看法走到了第 k 个事件：之前的都算看完了。 */
+  const onStageRead = useCallback(
+    (k: number) => {
+      setShown(k);
+      setClock(0);
+      const e = viewRef.current.path[k - 1];
+      if (e) engine.call('observerRead', { ...ref, eventId: e.id }).then(setStatus, () => {});
+    },
+    [ref],
+  );
+
+  const switchView = (m: ViewMode) => {
+    setViewMode(m);
+    setClock(0);
+    stick.current = true;
+    try {
+      localStorage.setItem(VIEW_KEY, m);
+    } catch {
+      // 存不了就算了
+    }
+  };
 
   // 内容变化时，如果本来就在底部，就跟着滚到底
   useLayoutEffect(() => {
@@ -290,6 +325,7 @@ export function ObservePage({ world, initial, onBack }: { world: WorldDetail; in
   /** 接管角色时以他的身份说话。 */
   const sendAs = async (text: string) => {
     if (busy) return;
+    const baseLen = viewRef.current.path.length;
     const ac = new AbortController();
     controller.current = ac;
     setInput('');
@@ -312,7 +348,8 @@ export function ObservePage({ world, initial, onBack }: { world: WorldDetail; in
       );
       setView(v);
       setStatus(v.observer);
-      setShown(v.path.length);
+      // 舞台看法：从自己说的那句开始播；文本看法里已经流式看过了
+      setShown(viewMode === 'stage' ? Math.min(baseLen, v.path.length) : v.path.length);
       setClock(0);
     } catch (err) {
       if (!isAborted(err)) toast('err', errorMessage(err));
@@ -384,13 +421,26 @@ export function ObservePage({ world, initial, onBack }: { world: WorldDetail; in
     <div className="flex h-full">
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line px-6">
-          <Button size="sm" variant="ghost" onClick={onBack}>
+          <Button size="sm" variant="ghost" className="min-w-0 shrink truncate whitespace-nowrap" onClick={onBack}>
             ‹ {world.manifest.title}
           </Button>
-          <span className="text-sm text-faint">{view.playthrough.title}</span>
+          <span className="shrink-0 text-sm whitespace-nowrap text-faint">{view.playthrough.title}</span>
           <Badge tone="accent">观察模式</Badge>
           <div className="ml-auto flex items-center gap-2">
             <StatusPill status={status} />
+            <div className="flex shrink-0 overflow-hidden rounded-md border border-line text-xs" title="舞台：像视觉小说一样播放；文本：能重抽、改写、切换分支">
+              {(['stage', 'text'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  data-testid={`observe-view-${m}`}
+                  onClick={() => switchView(m)}
+                  className={cx('px-2.5 py-1 transition-colors', viewMode === m ? 'bg-accent-soft text-fg' : 'text-muted hover:text-fg')}
+                >
+                  {m === 'stage' ? '舞台' : '文本'}
+                </button>
+              ))}
+            </div>
             <div className="w-24 shrink-0">
               <Select
                 className="h-8 text-xs"
@@ -424,70 +474,97 @@ export function ObservePage({ world, initial, onBack }: { world: WorldDetail; in
           </div>
         </div>
 
-        <div
-          ref={scroller}
-          className="flex-1 overflow-y-auto"
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-          }}
-        >
-          <div className="mx-auto max-w-3xl space-y-5 px-8 py-8" data-testid="play-log">
-            {seen.map((e, i) => (
-              <EventBlock
-                key={e.id}
-                e={e}
-                world={world}
-                isLast={i === seen.length - 1}
-                busy={!!busy}
-                protagonistName={controlled?.name ?? '你'}
-                colorOf={colorOf}
-                onRegenerate={() => regenerate(e)}
-                onSwitch={(id) => navigateTree(() => engine.call('switchBranch', { ...ref, eventId: id }))}
-                onRewind={() => navigateTree(() => engine.call('rewind', { ...ref, eventId: e.id }))}
-                onDelete={() => navigateTree(() => engine.call('deleteBranch', { ...ref, eventId: e.id }))}
-                onEdit={(text) => navigateTree(() => engine.call('editEvent', { ...ref, eventId: e.id, text }))}
-              />
-            ))}
-            {current?.segments?.length ? (
-              // 正在播放的一拍：点一下直接显示完整内容
-              <div
-                className="cursor-pointer"
-                data-testid="observe-current"
-                onClick={() => setClock(total)}
-                title="点击直接显示这一拍"
-              >
-                <Segments segs={visibleAt(current.segments, speed === 0 ? total : clock)} colorOf={colorOf} />
-              </div>
-            ) : null}
-            {busy?.kind === 'send' && (
-              <div data-testid="play-streaming" className="space-y-4">
-                <div className="flex flex-col items-end">
-                  <div className="mb-1 text-xs text-faint">{controlled?.name}</div>
-                  <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5 text-[15px] leading-7 whitespace-pre-wrap">
-                    {busy.text}
-                  </div>
+        {viewMode === 'stage' ? (
+          <ObserveStage
+            world={world}
+            path={busy?.kind === 'regenerate' ? view.path.slice(0, busy.baseLen) : view.path}
+            shown={shown}
+            onRead={onStageRead}
+            playing={playing && !busy}
+            speed={speed}
+            colorOf={colorOf}
+            phaseText={
+              generating || busy
+                ? busy?.kind === 'send'
+                  ? '思考中…'
+                  : live?.phase === 'actor'
+                    ? `${live.name ?? '演员'}正在想怎么接…`
+                    : (PHASE_TEXT[live?.phase ?? ''] ?? '准备下一拍…')
+                : null
+            }
+            waiting={
+              controlled ? null : (
+                <LiveArea status={status} live={null} generating={false} instant={false} colorOf={colorOf} onPlay={() => control('play')} />
+              )
+            }
+            onShowText={() => switchView('text')}
+          />
+        ) : (
+          <div
+            ref={scroller}
+            className="flex-1 overflow-y-auto"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+            }}
+          >
+            <div className="mx-auto max-w-3xl space-y-5 px-8 py-8" data-testid="play-log">
+              {seen.map((e, i) => (
+                <EventBlock
+                  key={e.id}
+                  e={e}
+                  world={world}
+                  isLast={i === seen.length - 1}
+                  busy={!!busy}
+                  protagonistName={controlled?.name ?? '你'}
+                  colorOf={colorOf}
+                  onRegenerate={() => regenerate(e)}
+                  onSwitch={(id) => navigateTree(() => engine.call('switchBranch', { ...ref, eventId: id }))}
+                  onRewind={() => navigateTree(() => engine.call('rewind', { ...ref, eventId: e.id }))}
+                  onDelete={() => navigateTree(() => engine.call('deleteBranch', { ...ref, eventId: e.id }))}
+                  onEdit={(text) => navigateTree(() => engine.call('editEvent', { ...ref, eventId: e.id, text }))}
+                />
+              ))}
+              {current?.segments?.length ? (
+                // 正在播放的一拍：点一下直接显示完整内容
+                <div
+                  className="cursor-pointer"
+                  data-testid="observe-current"
+                  onClick={() => setClock(total)}
+                  title="点击直接显示这一拍"
+                >
+                  <Segments segs={visibleAt(current.segments, speed === 0 ? total : clock)} colorOf={colorOf} />
                 </div>
-                <Segments segs={busy.segs} colorOf={colorOf} />
-                {!busy.segs.length && (
-                  <div className="flex items-center gap-2 text-sm text-faint">
-                    <Spinner /> 思考中…
+              ) : null}
+              {busy?.kind === 'send' && (
+                <div data-testid="play-streaming" className="space-y-4">
+                  <div className="flex flex-col items-end">
+                    <div className="mb-1 text-xs text-faint">{controlled?.name}</div>
+                    <div className="max-w-[85%] rounded-2xl rounded-tr-md bg-accent-soft px-4 py-2.5 text-[15px] leading-7 whitespace-pre-wrap">
+                      {busy.text}
+                    </div>
                   </div>
-                )}
-              </div>
-            )}
-            {(caughtUp || busy?.kind === 'regenerate') && !controlled && (
-              <LiveArea
-                status={status}
-                live={live}
-                generating={!!generating}
-                instant={speed === 0}
-                colorOf={colorOf}
-                onPlay={() => control('play')}
-              />
-            )}
+                  <Segments segs={busy.segs} colorOf={colorOf} />
+                  {!busy.segs.length && (
+                    <div className="flex items-center gap-2 text-sm text-faint">
+                      <Spinner /> 思考中…
+                    </div>
+                  )}
+                </div>
+              )}
+              {(caughtUp || busy?.kind === 'regenerate') && !controlled && (
+                <LiveArea
+                  status={status}
+                  live={live}
+                  generating={!!generating}
+                  instant={speed === 0}
+                  colorOf={colorOf}
+                  onPlay={() => control('play')}
+                />
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="shrink-0 border-t border-line px-8 py-4">
           <div className="mx-auto max-w-3xl">

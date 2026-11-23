@@ -8,15 +8,27 @@
  */
 import type { PlayChunk, PlayView, SaveInfo, WorldDetail } from '@auto-adv/engine/api';
 import { buildTimeline, findStep, type StageStep, type StageView, type Timeline } from '@auto-adv/engine/stage';
-import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
-import { PlaceholderBg, PlaceholderCg, PlaceholderSprite } from '../components/placeholder.tsx';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { PlaceholderBg, PlaceholderCg } from '../components/placeholder.tsx';
+import {
+  Backlog,
+  CueTags,
+  Overlay,
+  StageCard,
+  StageCheck,
+  StageLayers,
+  StageTextBox,
+  textLength,
+  ToolButton,
+  useShake,
+  useTyping,
+} from '../components/stage.tsx';
 import { useColorOf } from '../components/story.tsx';
 import { Button, ConfirmButton, cx, Input, Select, Spinner, useToast } from '../components/ui.tsx';
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatTime } from '../lib/format.ts';
 import { useRouter } from '../lib/router.tsx';
 
-const OUTCOME = { crit: '大成功', success: '成功', narrow: '险胜', fail: '失败' } as const;
 const ENDING_KIND = { good: '好结局', normal: '普通结局', bad: '坏结局' } as const;
 const PHASE_TEXT: Record<string, string> = {
   thinking: '导演正在安排这一拍…',
@@ -71,7 +83,6 @@ function initialCursor(t: Timeline, pt: string): number {
 
 type Mode = 'normal' | 'auto' | 'skip';
 type Panel = 'backlog' | 'save' | 'load' | 'settings' | 'ending' | null;
-const LONG = Number.MAX_SAFE_INTEGER;
 
 export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initial: PlayView; onBack: () => void }) {
   const toast = useToast();
@@ -84,7 +95,6 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const [view, setView] = useState(initial);
   const timeline = useMemo(() => buildTimeline(view.path, opts), [view.path, opts]);
   const [cursor, setCursor] = useState(() => initialCursor(buildTimeline(initial.path, opts), initial.playthrough.id));
-  const [shown, setShown] = useState(LONG);
   const [mode, setMode] = useState<Mode>('normal');
   const [ctrl, setCtrl] = useState(false);
   const [panel, setPanel] = useState<Panel>(null);
@@ -97,18 +107,18 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const [speed, setSpeed] = useState(() => readStore(SPEED_KEY, isNum, 45));
   const [autoDelay, setAutoDelay] = useState(() => readStore(AUTO_KEY, isNum, 1.2));
   const stageRef = useRef<HTMLDivElement>(null);
-  const typedKey = useRef('');
-  const typer = useRef<ReturnType<typeof setInterval> | null>(null);
   const reported = useRef(new Set<string>());
 
   const steps = timeline.steps;
   const step: StageStep | undefined = steps[cursor];
   const stepKey = step ? `${cursor}:${step.eventId}:${step.index}` : `${cursor}`;
-  const textLen = useMemo(() => [...(step?.text?.text ?? '')].length, [step?.text?.text]);
-  const typed = step?.kind !== 'text' || shown >= textLen;
+  const textLen = textLength(step);
   const adv = view.adv;
   const atEnd = cursor >= steps.length - 1;
   const skipping = mode === 'skip' || ctrl;
+  // 打字机效果
+  const typing = useTyping(stepKey, textLen, speed, skipping);
+  const { shown, typed } = typing;
   const menuOpen = !!adv?.menu && atEnd && typed && !busy;
   const stage: StageView = step?.view ?? timeline.end;
 
@@ -116,28 +126,6 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   useEffect(() => {
     if (step) writeStore(posKey(ref.playthroughId), { eventId: step.eventId, index: step.index });
   }, [stepKey]);
-
-  // 打字机效果
-  useEffect(() => {
-    if (!step || step.kind !== 'text') return;
-    if (skipping || speed <= 0 || typedKey.current === stepKey) {
-      typedKey.current = stepKey;
-      setShown(LONG);
-      return;
-    }
-    setShown(0);
-    let i = 0;
-    const t = setInterval(() => {
-      i += 1;
-      setShown(i);
-      if (i >= textLen) {
-        clearInterval(t);
-        typedKey.current = stepKey;
-      }
-    }, 1000 / speed);
-    typer.current = t;
-    return () => clearInterval(t);
-  }, [stepKey, skipping, speed]);
 
   // CG 第一次显示时记跨周目解锁
   useEffect(() => {
@@ -157,15 +145,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   }, [stepKey]);
 
   // 特效：震动
-  useEffect(() => {
-    if (step?.cues?.some((c) => c.op === 'effect' && c.id === 'shake')) stageRef.current?.classList.add('stage-shake');
-    const el = stageRef.current;
-    const t = setTimeout(() => el?.classList.remove('stage-shake'), 500);
-    return () => clearTimeout(t);
-  }, [stepKey]);
-
-  // 离开页面时取消还在生成的一拍
-  useEffect(() => () => controller.current?.abort(), []);
+  useShake(stageRef, step, stepKey);
 
   /** 换一个新的 PlayView，place 算出舞台停在哪一步。 */
   const call = async (fn: (signal: AbortSignal) => Promise<PlayView>, place: (t: Timeline) => number): Promise<boolean> => {
@@ -201,11 +181,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     return call((sig) => engine.stream('advNext', ref, onChunk, sig), place);
   };
 
-  const complete = () => {
-    if (typer.current) clearInterval(typer.current);
-    typedKey.current = stepKey;
-    setShown(LONG);
-  };
+  const complete = typing.complete;
 
   const advance = () => {
     if (busy || panel) return;
@@ -314,7 +290,6 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     };
   });
 
-  const speaker = step?.text?.speaker ?? null;
   // 顶部显示的是舞台播到的这一步的幕和数值，不是引擎已经算到的地方（选完之后的一拍是一起算出来的，不能提前剧透）
   const sceneNow = useMemo(() => {
     const sc = step?.scene ? world.graph?.scenes.find((x) => x.id === step.scene) : undefined;
@@ -410,45 +385,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
           if (e.deltaY < 0 && !panel) setPanel('backlog');
         }}
       >
-        {/* 背景 */}
-        {stage.bg ? (
-          <div key={stage.bg.id} className={cx('absolute inset-0', stage.bg.transition !== 'none' && 'stage-fade')} data-testid="adv-bg" data-bg={stage.bg.id}>
-            <PlaceholderBg id={stage.bg.id} label={false} />
-          </div>
-        ) : (
-          <div className="absolute inset-0 bg-[#07080c]" />
-        )}
-
-        {/* 立绘 */}
-        {stage.sprites.map((s) => (
-          <div
-            key={s.key}
-            data-testid="adv-sprite"
-            data-char={s.characterId ?? s.name}
-            data-x={s.x}
-            className="stage-rise absolute bottom-0 h-[86%] transition-[left] duration-500"
-            style={{ left: `${s.x}%`, transform: 'translateX(-50%)' }}
-          >
-            <PlaceholderSprite
-              name={s.name}
-              expr={s.expr}
-              color={tint(s.characterId, s.name)}
-              dim={menuOpen || (!!speaker && step?.text?.kind === 'say' && speaker.characterId !== s.characterId)}
-            />
-          </div>
-        ))}
-
-        {/* CG */}
-        {stage.cg && (
-          <div key={stage.cg} className="stage-fade absolute inset-0" data-testid="adv-cg">
-            <PlaceholderCg id={stage.cg} />
-          </div>
-        )}
-
-        {/* 一次性的表现：闪白、音效等的提示 */}
-        {step?.cues?.some((c) => c.op === 'effect' && c.id === 'flash') && (
-          <div key={`flash${stepKey}`} className="stage-flash pointer-events-none absolute inset-0 bg-white" />
-        )}
+        <StageLayers p="adv" stage={stage} step={step} stepKey={stepKey} tint={tint} dimAll={menuOpen} />
 
         {/* 顶部：所在的幕、音乐、数值 */}
         {!hidden && (
@@ -461,13 +398,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                 </span>
               )}
               {stage.bg && <span className="rounded bg-black/30 px-[0.7em] py-[0.15em] font-mono text-[0.85em] text-white/45">背景 · {stage.bg.id}</span>}
-              {step?.cues
-                ?.filter((c) => !(c.op === 'effect' && (c.id === 'shake' || c.id === 'flash')))
-                .map((c, i) => (
-                  <span key={`${stepKey}${i}`} className="stage-float rounded bg-black/50 px-[0.7em] py-[0.2em] text-white/70">
-                    {{ sfx: '♪ 音效', voice: '🎙 语音', video: '▶ 视频', effect: '✦ 特效' }[c.op]}：{c.id}
-                  </span>
-                ))}
+              <CueTags step={step} stepKey={stepKey} />
             </div>
             <div className="flex flex-col items-end gap-[0.4em]">
               <div className="flex flex-wrap justify-end gap-[0.4em]">
@@ -492,38 +423,9 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
           </div>
         )}
 
-        {/* 进入新的一幕：标题卡 */}
-        {step?.kind === 'card' && step.card && (
-          <div key={stepKey} className="stage-fade-fast absolute inset-0 flex flex-col items-center justify-center gap-[1.2cqw] bg-black/92">
-            {step.card.chapter && <div className="text-[max(12px,1.3cqw)] tracking-[0.5em] text-white/55">{step.card.chapter}</div>}
-            <div className="text-[max(20px,3cqw)] font-semibold tracking-[0.2em]" data-testid="adv-card">
-              {step.card.title}
-            </div>
-          </div>
-        )}
-
-        {/* 检定 */}
-        {step?.kind === 'check' && step.check && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/45">
-            <div key={stepKey} className="stage-fade-fast flex min-w-[34%] flex-col items-center gap-[0.6cqw] rounded-[1cqw] border border-white/15 bg-[#11131b]/90 px-[3cqw] py-[2cqw] text-center" data-testid="adv-check">
-              <div className="text-[max(12px,1.2cqw)] text-white/60">🎲 检定 · {step.check.label}</div>
-              <div className="text-[max(28px,5cqw)] leading-none font-semibold">{step.check.total}</div>
-              <div className="text-[max(11px,1cqw)] text-white/55">
-                d20 = {step.check.roll}
-                {step.check.var ? ` ${step.check.modifier >= 0 ? '+' : '-'} ${Math.abs(step.check.modifier)}（${varLabel(step.check.var)}）` : ''}
-                ，难度 {step.check.dc}
-              </div>
-              <div
-                className={cx(
-                  'mt-[0.4cqw] text-[max(14px,1.8cqw)] font-semibold',
-                  step.check.outcome === 'fail' ? 'text-err' : step.check.outcome === 'crit' ? 'text-warn' : 'text-ok',
-                )}
-              >
-                {OUTCOME[step.check.outcome]}
-              </div>
-            </div>
-          </div>
-        )}
+        {/* 进入新的一幕：标题卡；检定 */}
+        <StageCard p="adv" step={step} stepKey={stepKey} />
+        <StageCheck p="adv" step={step} stepKey={stepKey} varLabel={varLabel} />
 
         {/* 选项 */}
         {menuOpen && adv?.menu && !hidden && (
@@ -566,68 +468,51 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
 
         {/* 文本框 */}
         {!hidden && step?.kind !== 'card' && (
-          <div className="absolute inset-x-[3%] bottom-[3%] h-[27%]">
-            {textVisible && speaker && (
-              <div
-                className="absolute -top-[1.1em] left-[2.5%] z-10 rounded-[0.4em] px-[0.9em] py-[0.25em] text-[max(12px,1.35cqw)] font-semibold shadow"
-                style={{ background: tint(speaker.characterId, speaker.name), color: '#11131b' }}
-                data-testid="adv-name"
-              >
-                {speaker.name}
-              </div>
-            )}
-            <div className="flex h-full flex-col rounded-[1cqw] border border-white/12 bg-[#0b0d14]/78 px-[2.6%] pt-[2.2%] pb-[1.2%] backdrop-blur-sm">
-              <div
-                className={cx(
-                  'flex-1 overflow-hidden text-[max(14px,1.65cqw)] leading-[1.75]',
-                  step?.text?.kind === 'narrate' && 'text-white/88',
-                  step?.text?.kind === 'think' && 'text-[#c7c2ff]/90',
-                )}
-                data-testid="adv-text"
-              >
-                {textVisible && step?.text && (
-                  <>
-                    {step.text.kind === 'think' ? '（' : step.text.kind === 'say' ? '「' : ''}
-                    {[...step.text.text].slice(0, shown).join('')}
-                    {typed && (step.text.kind === 'think' ? '）' : step.text.kind === 'say' ? '」' : '')}
-                  </>
-                )}
+          <StageTextBox
+            p="adv"
+            text={textVisible ? (step?.text ?? null) : null}
+            shown={shown}
+            typed={typed}
+            tint={tint}
+            extra={
+              <>
                 {!step && !adv?.menu && <span className="text-white/50">（还没有内容）</span>}
                 {!step && busy && <span className="text-white/50">{PHASE_TEXT[phase ?? ''] ?? '准备中…'}</span>}
                 {atEnd && typed && adv?.stuck && <span className="text-err">✕ {adv.stuck}</span>}
                 {atEnd && typed && adv?.error && <span className="text-err">✕ {adv.error}</span>}
-              </div>
-              <div className="flex items-center justify-between text-[max(11px,0.95cqw)] text-white/55">
-                <span className="flex items-center gap-2">
-                  {busy && <Spinner className="size-3" />}
-                  {busy && phase && <span data-testid="adv-phase">{PHASE_TEXT[phase] ?? phase}</span>}
-                  {adv?.needsModel && atEnd && !busy && (
-                    <button
-                      type="button"
-                      className="text-warn underline-offset-2 hover:underline"
-                      data-testid="adv-needs-model"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate({ page: 'settings' });
-                      }}
-                    >
-                      没配模型，这一幕先用占位旁白 · 去设置
-                    </button>
-                  )}
-                  {mode === 'auto' && <span className="text-accent-strong">自动</span>}
-                  {skipping && <span className="text-warn">快进中</span>}
-                  {typed && !menuOpen && !busy && step && <span className="stage-blink text-white/70">▼</span>}
-                </span>
-                {toolbar}
-              </div>
-            </div>
-          </div>
+              </>
+            }
+            status={
+              <>
+                {busy && <Spinner className="size-3" />}
+                {busy && phase && <span data-testid="adv-phase">{PHASE_TEXT[phase] ?? phase}</span>}
+                {adv?.needsModel && atEnd && !busy && (
+                  <button
+                    type="button"
+                    className="text-warn underline-offset-2 hover:underline"
+                    data-testid="adv-needs-model"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      navigate({ page: 'settings' });
+                    }}
+                  >
+                    没配模型，这一幕先用占位旁白 · 去设置
+                  </button>
+                )}
+                {mode === 'auto' && <span className="text-accent-strong">自动</span>}
+                {skipping && <span className="text-warn">快进中</span>}
+                {typed && !menuOpen && !busy && step && <span className="stage-blink text-white/70">▼</span>}
+              </>
+            }
+            toolbar={toolbar}
+          />
         )}
 
         {/* 面板 */}
         {panel === 'backlog' && (
-          <Overlay title="回想" onClose={() => setPanel(null)} testId="adv-backlog-panel">
+          <Overlay p="adv" title="回想" onClose={() => setPanel(null)} testId="adv-backlog-panel">
             <Backlog
+              p="adv"
               timeline={timeline}
               cursor={cursor}
               colorOf={colorOf}
@@ -637,7 +522,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
           </Overlay>
         )}
         {(panel === 'save' || panel === 'load') && (
-          <Overlay title={panel === 'save' ? '存档' : '读档'} onClose={() => setPanel(null)} testId="adv-saves-panel">
+          <Overlay p="adv" title={panel === 'save' ? '存档' : '读档'} onClose={() => setPanel(null)} testId="adv-saves-panel">
             <Saves
               mode={panel}
               saves={view.saves}
@@ -651,7 +536,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
               onLoad={(s) =>
                 void call(() => engine.call('loadSave', { ...ref, saveId: s.id }), (t) => findStep(t, s.at)).then((ok) => {
                   if (!ok) return;
-                  typedKey.current = '';
+                  typing.forget();
                   setMode('normal');
                   setPanel(null);
                 })
@@ -661,7 +546,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
           </Overlay>
         )}
         {panel === 'settings' && (
-          <Overlay title="设置" onClose={() => setPanel(null)} testId="adv-settings-panel">
+          <Overlay p="adv" title="设置" onClose={() => setPanel(null)} testId="adv-settings-panel">
             <div className="grid max-w-md grid-cols-2 gap-4 text-sm">
               <label className="flex flex-col gap-1.5">
                 <span className="text-xs text-muted">文字速度</span>
@@ -703,7 +588,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
           </Overlay>
         )}
         {panel === 'ending' && adv && (
-          <Overlay title="周目结束" onClose={() => setPanel(null)} testId="adv-ending">
+          <Overlay p="adv" title="周目结束" onClose={() => setPanel(null)} testId="adv-ending">
             <div className="space-y-5 text-sm">
               {adv.ending && (
                 <div className="flex flex-col items-center gap-2 py-4 text-center">
@@ -771,29 +656,6 @@ function delta(from: unknown, to: unknown): string {
   return `→ ${formatValue(to)}`;
 }
 
-function ToolButton({
-  children,
-  onClick,
-  active,
-  testId,
-}: {
-  children: ReactNode;
-  onClick: () => void;
-  active?: boolean;
-  testId: string;
-}) {
-  return (
-    <button
-      type="button"
-      data-testid={testId}
-      onClick={onClick}
-      className={cx('rounded px-[0.55em] py-[0.15em] transition-colors hover:bg-white/10 hover:text-white', active && 'bg-white/15 text-white')}
-    >
-      {children}
-    </button>
-  );
-}
-
 function Stat({ label, value, testId }: { label: string; value: string; testId?: string }) {
   return (
     <div className="rounded-lg border border-line bg-panel-2 px-3 py-2">
@@ -801,96 +663,6 @@ function Stat({ label, value, testId }: { label: string; value: string; testId?:
       <div className="mt-0.5 text-lg font-semibold" data-testid={testId}>
         {value}
       </div>
-    </div>
-  );
-}
-
-/** 盖在舞台上的面板。点面板外面不关（免得误触继续剧情），用右上角或 Esc 关。 */
-function Overlay({ title, children, onClose, testId }: { title: string; children: ReactNode; onClose: () => void; testId: string }) {
-  return (
-    <div
-      className="absolute inset-0 z-20 flex flex-col bg-[#0b0d14]/94 text-fg backdrop-blur"
-      data-testid={testId}
-      onClick={(e) => e.stopPropagation()}
-      onWheel={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.stopPropagation()}
-    >
-      <div className="flex items-center justify-between border-b border-line px-6 py-3">
-        <div className="text-base font-semibold">{title}</div>
-        <Button variant="ghost" size="sm" onClick={onClose} data-testid="adv-panel-close">
-          关闭
-        </Button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-4">{children}</div>
-    </div>
-  );
-}
-
-function Backlog({
-  timeline,
-  cursor,
-  colorOf,
-  busy,
-  onRewind,
-}: {
-  timeline: Timeline;
-  cursor: number;
-  colorOf: (id: string | null, name: string) => string | undefined;
-  busy: boolean;
-  onRewind: (eventId: string) => void;
-}) {
-  const end = useRef<HTMLDivElement>(null);
-  // 新版 Chromium 的 scrollIntoView 返回 Promise，不能直接当作 effect 的返回值（React 会把它当清理函数调用）
-  useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' });
-  }, []);
-  const entries = timeline.backlog.filter((b) => b.step <= cursor);
-  if (!entries.length) return <p className="text-sm text-faint">还没有内容。</p>;
-  return (
-    <div className="mx-auto max-w-3xl space-y-3 text-[15px] leading-7">
-      {entries.map((b, i) => {
-        if (b.kind === 'scene') {
-          return (
-            <div key={i} className="pt-3 text-center text-xs tracking-[0.3em] text-faint">
-              {b.chapter ? `${b.chapter} · ` : ''}
-              {b.title}
-            </div>
-          );
-        }
-        if (b.kind === 'check') {
-          return (
-            <p key={i} className="text-sm text-muted">
-              🎲 检定「{b.check.label}」：{b.check.total}（难度 {b.check.dc}）→ {OUTCOME[b.check.outcome]}
-            </p>
-          );
-        }
-        if (b.kind === 'choice') {
-          return (
-            <div key={i} className="flex items-center justify-between gap-3 rounded-lg border border-accent/25 bg-accent-soft px-3 py-1.5 text-sm">
-              <span>▶ 你选了：{b.label}</span>
-              {b.rewindTo && (
-                <Button size="sm" variant="ghost" disabled={busy} data-testid="adv-rewind" onClick={() => onRewind(b.rewindTo as string)}>
-                  回到这里重新选
-                </Button>
-              )}
-            </div>
-          );
-        }
-        const t = b.text;
-        return (
-          <div key={i}>
-            {t.speaker && (
-              <div className="text-xs font-medium" style={{ color: colorOf(t.speaker.characterId, t.speaker.name) }}>
-                {t.speaker.name}
-              </div>
-            )}
-            <p className={cx(t.kind === 'narrate' && 'text-muted', t.kind === 'think' && 'text-[#c7c2ff]/90')}>
-              {t.kind === 'think' ? `（${t.text}）` : t.kind === 'say' ? `「${t.text}」` : t.text}
-            </p>
-          </div>
-        );
-      })}
-      <div ref={end} />
     </div>
   );
 }
