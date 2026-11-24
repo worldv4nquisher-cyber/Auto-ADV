@@ -42,8 +42,16 @@ export interface PlotState {
   finished: boolean;
   /** 上一拍被驳回或截断的理由。 */
   notes: string[];
-  /** 导演连续几拍标记了"偏离当前幕"（换幕后清零）。 */
+  /** 导演连续几拍标记了"偏离当前幕"（换幕、玩家处理过跑偏之后清零）。 */
   offTrack: number;
+  /** 剧情 ADV：上一拍之后要问玩家跑偏了怎么处理（16.6），回答之前不能往下演。 */
+  driftAsk: boolean;
+  /** 剧情 ADV：玩家选了"拉回来"或者恢复了剧情图，下一拍要把场面带回当前幕。 */
+  pullBack: boolean;
+  /** 剧情 ADV：玩家选了"不用管"，这一幕不再提醒跑偏。 */
+  driftIgnored: boolean;
+  /** 剧情 ADV：剧情图暂停中，按玩家的行动自由推进，不换幕、不算拍数。 */
+  paused: boolean;
   /** 路径上续写追加的章和幕（按追加顺序）。 */
   appended: PlotAppend;
 }
@@ -66,6 +74,10 @@ export function initialPlotState(graph: PlotGraph, variables: readonly VariableD
     finished: false,
     notes: [],
     offTrack: 0,
+    driftAsk: false,
+    pullBack: false,
+    driftIgnored: false,
+    paused: false,
     appended: { chapters: [], scenes: [] },
   };
 }
@@ -77,7 +89,17 @@ function enter(s: PlotState, to: string): void {
   s.menu = null;
   s.lastCheck = null;
   s.offTrack = 0;
+  s.driftAsk = false;
+  s.pullBack = false;
+  s.driftIgnored = false;
   s.visited.push(to);
+}
+
+/** 剧情图暂停或换到新的幕之后，上一拍的选项里带着出口的去掉（那些出口属于原来的幕）。 */
+function withoutExits(menu: PlotMenu | null): PlotMenu | null {
+  if (!menu || menu.source !== 'ai') return null;
+  const options = menu.options.filter((o) => !o.exit);
+  return options.some((o) => o.enabled) ? { ...menu, options } : null;
 }
 
 function applyMark(s: PlotState, m: PlotMark): void {
@@ -158,6 +180,26 @@ const isBeat = (e: PlayEvent) => (e.kind === 'script' || e.kind === 'ai') && !!e
 
 /** 把一个事件折叠进状态（原地修改并返回）。生成新的一拍时也用它把刚产生的事件"预演"进状态。 */
 export function reducePlot(s: PlotState, e: PlayEvent): PlotState {
+  if (e.kind === 'drift') {
+    // 剧情 ADV 跑偏时玩家的选择（16.6）：上一拍的选项留着，玩家接着选
+    s.driftAsk = false;
+    s.offTrack = 0;
+    if (e.drift === 'pull' || e.drift === 'resume') s.pullBack = true;
+    if (e.drift === 'ignore') s.driftIgnored = true;
+    if (e.drift === 'pause') {
+      s.paused = true;
+      s.menu = withoutExits(s.menu);
+    }
+    if (e.drift === 'resume') s.paused = false;
+    if (e.plot?.append) appendToGraph(s, e.plot.append);
+    if (e.plot?.exit) {
+      // 就这样走：跑偏的这一段成了新的一幕，从这里进去
+      const menu = s.menu;
+      applyMark(s, e.plot);
+      s.menu = withoutExits(menu);
+    }
+    return s;
+  }
   if (e.kind === 'check' && e.check) {
     s.lastCheck = e.check;
     if (s.pendingChoice) s.pendingChoice.rolled = true;
@@ -193,11 +235,14 @@ export function reducePlot(s: PlotState, e: PlayEvent): PlotState {
   s.pendingChoice = null;
   s.pendingInput = null;
   if (m.points) for (const p of m.points) s.points.add(p);
-  s.sceneBeats += 1;
+  // 剧情图暂停时演的拍不算这一幕的拍数（恢复之后这一幕的节奏照旧）
+  if (!m.paused) s.sceneBeats += 1;
   s.pc = m.pc ?? s.pc;
   s.menu = m.menu ?? null;
   s.notes = m.notes ?? [];
   s.offTrack = m.offTrack ? s.offTrack + 1 : 0;
+  s.driftAsk = !!m.askDrift;
+  s.pullBack = false;
   if (m.ending) s.ending = m.ending;
   if (m.finished) s.finished = true;
   applyMark(s, m);

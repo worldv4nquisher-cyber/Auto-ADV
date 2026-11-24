@@ -51,6 +51,7 @@ const TAG_NAMES: Record<string, string> = {
   'observer.arc': '观察 · 续写篇章',
   'adv.director': 'ADV · 导演',
   'adv.writer': 'ADV · 演出',
+  'adv.detour': 'ADV · 新的一幕',
 };
 
 /** 调用用途的显示名。 */

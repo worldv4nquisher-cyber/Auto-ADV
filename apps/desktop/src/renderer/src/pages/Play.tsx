@@ -13,10 +13,10 @@ interface Streaming {
   baseLen: number;
   player: PathEvent | null;
   segs: Segment[];
-  phase: 'memory' | 'thinking' | 'writing' | null;
+  phase: Extract<PlayChunk, { type: 'phase' }>['phase'] | null;
 }
 
-const PHASE_TEXT = { memory: '正在整理前情提要…', thinking: '思考中…', writing: '' } as const;
+const PHASE_TEXT = { memory: '正在整理前情提要…', thinking: '思考中…', writing: '', detour: '正在整理剧情图…' } as const;
 
 export function PlayPage({ worldId, playthroughId }: { worldId: string; playthroughId: string }) {
   const { navigate } = useRouter();

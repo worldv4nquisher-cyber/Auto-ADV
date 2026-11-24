@@ -15,7 +15,7 @@ import type {
   VarEffect,
   VariableDef,
 } from '@auto-adv/schema';
-import type { PlayEvent, PlotMark, PlotMenu, Segment } from '../api.ts';
+import type { DriftChoice, PlayEvent, PlotMark, PlotMenu, Segment } from '../api.ts';
 import type { UnlockKind } from '../play/db.ts';
 import { type ConditionContext, describeCondition, evalCondition } from './conditions.ts';
 import { rollCheck } from './dice.ts';
@@ -107,8 +107,15 @@ export interface AdvWorld {
   ai?: boolean;
 }
 
-/** continue：往下演；choose：选第 index 项；input：剧情 ADV 里的自由行动（只在 AI 演出的幕里可以用）。 */
-export type AdvAction = { kind: 'continue' } | { kind: 'choose'; index: number } | { kind: 'input'; text: string };
+/**
+ * continue：往下演；choose：选第 index 项；input：剧情 ADV 里的自由行动（只在 AI 演出的幕里可以用）；
+ * drift：跑偏时的选择（16.6）。
+ */
+export type AdvAction =
+  | { kind: 'continue' }
+  | { kind: 'choose'; index: number }
+  | { kind: 'input'; text: string }
+  | { kind: 'drift'; choice: DriftChoice };
 
 /** 接下来这一拍要由 AI 演出。 */
 export interface AiRequest {
@@ -127,6 +134,8 @@ export interface StepResult {
   unlocks: { event: number; kind: UnlockKind; id: string }[];
   /** 接下来这一拍要由 AI 演出（events 已经写进去之后的进度是 state）。 */
   ai?: AiRequest;
+  /** 玩家选了"就这样走"：要由调用方调模型把跑偏的这一段写成新的一幕（play/adv.ts 的 runAdvDetour）。 */
+  detour?: boolean;
   /** 把 events 折叠进去之后的进度。 */
   state: PlotState;
 }
@@ -308,6 +317,20 @@ export function stepAdv(
   const scene = s.scene;
   if (!scene) throw new AdvError('当前所在的幕在剧情图里找不到了');
   if (s.finished) throw new AdvError('剧情已经结束了');
+
+  if (action.kind === 'drift') {
+    const c = action.choice;
+    if (c === 'resume') {
+      if (!s.paused) throw new AdvError('剧情图没有暂停');
+    } else if (!s.driftAsk) throw new AdvError('现在没有跑偏，不用处理');
+    if (c === 'detour') {
+      if (!aiScene(w, s)) throw new AdvError('"就这样走"要由 AI 把这一段写成新的一幕，先在设置里配好模型');
+      return { events, unlocks, state: s, detour: true };
+    }
+    push({ kind: 'drift', drift: c }, [], seed.headId);
+    return done();
+  }
+  if (s.driftAsk) throw new AdvError('这几拍离开了当前这一幕，请先决定怎么处理');
 
   /** 选项已经记下：（要检定且还没掷就先掷骰）演出选完之后的一拍。 */
   const afterChoice = () => {

@@ -6,7 +6,8 @@
  * 播到最后一步时再找引擎要下一拍：手写剧本不调模型，立刻返回；没有剧本的幕由 AI 演出（流式返回进度），
  * 这时除了选项还可以直接输入想做的事。
  */
-import type { PlayChunk, PlayView, SaveInfo, WorldDetail } from '@auto-adv/engine/api';
+import type { DriftChoice, PlayChunk, PlayView, SaveInfo, WorldDetail } from '@auto-adv/engine/api';
+import { foldPlot } from '@auto-adv/engine/progress';
 import { buildTimeline, findStep, type StageStep, type StageView, type Timeline } from '@auto-adv/engine/stage';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PlaceholderBg, PlaceholderCg } from '../components/placeholder.tsx';
@@ -34,7 +35,16 @@ const PHASE_TEXT: Record<string, string> = {
   thinking: '导演正在安排这一拍…',
   writing: '演员们正在演出…',
   memory: '书记正在整理前情提要…',
+  detour: '导演正在把这一段写成新的一幕…',
 };
+
+/** 跑偏时的四个选择（16.6）。 */
+const DRIFT_OPTIONS: { choice: DriftChoice; label: string; hint: string }[] = [
+  { choice: 'pull', label: '拉回来', hint: '下一拍用故事里发生的事，把场面带回这一幕' },
+  { choice: 'detour', label: '就这样走', hint: '把这一段写成新的一幕，演完再接回主线' },
+  { choice: 'pause', label: '暂停剧情图', hint: '之后跟着你的行动自由推进，随时可以恢复' },
+  { choice: 'ignore', label: '不用管', hint: '这一幕里不再提醒' },
+];
 
 const SPEED_KEY = 'auto-adv:adv-text-speed';
 const AUTO_KEY = 'auto-adv:adv-auto-delay';
@@ -90,11 +100,17 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const colorOf = useColorOf(world);
   const tint = (id: string | null, name: string) => colorOf(id, name) ?? '#a194ff';
   const ref = { worldId: initial.playthrough.worldId, playthroughId: initial.playthrough.id };
-  const opts = useMemo(() => ({ characters: world.characters, graph: world.graph }), [world]);
+  /** 时间线用这个周目的剧情图（含跑偏时插进来的幕）出标题卡。 */
+  const timelineOf = (path: PlayView['path']) =>
+    buildTimeline(path, {
+      characters: world.characters,
+      graph: world.graph ? foldPlot(world.graph, world.variables, path).graph : null,
+    });
 
   const [view, setView] = useState(initial);
-  const timeline = useMemo(() => buildTimeline(view.path, opts), [view.path, opts]);
-  const [cursor, setCursor] = useState(() => initialCursor(buildTimeline(initial.path, opts), initial.playthrough.id));
+  const timeline = useMemo(() => timelineOf(view.path), [view.path, world]);
+  const graph = useMemo(() => (world.graph ? foldPlot(world.graph, world.variables, view.path).graph : null), [view.path, world]);
+  const [cursor, setCursor] = useState(() => initialCursor(timelineOf(initial.path), initial.playthrough.id));
   const [mode, setMode] = useState<Mode>('normal');
   const [ctrl, setCtrl] = useState(false);
   const [panel, setPanel] = useState<Panel>(null);
@@ -119,7 +135,9 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   // 打字机效果
   const typing = useTyping(stepKey, textLen, speed, skipping);
   const { shown, typed } = typing;
-  const menuOpen = !!adv?.menu && atEnd && typed && !busy;
+  /** 跑偏了（16.6）：先问玩家怎么处理，回答之前不弹选项。 */
+  const driftOpen = !!adv?.drift.ask && atEnd && typed && !busy;
+  const menuOpen = !!adv?.menu && !adv.drift.ask && atEnd && typed && !busy;
   const stage: StageView = step?.view ?? timeline.end;
 
   // 记住看到哪里了（下次打开周目从这里继续）
@@ -155,7 +173,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     controller.current = ac;
     try {
       const v = await fn(ac.signal);
-      const t = buildTimeline(v.path, opts);
+      const t = timelineOf(v.path);
       setView(v);
       setCursor(place(t));
       return true;
@@ -172,10 +190,16 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const onChunk = (c: PlayChunk) => {
     if (c.type === 'phase') setPhase(c.phase);
   };
-  /** 往下演、选选项、自由输入：AI 演出的幕会流式返回进度。新内容从第一条新步骤开始播。 */
-  const act = (method: 'advNext' | 'advChoose' | 'advInput', extra: { index?: number; text?: string } = {}) => {
+  /** 往下演、选选项、自由输入、跑偏时的选择：AI 演出的幕会流式返回进度。新内容从第一条新步骤开始播。 */
+  const act = (
+    method: 'advNext' | 'advChoose' | 'advInput' | 'advDrift',
+    extra: { index?: number; text?: string; choice?: DriftChoice } = {},
+  ) => {
     const len = steps.length;
     const place = (t: Timeline) => Math.min(len, t.steps.length - 1);
+    if (method === 'advDrift') {
+      return call((sig) => engine.stream('advDrift', { ...ref, choice: extra.choice ?? 'pull' }, onChunk, sig), place);
+    }
     if (method === 'advChoose') return call((sig) => engine.stream('advChoose', { ...ref, index: extra.index ?? 0 }, onChunk, sig), place);
     if (method === 'advInput') return call((sig) => engine.stream('advInput', { ...ref, text: extra.text ?? '' }, onChunk, sig), place);
     return call((sig) => engine.stream('advNext', ref, onChunk, sig), place);
@@ -187,7 +211,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     if (busy || panel) return;
     if (!typed) return complete();
     if (cursor < steps.length - 1) return setCursor(cursor + 1);
-    if (!adv || adv.menu) return;
+    if (!adv || adv.menu || adv.drift.ask) return;
     if (adv.finished) {
       setMode('normal');
       setPanel('ending');
@@ -219,8 +243,18 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     void act('advChoose', { index });
   };
 
+  /** 跑偏时的选择。"就这样走"会插进新的一幕，下一拍在新的一幕里演。 */
+  const answerDrift = async (choice: DriftChoice) => {
+    if (busy) return;
+    const ok = await act('advDrift', { choice });
+    if (!ok || choice !== 'detour') return;
+    const v = await engine.call('getPlaythrough', ref);
+    if (v.adv?.scene) toast('ok', `插进了新的一幕「${v.adv.scene.title}」，演完再接回主线`);
+  };
+
   /** AI 演出的幕里可以不选选项，直接输入想做的事。 */
-  const inputOpen = !!adv?.aiScene && !adv.needsModel && !adv.finished && !adv.error && atEnd && typed && !busy;
+  const inputOpen =
+    !!adv?.aiScene && !adv.needsModel && !adv.finished && !adv.error && !adv.drift.ask && atEnd && typed && !busy;
   const submitAction = () => {
     const text = action.trim();
     if (!text || !inputOpen) return;
@@ -238,7 +272,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   // 自动播放、快进、停顿、标题卡
   useEffect(() => {
     if (panel || busy || hidden) return;
-    if (atEnd && typed && (adv?.menu || adv?.error || adv?.stuck)) {
+    if (atEnd && typed && (adv?.menu || adv?.error || adv?.stuck || adv?.drift.ask)) {
       if (mode === 'skip') setMode('normal'); // 快进到选项就停下
       return;
     }
@@ -267,7 +301,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
       if (e.key === ' ' || e.key === 'Enter') {
         e.preventDefault();
         if (hidden) setHidden(false);
-        else if (!menuOpen) advance();
+        else if (!menuOpen && !driftOpen) advance();
       } else if (e.key === 'PageUp') setPanel('backlog');
       else if (e.key === 'a' || e.key === 'A') setMode((m) => (m === 'auto' ? 'normal' : 'auto'));
       else if (e.key === 'h' || e.key === 'H') setHidden((h) => !h);
@@ -292,11 +326,11 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
 
   // 顶部显示的是舞台播到的这一步的幕和数值，不是引擎已经算到的地方（选完之后的一拍是一起算出来的，不能提前剧透）
   const sceneNow = useMemo(() => {
-    const sc = step?.scene ? world.graph?.scenes.find((x) => x.id === step.scene) : undefined;
+    const sc = step?.scene ? graph?.scenes.find((x) => x.id === step.scene) : undefined;
     if (!sc) return adv?.scene ?? null;
-    const ch = sc.chapter ? world.graph?.chapters.find((c) => c.id === sc.chapter) : undefined;
+    const ch = sc.chapter ? graph?.chapters.find((c) => c.id === sc.chapter) : undefined;
     return { id: sc.id, title: sc.title || sc.id, chapter: ch ? ch.title || ch.id : null };
-  }, [step?.scene, adv?.scene, world.graph]);
+  }, [step?.scene, adv?.scene, graph]);
   const varsNow = useMemo(() => {
     const v: Record<string, unknown> = { ...adv?.vars };
     for (let i = steps.length - 1; i > cursor; i--) {
@@ -376,7 +410,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
         data-busy={busy ? '1' : '0'}
         className="relative cursor-default overflow-hidden bg-black text-white select-none"
         style={{ width: 'min(100cqw, calc(100cqh * 16 / 9))', aspectRatio: '16 / 9', containerType: 'inline-size' }}
-        onClick={() => (hidden ? setHidden(false) : menuOpen || (inputOpen && action.trim()) ? undefined : advance())}
+        onClick={() => (hidden ? setHidden(false) : menuOpen || driftOpen || (inputOpen && action.trim()) ? undefined : advance())}
         onContextMenu={(e) => {
           e.preventDefault();
           setHidden((h) => !h);
@@ -385,7 +419,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
           if (e.deltaY < 0 && !panel) setPanel('backlog');
         }}
       >
-        <StageLayers p="adv" stage={stage} step={step} stepKey={stepKey} tint={tint} dimAll={menuOpen} />
+        <StageLayers p="adv" stage={stage} step={step} stepKey={stepKey} tint={tint} dimAll={menuOpen || driftOpen} />
 
         {/* 顶部：所在的幕、音乐、数值 */}
         {!hidden && (
@@ -395,6 +429,23 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                 <span className="rounded bg-black/40 px-[0.7em] py-[0.25em] text-white/75" data-testid="adv-scene">
                   {sceneNow.chapter ? `${sceneNow.chapter} · ` : ''}
                   {sceneNow.title}
+                </span>
+              )}
+              {adv?.drift.paused && (
+                <span className="pointer-events-auto flex items-center gap-[0.6em] rounded bg-warn/20 px-[0.7em] py-[0.25em] text-warn" data-testid="adv-paused">
+                  剧情图已暂停，按你的行动自由推进
+                  <button
+                    type="button"
+                    data-testid="adv-resume"
+                    disabled={busy}
+                    className="rounded border border-warn/40 px-[0.5em] hover:bg-warn/20 disabled:opacity-40"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void answerDrift('resume');
+                    }}
+                  >
+                    恢复剧情图
+                  </button>
                 </span>
               )}
               {stage.bg && <span className="rounded bg-black/30 px-[0.7em] py-[0.15em] font-mono text-[0.85em] text-white/45">背景 · {stage.bg.id}</span>}
@@ -429,7 +480,11 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
 
         {/* 选项 */}
         {menuOpen && adv?.menu && !hidden && (
-          <div className="absolute inset-x-0 top-0 bottom-[30%] flex flex-col items-center justify-center gap-[0.9cqw]" data-testid="adv-menu">
+          // 容器不接点击：顶部的"恢复剧情图"按钮不会被盖住
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 bottom-[30%] flex flex-col items-center justify-center gap-[0.9cqw] [&>*]:pointer-events-auto"
+            data-testid="adv-menu"
+          >
             {adv.menu.source === 'exits' && <div className="text-[max(12px,1.2cqw)] text-white/70">接下来去哪里？</div>}
             {adv.menu.options.map((o, i) => (
               <button
@@ -458,6 +513,38 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
               </button>
             ))}
             {inputOpen && actionForm}
+          </div>
+        )}
+        {/* 跑偏：问玩家怎么处理 */}
+        {driftOpen && !hidden && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-0 bottom-[30%] flex flex-col items-center justify-center gap-[0.8cqw] [&>*]:pointer-events-auto"
+            data-testid="adv-drift"
+          >
+            <div className="text-center">
+              <div className="text-[max(13px,1.4cqw)] text-white/90">
+                这几拍离开了「{sceneNow?.title ?? adv?.scene?.title ?? '这一幕'}」要讲的事
+              </div>
+              <div className="mt-[0.3em] text-[max(11px,1.05cqw)] text-white/55">要怎么办？</div>
+            </div>
+            <div className="grid w-[60%] grid-cols-2 gap-[0.8cqw]">
+              {DRIFT_OPTIONS.map((o) => {
+                const disabled = busy || (o.choice === 'detour' && !adv?.drift.detour);
+                return (
+                  <button
+                    key={o.choice}
+                    type="button"
+                    data-testid={`adv-drift-${o.choice}`}
+                    disabled={disabled}
+                    onClick={() => void answerDrift(o.choice)}
+                    className="rounded-[0.6cqw] border border-white/20 bg-[#10121a]/90 px-[1.4cqw] py-[0.8cqw] text-left backdrop-blur-sm transition-colors hover:border-accent hover:bg-[#2a2550]/95 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <div className="text-[max(13px,1.35cqw)]">{o.label}</div>
+                    <div className="mt-[0.2em] text-[max(10px,0.95cqw)] text-white/50">{o.hint}</div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
         {inputOpen && !menuOpen && !hidden && (
@@ -501,7 +588,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                 )}
                 {mode === 'auto' && <span className="text-accent-strong">自动</span>}
                 {skipping && <span className="text-warn">快进中</span>}
-                {typed && !menuOpen && !busy && step && <span className="stage-blink text-white/70">▼</span>}
+                {typed && !menuOpen && !driftOpen && !busy && step && <span className="stage-blink text-white/70">▼</span>}
               </>
             }
             toolbar={toolbar}
@@ -633,6 +720,9 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                   }
                 >
                   再玩一次
+                </Button>
+                <Button data-testid="adv-ending-collection" onClick={() => navigate({ page: 'world', worldId: ref.worldId, tab: 'collection' })}>
+                  结局和 CG
                 </Button>
                 <Button variant="primary" onClick={onBack}>
                   返回世界

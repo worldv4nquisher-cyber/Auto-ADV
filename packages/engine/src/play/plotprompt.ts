@@ -29,6 +29,19 @@ export function plotSection(world: Pick<WorldData, 'variables'>, plot: PlotState
   const scene = plot.scene as PlotScene;
   const g = plot.graph;
   const chapter = scene.chapter ? g.chapters.find((c) => c.id === scene.chapter) : undefined;
+  if (mode === 'adv' && plot.paused && !scene.ending) {
+    // 剧情图暂停中（16.6）：只告诉导演现在停在哪一幕，不给要点和出口
+    const vars = varsSection(world.variables, plot);
+    return [
+      '# 剧情图（玩家暂停了剧情图）',
+      `玩家想先自由行动：跟着玩家的行动演，不用推进剧情图。points 留空，sceneDone 写 false，exit 留空，offTrack 写 false，给玩家的选项不要带 exit。`,
+      `剧情图停在：[${scene.id}] ${scene.title || scene.id}${scene.what ? `：${scene.what}` : ''}（玩家恢复剧情图之后接着演）`,
+      vars,
+      plot.notes.length ? `## 上一拍被引擎驳回或截断的内容\n${plot.notes.map((n) => `- ${n}`).join('\n')}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  }
   const out: string[] = ['# 剧情图'];
   if (g.premise) out.push(`核心：${g.premise}`);
   out.push(`## 当前这一幕：[${scene.id}] ${scene.title || scene.id}${chapter ? `（${chapter.title || chapter.id}）` : ''}`);
@@ -64,8 +77,13 @@ export function plotSection(world: Pick<WorldData, 'variables'>, plot: PlotState
       }
     } else out.push('## 出口\n（现在没有打开的出口，继续演这一幕）');
     if (sceneMaxed(plot)) out.push('这一幕已经演满了：这一拍要用故事里自然发生的事把场面过渡出去，并在 exit 里选一条路。');
-    if (plot.offTrack >= 2) {
-      out.push('最近几拍偏离了这一幕：这一拍要用故事里自然发生的事（来人、变故、消息、时间到了）把场面带回这一幕。');
+    if (mode === 'adv' ? plot.pullBack : plot.offTrack >= 2) {
+      // 剧情 ADV 里跑偏了要先问玩家（16.6），玩家选了"拉回来"或者恢复剧情图才拉
+      out.push(
+        mode === 'adv'
+          ? '玩家想回到这一幕：这一拍要用故事里自然发生的事（来人、变故、消息、时间到了）把场面带回这一幕，offTrack 写 false。'
+          : '最近几拍偏离了这一幕：这一拍要用故事里自然发生的事（来人、变故、消息、时间到了）把场面带回这一幕。',
+      );
     }
   }
 
@@ -107,6 +125,7 @@ export function sceneBrief(plot: PlotState | null): string {
   const s = plot?.scene;
   if (!s) return '';
   if (s.ending) return `［结局］${s.title || s.id}：${s.ending.text || s.what}。这一拍把结局写出来。`;
+  if (plot?.paused) return '［剧情图暂停中］跟着玩家的行动演，不用把场面往剧情上引。';
   const pending = s.points.filter((p) => !plot?.points.has(p.id)).map((p) => p.text);
   return `［这一幕］${s.title || s.id}：${s.what}${pending.length ? `\n［还没演到的要点］${pending.join('；')}` : ''}`;
 }

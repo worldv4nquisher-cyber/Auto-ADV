@@ -16,17 +16,18 @@ import type {
   SendParams,
   StagePos,
   StartPlaythroughParams,
+  WorldProgress,
 } from '../api.ts';
 import type { Meter, ModelGateway } from '../llm/gateway.ts';
 import { generateJson, stripThinking } from '../llm/structured.ts';
 import type { AdvAction } from '../plot/runner.ts';
-import { AdvSession, advView, loadAdvWorld, recordCgShown } from '../plot/session.ts';
-import { buildTimeline, findStep, stageFromSegments, stepText } from '../plot/stage.ts';
+import { AdvSession, advView, loadAdvWorld, recordCgShown, worldProgress } from '../plot/session.ts';
+import { buildTimeline, DRIFT_LABELS, findStep, stageFromSegments, stepText } from '../plot/stage.ts';
 import { shortId } from '../util.ts';
 import { matchByName } from '../world/render.ts';
 import type { WorldData, WorldStore } from '../world/store.ts';
 import { buildMessages, eventText, protagonistOf, sceneAt, summaryPrompt } from './context.ts';
-import { runAdvBeat } from './adv.ts';
+import { runAdvBeat, runAdvDetour } from './adv.ts';
 import { PlayDb, type PlaythroughRow } from './db.ts';
 import { runBeat } from './observer/beat.ts';
 import { memoryPrompt, memorySpec } from './observer/prompts.ts';
@@ -60,6 +61,8 @@ function preview(e: PlayEvent | undefined, max = 40): string {
               ? `▶ ${e.choice?.label ?? ''}`
               : e.kind === 'check'
                 ? `检定「${e.check?.label ?? ''}」`
+                : e.kind === 'drift'
+                  ? `（剧情图）${DRIFT_LABELS[e.drift ?? 'pull']}${e.drift === 'detour' && e.text ? `：${e.text}` : ''}`
                 : (e.segments ?? []).map((s) => (s.kind === 'line' ? `${s.name}：${s.text}` : s.text)).join(' ');
   const chars = [...t.replace(/\s+/g, ' ').trim()];
   return chars.length > max ? `${chars.slice(0, max).join('')}…` : chars.join('');
@@ -272,6 +275,26 @@ export class PlayService {
         const ai = await this.gateway.configured('director');
         const session = new AdvSession(db, { ...loadAdvWorld(world).adv, ai });
         const r = session.act(pt.id, action);
+        if (r.detour) {
+          // 跑偏时选了"就这样走"：导演把这一段写成新的一幕
+          const head = db.getPlaythrough(pt.id).headId;
+          const events = db.path(pt.id, head);
+          const draft = await runAdvDetour({
+            gateway: this.gateway,
+            world,
+            path: events,
+            protagonist: protagonistOf(world, pt.protagonistId),
+            summary: db.latestSummary(
+              pt.id,
+              events.map((e) => e.id),
+            ),
+            signal,
+            meter: this.meter(ref),
+            emit,
+          });
+          signal.throwIfAborted();
+          session.commit(pt.id, draft);
+        }
         if (r.ai) {
           const head = db.getPlaythrough(pt.id).headId;
           const events = db.path(pt.id, head);
@@ -298,6 +321,12 @@ export class PlayService {
       },
       () => emit({ type: 'phase', phase: 'memory' }),
     );
+  }
+
+  /** 世界的跨周目收集：结局、CG 画廊、走过的幕。 */
+  async progress(worldId: string): Promise<WorldProgress | null> {
+    const world = await this.store.load(worldId);
+    return worldProgress(world, this.db(worldId).listUnlocks());
   }
 
   /** 剧情 ADV：舞台第一次显示了某张 CG。 */

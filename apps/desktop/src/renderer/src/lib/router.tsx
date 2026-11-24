@@ -4,7 +4,7 @@ import { createContext, type ReactNode, useCallback, useContext, useState } from
 export type Route =
   | { page: 'home' }
   | { page: 'create' }
-  | { page: 'world'; worldId: string }
+  | { page: 'world'; worldId: string; tab?: 'collection' }
   | { page: 'play'; worldId: string; playthroughId: string }
   | { page: 'playground' }
   | { page: 'logs' }

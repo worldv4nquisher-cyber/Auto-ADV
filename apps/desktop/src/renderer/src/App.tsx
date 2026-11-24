@@ -103,7 +103,7 @@ export function App() {
       <main className="min-w-0 flex-1 overflow-hidden">
         {route.page === 'home' && <HomePage />}
         {route.page === 'create' && <CreateWorldPage />}
-        {route.page === 'world' && <WorldPage key={route.worldId} worldId={route.worldId} />}
+        {route.page === 'world' && <WorldPage key={`${route.worldId}:${route.tab ?? ''}`} worldId={route.worldId} initialTab={route.tab} />}
         {route.page === 'play' && (
           <PlayPage key={route.playthroughId} worldId={route.worldId} playthroughId={route.playthroughId} />
         )}
