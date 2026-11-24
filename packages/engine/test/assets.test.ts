@@ -37,7 +37,7 @@ afterEach(teardown);
 
 /**
  * 导入示例世界。默认去掉手写剧本、关掉立绘，只剩 3 个地点的背景；
- * scripts: true 时连剧本一起导入（再加 5 张剧本里的背景）；sprites: true 时画立绘（林夕 6 个表情、老周 3 个）。
+ * scripts: true 时连剧本一起导入（再加 5 张剧本里的背景）；sprites: true 时画立绘（沈默、林夕各 6 个表情，老周 3 个）。
  * image：要不要配好图像职责。
  */
 async function setup(
@@ -451,6 +451,46 @@ describe('内置抠图和透明度检查', () => {
     expect(alphaAt(cut, 28, 12)).toBe(255);
   });
 
+  it('白底：挨着轮廓的小块底色（发丝之间）去掉，离轮廓远的小块（眼白）留着；混了底色的轮廓做半透明并去掉底色', () => {
+    const img = rgba(
+      encodePng(60, 80, (x, y) => {
+        if (x === 9 && y >= 10) return [138, 138, 138, 255]; // 深色轮廓和白底各一半
+        if (x < 10 || x >= 50 || y < 10) return [255, 255, 255, 255];
+        if (x >= 12 && x < 14 && y >= 30 && y < 38) return [255, 255, 255, 255]; // 发丝之间的空隙，离外面 3 个像素
+        if (x >= 28 && x < 32 && y >= 40 && y < 43) return [250, 250, 250, 255]; // 眼白，离外面将近 20 个像素
+        return [20, 20, 20, 255];
+      }),
+    );
+    const cut = keyOut(img);
+    expect(alphaAt(cut, 12, 33)).toBe(0);
+    expect(alphaAt(cut, 29, 41)).toBe(255);
+    const edge = (9 + 40 * 60) * 4;
+    expect(cut.data[edge + 3]).toBeGreaterThan(100);
+    expect(cut.data[edge + 3]).toBeLessThan(160);
+    expect(cut.data[edge]).toBeLessThan(60); // 去掉白底以后是深色的，不是一圈浅灰
+  });
+
+  it('鲜艳的底色（绿）：被围起来的不管大小都去掉（眼镜片后面），轮廓附近压掉渗进来的绿，离轮廓远的绿色留着', () => {
+    const img = rgba(
+      encodePng(60, 80, (x, y) => {
+        if (x < 10 || x >= 50 || y < 10) return [40, 180, 40, 255];
+        if (x === 10) return [90, 130, 90, 255]; // 渗了绿的轮廓
+        if (x >= 40 && x < 43 && y >= 20 && y < 23) return [45, 175, 45, 255]; // 镜片后面透出来的底色
+        if (x >= 28 && x < 31 && y >= 50 && y < 53) return [40, 180, 40, 255];
+        if (x === 30 && y === 30) return [30, 120, 90, 255]; // 绿眼睛
+        return [150, 150, 150, 255];
+      }),
+    );
+    const cut = keyOut(img);
+    expect(alphaAt(cut, 41, 21)).toBe(0);
+    expect(alphaAt(cut, 29, 51)).toBe(0);
+    const at = (x: number, y: number) => [...cut.data.subarray((y * 60 + x) * 4, (y * 60 + x) * 4 + 3)] as [number, number, number];
+    const [r, g, b] = at(10, 40);
+    expect(alphaAt(cut, 10, 40)).toBeGreaterThan(0);
+    expect(g).toBeLessThanOrEqual(Math.max(r, b));
+    expect(at(30, 30)).toEqual([30, 120, 90]);
+  });
+
   it('检查：背景没抠掉、四边有残留、人物被抠没了、身上有洞', () => {
     const noisy = keyOut(rgba(mockSprite('角色立绘', 64, 96, 'noisy')));
     expect(checkAlpha(noisy)).toMatchObject({ ok: false });
@@ -577,6 +617,25 @@ describe('立绘管线', () => {
     const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
     expect(index.slots['sprite/char_lin/neutral']?.rawFile).toBeUndefined();
     expect(alphaAt(rgba(await assetFile(id, slot(v, 'sprite/char_lin/neutral').file ?? '')), 0, 0)).toBe(0);
+  });
+
+  it('图像服务返回 JPEG（H3 就是）：照样内置抠图，原图存成 .raw.jpg，表情差分拿 JPEG 原图当参考图', async () => {
+    const jpeg = new Uint8Array(await readFile(path.join(import.meta.dirname, 'fixtures', 'sprite.jpg')));
+    const id = await setup({ sprites: true, mock: { spriteJpeg: jpeg }, assets: { enabled: { background: false } as AssetSettings['enabled'] } });
+    const v = await idle(id);
+    expect(v.counts).toMatchObject({ total: 15, done: 15, failed: 0 });
+    const lin = slot(v, 'sprite/char_lin/neutral');
+    expect(lin.review).toBeNull();
+    expect(lin.file).toMatch(/\.png$/);
+    const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
+    expect(index.slots['sprite/char_lin/neutral']?.rawFile).toMatch(/neutral-[0-9a-f]{12}\.raw\.jpg$/);
+    const cut = rgba(await assetFile(id, lin.file ?? ''));
+    expect([cut.width, cut.height]).toEqual([64, 96]);
+    expect(alphaAt(cut, 0, 0)).toBe(0);
+    expect(alphaAt(cut, 32, 60)).toBe(255);
+    // 表情差分的参考图就是那张 JPEG
+    expect(server.imageRequests.filter((r) => r.edit).every((r) => r.imageBytes === jpeg.length)).toBe(true);
+    expect(alphaAt(rgba(await assetFile(id, slot(v, 'sprite/char_lin/smile').file ?? '')), 0, 0)).toBe(0);
   });
 
   it('抠图服务：没配就失败并说明；配好以后每张都交给它抠', async () => {

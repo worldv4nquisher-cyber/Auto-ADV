@@ -1,6 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { type MockMessage, type MockRequestInfo, schemaNameOf, storyReply } from './mock-story.ts';
+import { decodeJpeg, isJpeg } from '../jpeg.ts';
 import { decodePng, encodeRgbaPng } from '../png.ts';
 import { colorOf, mockImage, mockSprite } from './png.ts';
 
@@ -53,6 +54,8 @@ export interface MockServerOptions {
   imageNoBackground?: boolean;
   /** 提示词里含有这段文字的立绘画成杂乱的底（抠图检查不通过）。 */
   imageNoisyIf?: string;
+  /** 立绘的文生图返回这张 JPEG（模拟 H3 这类只出 JPEG 的服务）。 */
+  spriteJpeg?: Uint8Array;
   /** 绑定的主机，默认 127.0.0.1。 */
   host?: string;
   port?: number;
@@ -96,7 +99,7 @@ async function readForm(req: http.IncomingMessage): Promise<FormData> {
 
 /** 模拟改图：保持参考图不变，只在脸上按提示词换一个颜色的"嘴"（和 mockSprite 的位置一样）。 */
 function mockEdit(reference: Uint8Array, prompt: string): Buffer {
-  const img = decodePng(reference);
+  const img = isJpeg(reference) ? decodeJpeg(reference) : decodePng(reference);
   const { width, height, data } = img;
   const [r, g, b] = colorOf(prompt);
   const cx = width / 2;
@@ -210,6 +213,8 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         if (isEdit) {
           if (!reference) return sendJson(res, 400, { error: { message: 'image is required' } });
           png = mockEdit(reference, prompt);
+        } else if (prompt.includes('立绘') && opts.spriteJpeg) {
+          png = Buffer.from(opts.spriteJpeg);
         } else if (prompt.includes('立绘')) {
           const backdrop =
             opts.imageNoisyIf && prompt.includes(opts.imageNoisyIf)

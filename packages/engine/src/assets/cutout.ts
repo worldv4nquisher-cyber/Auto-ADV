@@ -1,9 +1,11 @@
 import type { RgbaImage } from '@auto-adv/providers';
 
 /**
- * 立绘的内置抠图和透明度检查（18.5）。不依赖任何库，只处理纯色底的图：
- * 从图像四边往里找连着的、接近底色的区域，再把被人物围起来的大块底色（胳膊和身子之间）也去掉；
- * 边缘一圈按和底色的差别做半透明，顺带去掉底色渗进来的色边。
+ * 立绘的内置抠图和透明度检查（18.5、19.2）。不依赖任何库，只处理纯色底的图：
+ * 1. 从图像四边往里找连着的、接近底色的区域；
+ * 2. 被人物围起来的底色也去掉：大块的（胳膊和身子之间），挨着人物轮廓的小块（发丝之间的空隙），
+ *    纯绿这类鲜艳的底色不管大小都去掉（眼镜片后面透出来的底色）。离轮廓远的小块白色留着（眼白、高光）；
+ * 3. 轮廓往里两圈按和底色的差别做半透明，再去掉底色渗进来的颜色（JPEG 的色度采样会让底色渗进去一两个像素）。
  */
 
 export interface KeyOptions {
@@ -38,6 +40,37 @@ export function hasTransparentBackdrop(img: RgbaImage): boolean {
   return px.filter((i) => (img.data[i + 3] as number) < 16).length > px.length / 2;
 }
 
+/** 每个像素离 mask 多远（四邻接，一圈一圈数），mask 里的是 0，最多数到 max，更远的记 255。 */
+function rings(mask: Uint8Array, w: number, h: number, max: number): Uint8Array {
+  const n = w * h;
+  const d = new Uint8Array(n).fill(255);
+  let frontier: number[] = [];
+  for (let p = 0; p < n; p++) {
+    if (mask[p]) {
+      d[p] = 0;
+      frontier.push(p);
+    }
+  }
+  for (let r = 1; r <= max && frontier.length; r++) {
+    const next: number[] = [];
+    for (const p of frontier) {
+      const x = p % w;
+      const visit = (q: number) => {
+        if (d[q] === 255) {
+          d[q] = r;
+          next.push(q);
+        }
+      };
+      if (x > 0) visit(p - 1);
+      if (x < w - 1) visit(p + 1);
+      if (p >= w) visit(p - w);
+      if (p < n - w) visit(p + w);
+    }
+    frontier = next;
+  }
+  return d;
+}
+
 /** 纯色底抠图，返回新的图（原图不变）。 */
 export function keyOut(img: RgbaImage, opts: KeyOptions = {}): RgbaImage {
   const { width: w, height: h } = img;
@@ -45,7 +78,10 @@ export function keyOut(img: RgbaImage, opts: KeyOptions = {}): RgbaImage {
   const data = new Uint8Array(src);
   const n = w * h;
   const tol = opts.tolerance ?? 48;
-  const [br, bg, bb] = estimateBackdrop(img);
+  const backdrop = estimateBackdrop(img);
+  const [br, bg, bb] = backdrop;
+  // 鲜艳的底色（纯绿这类）：人物身上几乎不会有一样的颜色，围起来的小块也可以放心去掉
+  const vivid = Math.max(br, bg, bb) - Math.min(br, bg, bb) >= 64;
   const dist = new Uint8Array(n);
   for (let p = 0; p < n; p++) {
     const i = p * 4;
@@ -74,60 +110,93 @@ export function keyOut(img: RgbaImage, opts: KeyOptions = {}): RgbaImage {
   while (head < tail) {
     const p = queue[head++] as number;
     const x = p % w;
-    const y = (p - x) / w;
     if (x > 0) seed(p - 1);
     if (x < w - 1) seed(p + 1);
-    if (y > 0) seed(p - w);
-    if (y < h - 1) seed(p + w);
+    if (p >= w) seed(p - w);
+    if (p < n - w) seed(p + w);
   }
 
-  // 2. 被人物围起来的、几乎就是底色的大块区域也是背景（小块的可能是高光，留着）
-  const tight = Math.min(tol, 20);
+  // 2. 被人物围起来的底色：大块的、挨着轮廓的、鲜艳底色的都去掉；离轮廓远的小块（眼白、高光）留着
+  const NEAR = 10;
+  const near = rings(back, w, h, NEAR);
+  const limit = vivid ? tol : Math.min(tol, 20);
   const minArea = Math.max(16, Math.round(n * 0.0015));
   const seen = new Uint8Array(n);
   for (let s = 0; s < n; s++) {
-    if (back[s] || seen[s] || (dist[s] as number) >= tight) continue;
+    if (back[s] || seen[s] || (dist[s] as number) >= limit) continue;
     head = 0;
     tail = 0;
     seen[s] = 1;
     queue[tail++] = s;
+    let touches = false;
     while (head < tail) {
       const p = queue[head++] as number;
+      if ((near[p] as number) <= NEAR) touches = true;
       const x = p % w;
-      const y = (p - x) / w;
-      for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1]) {
-        if (q >= 0 && !seen[q] && !back[q] && (dist[q] as number) < tight) {
+      for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, p >= w ? p - w : -1, p < n - w ? p + w : -1]) {
+        if (q >= 0 && !seen[q] && !back[q] && (dist[q] as number) < limit) {
           seen[q] = 1;
           queue[tail++] = q;
         }
       }
     }
-    if (tail >= minArea) for (let k = 0; k < tail; k++) back[queue[k] as number] = 1;
+    if (tail >= minArea || (tail >= 4 && (vivid || touches))) for (let k = 0; k < tail; k++) back[queue[k] as number] = 1;
   }
 
-  // 3. 背景全透明；挨着背景的一圈按和底色的差别做半透明，并去掉底色渗进来的颜色
+  // 3. 轮廓往里两圈做半透明：人物的颜色按轮廓往里第 3、4 圈的典型差别算（大多是勾线的深色），
+  //    混了底色的像素按比例算透明度，再把底色减掉；鲜艳的底色再把轮廓往里 12 圈内渗进来的那个通道压下去
+  //    （发丝之间透出来的底色常常带着阴影，比容差深，留在人物里面）
+  const SPILL = 12;
+  const ring = rings(back, w, h, SPILL);
+  const hist = new Uint32Array(256);
+  let inner = 0;
+  for (let p = 0; p < n; p++) {
+    if (ring[p] === 3 || ring[p] === 4) {
+      hist[dist[p] as number] = (hist[dist[p] as number] as number) + 1;
+      inner++;
+    }
+  }
+  let solid = tol * 2;
+  if (inner > 0) {
+    let acc = 0;
+    for (let v = 0; v < 256; v++) {
+      acc += hist[v] as number;
+      if (acc * 2 >= inner) {
+        solid = v;
+        break;
+      }
+    }
+  }
   const lo = 8;
-  const hi = Math.max(lo + 1, tol * 2);
+  const hi = Math.min(255, Math.max(tol + 8, solid));
+  const top = backdrop.indexOf(Math.max(br, bg, bb));
   for (let p = 0; p < n; p++) {
     const i = p * 4;
     if (back[p]) {
       data[i + 3] = 0;
       continue;
     }
-    const x = p % w;
-    const y = (p - x) / w;
-    const edge = (x > 0 && back[p - 1]) || (x < w - 1 && back[p + 1]) || (y > 0 && back[p - w]) || (y < h - 1 && back[p + w]);
-    if (!edge) continue;
-    const a = Math.min(1, Math.max(0, ((dist[p] as number) - lo) / (hi - lo)));
-    if (a <= 0) {
-      data[i + 3] = 0;
-      continue;
+    const r = ring[p] as number;
+    if (r > (vivid ? SPILL : 2)) continue;
+    if (r <= 2) {
+      const a = Math.min(1, Math.max(0, ((dist[p] as number) - lo) / (hi - lo)));
+      if (a <= 0) {
+        data[i + 3] = 0;
+        continue;
+      }
+      if (a < 1) {
+        for (let c = 0; c < 3; c++) {
+          const v = ((src[i + c] as number) - (1 - a) * (backdrop[c] as number)) / a;
+          data[i + c] = Math.round(Math.min(255, Math.max(0, v)));
+        }
+        data[i + 3] = Math.round((src[i + 3] as number) * a);
+      }
     }
-    const un = (c: number, b: number) => Math.round(Math.min(255, Math.max(0, (c - (1 - a) * b) / a)));
-    data[i] = un(src[i] as number, br);
-    data[i + 1] = un(src[i + 1] as number, bg);
-    data[i + 2] = un(src[i + 2] as number, bb);
-    data[i + 3] = Math.round((src[i + 3] as number) * a);
+    if (vivid) {
+      // 底色最亮的那个通道（绿底就是 G）不能比另外两个都高出去
+      const others = Math.max(...[0, 1, 2].filter((c) => c !== top).map((c) => data[i + c] as number));
+      if ((data[i + top] as number) > others) data[i + top] = others;
+    }
   }
   return { width: w, height: h, data };
 }

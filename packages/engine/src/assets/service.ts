@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { decodePng, encodeRgbaPng, IMAGE_EXT, type ImageResult, ProviderError, type RgbaImage, sniffImage } from '@auto-adv/providers';
+import { decodeJpeg, decodePng, encodeRgbaPng, IMAGE_EXT, type ImageResult, ProviderError, type RgbaImage, sniffImage } from '@auto-adv/providers';
 import {
   type AssetIndex,
   type AssetSettings,
@@ -466,12 +466,14 @@ export class AssetService {
       const check = checkAlpha(img, { holes: true });
       return { image: img, reason: check.reason, retry: true, native: false };
     }
-    if (r.mime !== 'image/png') return bad(`图像服务返回的是 ${IMAGE_EXT[r.mime] ?? r.mime}，内置抠图只能处理 PNG`);
+    // H3 这类服务返回的是 JPEG（不带透明），也能内置抠图
+    const decode = r.mime === 'image/png' ? decodePng : r.mime === 'image/jpeg' ? decodeJpeg : null;
+    if (!decode) return bad(`图像服务返回的是 ${IMAGE_EXT[r.mime] ?? r.mime}，内置抠图只能处理 PNG 和 JPEG`);
     let img: RgbaImage;
     try {
-      img = decodePng(r.data);
+      img = decode(r.data);
     } catch (err) {
-      return bad(`读不了这张 PNG：${err instanceof Error ? err.message : String(err)}`);
+      return bad(`读不了这张图：${err instanceof Error ? err.message : String(err)}`);
     }
     if ((mode === 'auto' || mode === 'native') && hasTransparentBackdrop(img)) {
       const check = checkAlpha(img, { holes: true });
