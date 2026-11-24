@@ -247,6 +247,7 @@ describe('出口上的检定（16.4）', () => {
       }),
     });
     const r = checkWorldPlot({ ...world, graph });
+    if (!r) throw new Error('世界没有剧情图');
     expect(r.errors.map((e) => e.message)).toEqual(['出口 1（→ sc_06）的检定变量 flags.door_open 不是数值']);
     expect(r.warnings.map((e) => e.message)).toEqual([
       '出口 3（→ sc_07）是 auto 出口，上面的检定不会掷骰',
