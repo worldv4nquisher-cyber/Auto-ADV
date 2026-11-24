@@ -8,6 +8,7 @@ import type {
   ChoiceOption,
   Condition,
   PlayMode,
+  PlotExit,
   PlotGraph,
   PlotScene,
   ScriptCommand,
@@ -21,7 +22,7 @@ import { type ConditionContext, describeCondition, evalCondition } from './condi
 import { rollCheck } from './dice.ts';
 import { cloneState, type PlotState, reducePlot, sceneById } from './progress.ts';
 import { resolveSpeaker } from './stage.ts';
-import { choosableExits, decideTransition } from './transition.ts';
+import { choosableExits, decideTransition, exitCheckId } from './transition.ts';
 import { applyEffects, mergeChanges, type VarChange, type VarValues } from './vars.ts';
 
 // ───────────── 编译：Script IR → 线性指令 ─────────────
@@ -332,10 +333,29 @@ export function stepAdv(
   }
   if (s.driftAsk) throw new AdvError('这几拍离开了当前这一幕，请先决定怎么处理');
 
+  /** 出口上的检定（16.4）：选了这条路就掷，结果记在换幕之后，下一幕的第一拍按结果演。种子用选项事件的父事件。 */
+  const rollExit = (from: PlotScene, exit: PlotExit, label: string, parentId: string | null) => {
+    if (!exit.check) return;
+    const mod = exit.check.var ? s.vars[exit.check.var] : 0;
+    const check = rollCheck(
+      { ...exit.check, label: exit.check.label || label, id: exitCheckId(from, exit) },
+      typeof mod === 'number' ? mod : 0,
+      { playthroughId: seed.playthroughId, parentId },
+    );
+    push({ kind: 'check', check });
+  };
+
   /** 选项已经记下：（要检定且还没掷就先掷骰）演出选完之后的一拍。 */
   const afterChoice = () => {
     const pending = s.pendingChoice;
     if (!pending) throw new AdvError('找不到刚才选的选项');
+    if (pending.source === 'exits') {
+      // 岔路：已经换到新的幕，出口上有检定就先掷，再在新的幕里演出选择的结果
+      const from = sceneById(s, s.visited.at(-2) ?? '');
+      const exit = from ? choosableExits(from)[pending.index] : undefined;
+      if (from && exit && !pending.rolled) rollExit(from, exit, pending.label, pending.parentId);
+      return beat(s.pc ?? 0, [], false, { kind: 'choice', text: pending.label });
+    }
     if (pending.source === 'ai') {
       // AI 给的选项：检定在选的时候已经掷过；选完之后的一拍由 AI 演（选项带着出口、新的幕是手写剧本时播剧本）
       return beat(s.pc ?? 0, [], true, { kind: 'choice', text: pending.label });
@@ -396,14 +416,15 @@ export function stepAdv(
     if (r.notes.length) Object.assign(plot, { notes: r.notes });
     push({ kind: 'choice', choice, plot }, [], seed.headId);
     if (!s.scene) throw new AdvError(`出口指向的幕 ${exit.to} 不存在`);
-    return beat(0, [], false, { kind: 'choice', text: shown.label });
+    return afterChoice();
   }
 
   if (menu.source === 'ai') {
     const plot: PlotMark = { scene: scene.id };
+    let exit: PlotExit | undefined;
     if (shown.exit) {
       // 选项带着出口：岔路由玩家的选择决定，选完就换幕，下一拍在新的幕里演出选择的结果
-      const exit = choosableExits(scene).find((x) => x.to === shown.exit);
+      exit = choosableExits(scene).find((x) => x.to === shown.exit);
       if (!exit || !evalCondition(exit.if, ctx)) throw new AdvError(`「${shown.label}」现在选不了`);
       const r = applyEffects(w.variables, s.vars, exit.set, { source: 'author' });
       plot.exit = { to: exit.to, by: 'choice' };
@@ -411,7 +432,9 @@ export function stepAdv(
       if (r.notes.length) plot.notes = r.notes;
     }
     push({ kind: 'choice', choice, plot }, [], seed.headId);
-    const spec = shown.check;
+    // 出口上写了检定就用作者写的（aiMenu 已经把它放到选项上显示），否则用 AI 给的
+    const spec = exit?.check ? null : shown.check;
+    if (exit?.check) rollExit(scene, exit, shown.label, seed.headId);
     if (spec) {
       const mod = spec.var ? s.vars[spec.var] : 0;
       const id = `${scene.id}:ai:${action.index}`;

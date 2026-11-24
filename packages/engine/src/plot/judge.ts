@@ -10,7 +10,7 @@ import { describeCondition, evalCondition } from './conditions.ts';
 import { type CheckResult, rollCheck } from './dice.ts';
 import { inAppendedScene, type PlotState, sceneById } from './progress.ts';
 import { conditionContext } from './runner.ts';
-import { choosableExits, decideTransition } from './transition.ts';
+import { choosableExits, decideTransition, exitCheckShown } from './transition.ts';
 import { applyEffects, mergeChanges } from './vars.ts';
 
 /** 导演对这一拍剧情进度的报告（模型的原始输出，还没核对）。 */
@@ -240,11 +240,15 @@ export function aiMenu(
           opt.enabled = false;
           opt.lockedBy = describeCondition(e.if, { vars });
         }
+        // 出口上写了检定（作者的决定）：选项上显示它，AI 给的检定不要
+        if (e.check) opt.check = exitCheckShown(e.check);
       }
     }
-    const c = checkSpecOf(o.check, variables);
-    if (c.note) notes.push(`选项「${label}」：${c.note}`);
-    if (c.spec) opt.check = { ...(c.spec.var ? { var: c.spec.var } : {}), dc: c.spec.dc, label: c.spec.label };
+    if (!opt.check) {
+      const c = checkSpecOf(o.check, variables);
+      if (c.note) notes.push(`选项「${label}」：${c.note}`);
+      if (c.spec) opt.check = { ...(c.spec.var ? { var: c.spec.var } : {}), dc: c.spec.dc, label: c.spec.label };
+    }
     options.push(opt);
   }
   if (options.length && !options.some((o) => o.enabled)) {

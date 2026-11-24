@@ -117,6 +117,11 @@ export const PlotExit = z.object({
   auto: z.boolean().default(false),
   /** 走这条路时的效果（作者的决定，只检查范围，不受每拍上限限制）。 */
   set: z.array(VarEffect).default([]),
+  /**
+   * 玩家选这条路时由引擎掷骰（16.4）。结果记成一条检定事件，下一幕的第一拍按结果演，
+   * 下一幕的条件也能用 `check` 读到它。只在玩家从岔路里选的时候掷：导演换幕、auto 出口不掷。
+   */
+  check: CheckSpec.optional(),
 });
 export type PlotExit = z.infer<typeof PlotExit>;
 

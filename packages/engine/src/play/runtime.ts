@@ -263,8 +263,9 @@ export class PlayService {
   /**
    * 剧情 ADV 的一步：往下演、选一个选项，或者输入一句自由行动。
    * 手写剧本的幕不调模型；AI 演出的幕先把玩家的行动和检定写进树，再调模型演这一拍（中途失败可以"继续"重试）。
+   * regenerate：重抽 AI 演的最后一拍，先退到它的上一个事件再往下演；失败时回到原来那一拍。
    */
-  advAct(ref: PlayRef, action: AdvAction, emit: Emit, signal: AbortSignal): Promise<PlayView> {
+  advAct(ref: PlayRef, action: AdvAction, emit: Emit, signal: AbortSignal, opts: { regenerate?: boolean } = {}): Promise<PlayView> {
     return this.exclusive(
       ref,
       async () => {
@@ -274,53 +275,78 @@ export class PlayService {
         if (pt.mode !== 'adv') throw new Error('这个周目不是剧情 ADV 模式');
         const ai = await this.gateway.configured('director');
         const session = new AdvSession(db, { ...loadAdvWorld(world).adv, ai });
-        const r = session.act(pt.id, action);
-        if (r.detour) {
-          // 跑偏时选了"就这样走"：导演把这一段写成新的一幕
-          const head = db.getPlaythrough(pt.id).headId;
-          const events = db.path(pt.id, head);
-          const draft = await runAdvDetour({
-            gateway: this.gateway,
-            world,
-            path: events,
-            protagonist: protagonistOf(world, pt.protagonistId),
-            summary: db.latestSummary(
-              pt.id,
-              events.map((e) => e.id),
-            ),
-            signal,
-            meter: this.meter(ref),
-            emit,
-          });
-          signal.throwIfAborted();
-          session.commit(pt.id, draft);
+        if (opts.regenerate) {
+          const last = db.getEvent(pt.id, pt.headId);
+          if (last.kind !== 'ai' || !last.plot || !last.parentId) throw new Error('只能重抽 AI 演的一拍');
+          if (!ai) throw new Error('重抽要调模型，先在设置里配好模型');
+          db.setHead(pt.id, last.parentId);
+          try {
+            return await this.advRun(ref, world, db, session, action, emit, signal);
+          } catch (err) {
+            db.setHead(pt.id, last.id);
+            throw err;
+          }
         }
-        if (r.ai) {
-          const head = db.getPlaythrough(pt.id).headId;
-          const events = db.path(pt.id, head);
-          const out = await runAdvBeat({
-            gateway: this.gateway,
-            world,
-            playthroughId: pt.id,
-            path: events,
-            request: r.ai,
-            protagonist: protagonistOf(world, pt.protagonistId),
-            summary: db.latestSummary(
-              pt.id,
-              events.map((e) => e.id),
-            ),
-            signal,
-            meter: this.meter(ref),
-            emit,
-          });
-          signal.throwIfAborted();
-          session.commit(pt.id, out.draft, out.unlocks);
-          this.scheduleMemory(ref);
-        }
-        return this.view(ref);
+        return this.advRun(ref, world, db, session, action, emit, signal);
       },
       () => emit({ type: 'phase', phase: 'memory' }),
     );
+  }
+
+  private async advRun(
+    ref: PlayRef,
+    world: WorldData,
+    db: PlayDb,
+    session: AdvSession,
+    action: AdvAction,
+    emit: Emit,
+    signal: AbortSignal,
+  ): Promise<PlayView> {
+    const pt = db.getPlaythrough(ref.playthroughId);
+    const r = session.act(pt.id, action);
+    if (r.detour) {
+      // 跑偏时选了"就这样走"：导演把这一段写成新的一幕
+      const head = db.getPlaythrough(pt.id).headId;
+      const events = db.path(pt.id, head);
+      const draft = await runAdvDetour({
+        gateway: this.gateway,
+        world,
+        path: events,
+        protagonist: protagonistOf(world, pt.protagonistId),
+        summary: db.latestSummary(
+          pt.id,
+          events.map((e) => e.id),
+        ),
+        signal,
+        meter: this.meter(ref),
+        emit,
+      });
+      signal.throwIfAborted();
+      session.commit(pt.id, draft);
+    }
+    if (r.ai) {
+      const head = db.getPlaythrough(pt.id).headId;
+      const events = db.path(pt.id, head);
+      const out = await runAdvBeat({
+        gateway: this.gateway,
+        world,
+        playthroughId: pt.id,
+        path: events,
+        request: r.ai,
+        protagonist: protagonistOf(world, pt.protagonistId),
+        summary: db.latestSummary(
+          pt.id,
+          events.map((e) => e.id),
+        ),
+        signal,
+        meter: this.meter(ref),
+        emit,
+      });
+      signal.throwIfAborted();
+      session.commit(pt.id, out.draft, out.unlocks);
+      this.scheduleMemory(ref);
+    }
+    return this.view(ref);
   }
 
   /** 世界的跨周目收集：结局、CG 画廊、走过的幕。 */
