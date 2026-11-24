@@ -5,6 +5,7 @@ import { Button, Card, ConfirmButton, cx, Input, Markdown, Select, Spinner, Text
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatTime } from '../lib/format.ts';
 import { useRouter } from '../lib/router.tsx';
+import { AssetsProvider } from '../lib/assets.tsx';
 import { AdvPage } from './Adv.tsx';
 import { ObservePage } from './Observe.tsx';
 
@@ -122,10 +123,18 @@ export function PlayPage({ worldId, playthroughId }: { worldId: string; playthro
   }
 
   if (view.playthrough.mode === 'adv') {
-    return <AdvPage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />;
+    return (
+      <AssetsProvider worldId={worldId}>
+        <AdvPage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />
+      </AssetsProvider>
+    );
   }
   if (view.playthrough.mode === 'observer') {
-    return <ObservePage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />;
+    return (
+      <AssetsProvider worldId={worldId}>
+        <ObservePage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />
+      </AssetsProvider>
+    );
   }
 
   const protagonist = world.characters.find((c) => c.id === view.playthrough.protagonistId);

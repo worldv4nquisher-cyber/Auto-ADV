@@ -4,13 +4,15 @@ import {
   computeCost,
   type ExchangeRecord,
   type FetchLike,
+  type ImageExchangeRecord,
   OpenAICompatibleClient,
+  OpenAIImageClient,
   type ParamFix,
   type RequestOptions,
   requestOptionsFor,
   type Usage,
 } from '@auto-adv/providers';
-import { type Capabilities, type Endpoint, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
+import { type Capabilities, type Endpoint, type MediaRoute, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
 import type { ChatTarget } from '../api.ts';
 import type { CallLog } from '../call-log.ts';
 import { endpointKeyId, type SecretStore } from '../secrets.ts';
@@ -26,6 +28,15 @@ export interface ModelHandle {
   route: RoleRoute | undefined;
   client: OpenAICompatibleClient;
   /** 本次句柄最近写入的调用日志 id。 */
+  lastCallId(): string | null;
+}
+
+/** 图像职责的句柄。 */
+export interface ImageHandle {
+  endpoint: Endpoint;
+  model: string;
+  api: MediaRoute['api'];
+  client: OpenAIImageClient;
   lastCallId(): string | null;
 }
 
@@ -74,6 +85,67 @@ export class ModelGateway {
     const endpoint = s.endpoints.find((e) => e.id === route.endpointId);
     if (!endpoint) throw new Error('职责路由指向的接入点已被删除，请重新配置');
     return this.make(endpoint, route.model, role, tag, route, meter);
+  }
+
+  /** 图像职责配了没有（不会退回「默认」的文本模型）。 */
+  async imageRoute(): Promise<MediaRoute | null> {
+    const s = await this.o.settings.get();
+    const route = s.media.image;
+    return route && s.endpoints.some((e) => e.id === route.endpointId) ? route : null;
+  }
+
+  /** 按图像职责取接入点和模型；给了 route 就用它（设置页里测试还没保存的选择）。 */
+  async forImage(tag: string | null, route?: MediaRoute): Promise<ImageHandle> {
+    const s = await this.o.settings.get();
+    const r = route ?? s.media.image;
+    if (!r) throw new Error('还没有给「图像」职责指定模型，请到 设置 → 职责路由 配置');
+    const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
+    if (!endpoint) throw new Error('图像职责指向的接入点已被删除，请重新配置');
+    if (!r.model.trim()) throw new Error('没有指定图像模型');
+    const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
+    let lastCallId: string | null = null;
+    const client = new OpenAIImageClient({
+      baseURL: endpoint.baseURL,
+      apiKey,
+      headers: endpoint.headers,
+      fetch: this.o.fetch,
+      onExchange: (rec) => {
+        const id = this.logImage(rec, endpoint, r.model, tag);
+        if (id) lastCallId = id;
+      },
+    });
+    return { endpoint, model: r.model, api: r.api, client, lastCallId: () => lastCallId };
+  }
+
+  private logImage(rec: ImageExchangeRecord, endpoint: Endpoint, model: string, tag: string | null): string | null {
+    try {
+      return this.o.calls.insert({
+        ts: rec.startedAt,
+        role: 'image',
+        tag,
+        endpointId: endpoint.id,
+        endpointName: endpoint.name,
+        model,
+        kind: rec.kind,
+        status: rec.status,
+        httpStatus: rec.httpStatus,
+        url: rec.url,
+        attempt: rec.attempt,
+        latencyMs: rec.latencyMs,
+        ttftMs: null,
+        usage: null,
+        cost: null,
+        currency: endpoint.currency,
+        error: rec.error,
+        request: rec.request,
+        responseText: rec.status === 'ok' ? (rec.revisedPrompt ?? `图片 ${Math.round(rec.bytes / 1024)} KB`) : '',
+        reasoning: '',
+        toolCalls: [],
+      });
+    } catch (err) {
+      console.error('[engine] 写调用日志失败：', err);
+      return null;
+    }
   }
 
   async forTarget(target: ChatTarget, tag: string | null = null): Promise<ModelHandle> {

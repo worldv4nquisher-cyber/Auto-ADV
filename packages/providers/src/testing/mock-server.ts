@@ -1,8 +1,10 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { type MockMessage, type MockRequestInfo, schemaNameOf, storyReply } from './mock-story.ts';
+import { mockImage } from './png.ts';
 
 export type { MockRequestInfo } from './mock-story.ts';
+export { encodePng, mockImage } from './png.ts';
 
 /**
  * 一个本地的模拟 OpenAI 兼容服务，用于测试和没有 API Key 时的开发调试。
@@ -34,6 +36,16 @@ export interface MockServerOptions {
   reply?: (lastUserMessage: string, info: MockRequestInfo) => string | undefined;
   /** 内置的故事模型（认出创世和游玩请求并返回固定内容），默认开启。 */
   story?: boolean;
+  /** 图像接口（/v1/images/generations）每张图的延迟，默认 0。 */
+  imageDelayMs?: number;
+  /** 前 N 次图像请求返回 500。 */
+  imageFailFirst?: number;
+  /** 提示词里含有这段文字的图像请求总是返回 400（测试失败的槽）。 */
+  imageRejectIf?: string;
+  /** 图像接口返回 url 而不是 b64_json（模拟 MiniMax 的 OSS 链接）。 */
+  imageUrl?: boolean;
+  /** 模拟不认识 response_format 的服务（例如 gpt-image-1）：带了就返回 400。 */
+  imageNoResponseFormat?: boolean;
   /** 绑定的主机，默认 127.0.0.1。 */
   host?: string;
   port?: number;
@@ -44,6 +56,8 @@ export interface MockServer {
   baseURL: string;
   /** 收到的所有对话请求体。 */
   requests: Record<string, unknown>[];
+  /** 收到的所有图像请求体。 */
+  imageRequests: Record<string, unknown>[];
   close(): Promise<void>;
 }
 
@@ -81,7 +95,10 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
     ...options,
   };
   const requests: Record<string, unknown>[] = [];
+  const imageRequests: Record<string, unknown>[] = [];
+  const files = new Map<string, Buffer>();
   let chatCount = 0;
+  let imageCount = 0;
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -89,6 +106,43 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         return sendJson(res, 401, { error: { message: 'Incorrect API key provided', type: 'invalid_request_error' } });
       }
       const path = (req.url ?? '').replace(/\?.*$/, '');
+      if (req.method === 'GET' && path.startsWith('/files/')) {
+        const file = files.get(path.slice('/files/'.length));
+        if (!file) return sendJson(res, 404, { error: { message: 'expired' } });
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        return res.end(file);
+      }
+      if (req.method === 'POST' && path === '/v1/images/generations') {
+        let raw = '';
+        for await (const part of req) raw += part;
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        imageRequests.push(body);
+        imageCount++;
+        if (opts.imageDelayMs) await sleep(opts.imageDelayMs);
+        if (opts.imageFailFirst && imageCount <= opts.imageFailFirst) {
+          return sendJson(res, 500, { error: { message: 'image service busy' } });
+        }
+        if (opts.imageNoResponseFormat && body.response_format !== undefined) {
+          return sendJson(res, 400, { error: { message: "Unknown parameter: 'response_format'." } });
+        }
+        const prompt = String(body.prompt ?? '');
+        if (opts.imageRejectIf && prompt.includes(opts.imageRejectIf)) {
+          return sendJson(res, 400, { error: { message: 'prompt rejected by safety system' } });
+        }
+        // 按请求的比例出一张小图，测试不用真的传几兆的图片
+        const [w, h] = String(body.size ?? '1024x1024').split('x').map(Number) as [number, number];
+        const scale = 96 / Math.max(w || 1024, h || 1024);
+        const png = mockImage(prompt, Math.max(8, Math.round((w || 1024) * scale)), Math.max(8, Math.round((h || 1024) * scale)));
+        const item: Record<string, unknown> = { revised_prompt: `（改写）${prompt.slice(0, 40)}` };
+        if (opts.imageUrl) {
+          const id = `img${imageCount}.png`;
+          files.set(id, png);
+          item.url = `http://${opts.host ?? '127.0.0.1'}:${(server.address() as AddressInfo).port}/files/${id}`;
+        } else {
+          item.b64_json = png.toString('base64');
+        }
+        return sendJson(res, 200, { created: Math.floor(Date.now() / 1000), data: [item] });
+      }
       if (req.method === 'GET' && path === '/v1/models') {
         return sendJson(res, 200, { object: 'list', data: opts.models.map((id) => ({ id, object: 'model' })) });
       }
@@ -217,6 +271,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
   return {
     baseURL: `http://${opts.host ?? '127.0.0.1'}:${port}/v1`,
     requests,
+    imageRequests,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

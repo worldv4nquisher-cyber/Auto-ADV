@@ -32,6 +32,7 @@ export function formatTime(ts: number): string {
 const EXTRA_ROLE_NAMES: Record<string, string> = {
   playground: '调试台',
   probe: '能力探测',
+  image: '图像',
 };
 
 const TAG_NAMES: Record<string, string> = {
@@ -52,6 +53,8 @@ const TAG_NAMES: Record<string, string> = {
   'adv.director': 'ADV · 导演',
   'adv.writer': 'ADV · 演出',
   'adv.detour': 'ADV · 新的一幕',
+  'assets.background': '素材 · 背景',
+  'assets.test': '素材 · 测试',
 };
 
 /** 调用用途的显示名。 */

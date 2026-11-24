@@ -5,10 +5,10 @@ import path from 'node:path';
  * 原子写文件：先写临时文件再改名，避免写到一半崩溃留下坏文件。
  * Windows 上改名偶尔会被杀毒软件等占用导致 EPERM，稍等重试几次。
  */
-export async function writeFileAtomic(file: string, data: string): Promise<void> {
+export async function writeFileAtomic(file: string, data: string | Uint8Array): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, data, 'utf8');
+  await fs.writeFile(tmp, data, typeof data === 'string' ? 'utf8' : undefined);
   for (let i = 0; ; i++) {
     try {
       await fs.rename(tmp, file);

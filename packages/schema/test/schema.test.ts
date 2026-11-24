@@ -21,7 +21,12 @@ describe('原生格式 v0', () => {
   });
 
   it('应用设置可以从空对象解析', () => {
-    expect(AppSettings.parse({})).toEqual({ formatVersion: 0, endpoints: [], roles: {} });
+    const s = AppSettings.parse({});
+    expect(s).toMatchObject({ formatVersion: 0, endpoints: [], roles: {}, media: {} });
+    // 素材设置的默认值（18.11）
+    expect(s.assets).toMatchObject({ imageCap: 60, capAction: 'ask', imageConcurrency: 2, retries: 3 });
+    expect(s.assets.enabled).toEqual({ background: true, sprite: true, expression: true, cg: true, bgm: true, voice: true });
+    expect(s.assets.sizes).toEqual({ background: '1536x1024', sprite: '1024x1536', cg: '1536x1024' });
   });
 });
 

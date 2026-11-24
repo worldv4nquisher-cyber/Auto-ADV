@@ -165,7 +165,7 @@ function serverMessage(bodyText: string): string {
   return bodyText.slice(0, 300);
 }
 
-function describeHttpError(status: number, bodyText: string): string {
+export function describeHttpError(status: number, bodyText: string): string {
   const detail = serverMessage(bodyText);
   const hint =
     status === 401
@@ -182,11 +182,11 @@ function describeHttpError(status: number, bodyText: string): string {
   return `${hint}（HTTP ${status}）${detail ? `：${detail}` : ''}`;
 }
 
-function isRetryableStatus(status: number): boolean {
+export function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
-function parseRetryAfter(res: Response): number | null {
+export function parseRetryAfter(res: Response): number | null {
   const v = res.headers.get('retry-after');
   if (!v) return null;
   const secs = Number(v);

@@ -4,7 +4,14 @@
 import type { ChatMessage, ProbeStep, StreamEvent, ToolCall, Usage } from '@auto-adv/providers';
 import type {
   AppSettings,
+  AssetKind,
+  AssetSettings,
+  AssetSettingsPatch,
+  AssetToggle,
   Capabilities,
+  ImageTemplates,
+  MediaRoleId,
+  MediaRoute,
   Character,
   Endpoint,
   GenesisPresetId,
@@ -45,6 +52,12 @@ export interface EndpointView extends Endpoint {
 export interface SettingsView {
   endpoints: EndpointView[];
   roles: AppSettings['roles'];
+  /** 图像（以后还有语音、音乐）职责。 */
+  media: AppSettings['media'];
+  /** 素材管线的全局设置。 */
+  assets: AssetSettings;
+  /** 内置的默认值：模板、画风、模板里的占位符（设置页显示、恢复默认用）。 */
+  assetDefaults: AssetDefaults;
   /** 密钥是否用系统加密保存。false 表示当前系统不支持，只能明文保存。 */
   secretsEncrypted: boolean;
   dataDir: string;
@@ -63,6 +76,81 @@ export interface SaveEndpointParams {
   /** undefined：保持不变；null：删除；字符串：设置为新值。 */
   apiKey?: string | null;
 }
+
+export interface AssetDefaults {
+  templates: ImageTemplates;
+  artStyle: string;
+  placeholders: { key: string; hint: string }[];
+  settings: AssetSettings;
+}
+
+// ───────────── 素材（M4，18.2～18.3） ─────────────
+
+/** 一个素材槽现在的样子。 */
+export interface AssetSlotView {
+  /** bg/<地点 id> 等，由用途决定，重画不变。 */
+  id: string;
+  kind: AssetKind;
+  toggle: AssetToggle;
+  title: string;
+  subtitle: string;
+  /**
+   * pending 待生成；running 生成中；done 完成；stale 过期（参数或上游改了）；failed 失败（重试过了）；
+   * disabled 这类素材在设置里关掉了，也没有文件。
+   */
+  status: 'pending' | 'running' | 'done' | 'stale' | 'failed' | 'disabled';
+  /** 过期的原因：params 这个槽自己的参数改了（点了才重画）；deps 上游重画了（自动跟上）。 */
+  staleBy: 'params' | 'deps' | null;
+  locked: boolean;
+  /** 锁定的槽，参数或上游改过。 */
+  upstreamChanged: boolean;
+  /** 排着队等重画。 */
+  requested: boolean;
+  /** 现在用的文件（相对世界目录）；没有就用占位图。 */
+  file: string | null;
+  source: 'generated' | 'uploaded' | 'builtin' | null;
+  /** 生成时用的提示词（你改过就是你改的）。 */
+  prompt: string;
+  /** 按模板拼出来的提示词。 */
+  defaultPrompt: string;
+  promptEdited: boolean;
+  size: string;
+  error: string | null;
+  model: string | null;
+  revisedPrompt: string | null;
+  /** 之前用过的文件，可以换回去。 */
+  history: { file: string; at: string }[];
+  updatedAt: string | null;
+}
+
+export interface AssetsView {
+  worldId: string;
+  slots: AssetSlotView[];
+  /** 世界里已经不需要的槽（比如删掉的地点）：文件还留着，可以清理。 */
+  orphans: { id: string; file: string | null }[];
+  counts: { total: number; done: number; running: number; pending: number; stale: number; failed: number };
+  state: {
+    /** 没配图像职责：只能用占位图。 */
+    needsModel: boolean;
+    paused: boolean;
+    /** 正在画或者还有排着队的。 */
+    working: boolean;
+    /** 图片张数上限（算上重抽）。reached：到了上限、还有要画的。 */
+    cap: { used: number; limit: number; reached: boolean; action: AssetSettings['capAction'] };
+  };
+  settings: { world: AssetSettingsPatch; effective: AssetSettings; global: AssetSettings };
+}
+
+export type AssetsChunk = { type: 'view'; view: AssetsView };
+
+/**
+ * 素材槽上的操作：regenerate 重抽（换个种子画一张新的）；redraw 按现在的参数重画（过期的槽）；retry 失败后重试；
+ * lock / unlock 锁定（不会被自动覆盖）；use 换回之前用过的一张（file）。
+ */
+export type AssetAction = 'regenerate' | 'redraw' | 'retry' | 'lock' | 'unlock' | 'use';
+
+/** 整个世界的素材：pause / resume 暂停、继续；raiseCap 到了上限之后再放宽 20 张；redrawStale 参数改过的过期槽全部重画；cleanOrphans 清理不再需要的槽。 */
+export type AssetsControl = 'pause' | 'resume' | 'raiseCap' | 'redrawStale' | 'cleanOrphans';
 
 export interface FetchModelsParams {
   /** 已保存的接入点；和下面的字段同时给时，下面的字段优先（用于编辑中尚未保存的表单）。 */
@@ -543,6 +631,12 @@ export type EngineContract = {
   fetchModels: Unary<FetchModelsParams, string[]>;
   probe: Streaming<{ endpointId: string; model: string }, ProbeChunk, Capabilities>;
   setRole: Unary<{ role: RoleId; route: RoleRoute | null }, void>;
+  /** 图像职责（null 清除）。 */
+  setMediaRole: Unary<{ role: MediaRoleId; route: MediaRoute | null }, void>;
+  /** 保存素材管线的全局设置。 */
+  saveAssetSettings: Unary<{ settings: AssetSettings }, void>;
+  /** 用图像职责（或给的 route）画一张小图试试。会花一张图的额度。 */
+  testImage: Unary<{ route?: MediaRoute }, { dataUrl: string; revisedPrompt: string | null; latencyMs: number }>;
   chat: Streaming<PlaygroundChatParams, StreamEvent, PlaygroundResult>;
   listCalls: Unary<{ limit?: number; offset?: number }, { items: CallSummary[]; total: number }>;
   getCall: Unary<{ id: string }, CallDetail | null>;
@@ -557,6 +651,19 @@ export type EngineContract = {
   createWorld: Streaming<CreateWorldParams, GenesisChunk, WorldSummary>;
   /** 续跑没完成的步骤；给了 from 则从这一步起（含下游）全部重新生成。 */
   runGenesis: Streaming<{ worldId: string; from?: GenesisStepId }, GenesisChunk, WorldSummary>;
+
+  /** 素材（M4）：世界的素材槽和生成进度。 */
+  assetsView: Unary<{ worldId: string }, AssetsView>;
+  /** 订阅素材的变化；取消订阅即结束。 */
+  assetsWatch: Streaming<{ worldId: string }, AssetsChunk, void>;
+  assetAction: Unary<{ worldId: string; slotId: string; action: AssetAction; file?: string }, AssetsView>;
+  /** 改一个槽的提示词（null 恢复模板拼出来的）；redraw 改完马上重画。 */
+  assetSetPrompt: Unary<{ worldId: string; slotId: string; prompt: string | null; redraw?: boolean }, AssetsView>;
+  /** 换成自己的图（本机文件的完整路径）：复制进世界，并锁定。 */
+  assetUpload: Unary<{ worldId: string; slotId: string; path: string }, AssetsView>;
+  assetsControl: Unary<{ worldId: string; action: AssetsControl }, AssetsView>;
+  /** 这个世界的素材设置（只写和全局不一样的项）。 */
+  saveWorldAssetSettings: Unary<{ worldId: string; patch: AssetSettingsPatch }, AssetsView>;
 
   listPlaythroughs: Unary<{ worldId: string }, PlaythroughInfo[]>;
   /** 跨周目的收集：结局、CG 画廊、走过的幕。世界没有剧情图时为 null。 */

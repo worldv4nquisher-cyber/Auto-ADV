@@ -5,7 +5,9 @@
  */
 import type { StageStep, StageText, StageView, Timeline } from '@auto-adv/engine/stage';
 import { type ReactNode, type RefObject, useEffect, useRef, useState } from 'react';
-import { PlaceholderBg, PlaceholderCg, PlaceholderSprite } from './placeholder.tsx';
+import { BgImage, useAssetsContext } from '../lib/assets.tsx';
+import { useRouter } from '../lib/router.tsx';
+import { PlaceholderCg, PlaceholderSprite } from './placeholder.tsx';
 import { Button, cx } from './ui.tsx';
 
 export const OUTCOME = { crit: '大成功', success: '成功', narrow: '险胜', fail: '失败' } as const;
@@ -92,7 +94,7 @@ export function StageLayers({
     <>
       {stage.bg ? (
         <div key={stage.bg.id} className={cx('absolute inset-0', stage.bg.transition !== 'none' && 'stage-fade')} data-testid={`${p}-bg`} data-bg={stage.bg.id}>
-          <PlaceholderBg id={stage.bg.id} label={false} />
+          <BgImage id={stage.bg.id} testId={`${p}-bg-image`} />
         </div>
       ) : (
         <div className="absolute inset-0 bg-[#07080c]" />
@@ -127,6 +129,32 @@ export function StageLayers({
 }
 
 /** 音效、语音、视频、特效的提示（素材还没有）。 */
+/** 舞台顶部的素材进度（18.3）："素材 12 / 30"，点开是世界页的素材标签。画完了就不显示。 */
+export function AssetProgress({ p }: { p: string }) {
+  const ctx = useAssetsContext();
+  const { navigate } = useRouter();
+  const v = ctx?.view;
+  if (!ctx || !v || v.counts.total === 0) return null;
+  const { done, total, failed } = v.counts;
+  if (done >= total && !v.state.working) return null;
+  const note = v.state.needsModel ? '没配图像模型' : v.state.cap.reached ? '到了图片上限' : v.state.paused ? '已暂停' : failed ? `${failed} 张失败` : '';
+  return (
+    <button
+      type="button"
+      data-testid={`${p}-assets`}
+      className="pointer-events-auto rounded bg-black/40 px-[0.7em] py-[0.25em] text-white/70 hover:bg-black/60 hover:text-white"
+      title="打开素材页"
+      onClick={(e) => {
+        e.stopPropagation();
+        navigate({ page: 'world', worldId: ctx.worldId, tab: 'assets' });
+      }}
+    >
+      素材 {done} / {total}
+      {note && <span className="ml-[0.5em] text-white/50">{note}</span>}
+    </button>
+  );
+}
+
 export function CueTags({ step, stepKey }: { step: StageStep | undefined; stepKey: string }) {
   return (
     <>

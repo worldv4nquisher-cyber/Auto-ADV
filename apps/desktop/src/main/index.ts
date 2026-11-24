@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { HostContract } from '@auto-adv/engine/api';
 import { fromNodePort, serveRpc } from '@auto-adv/engine/rpc';
 import {
@@ -8,11 +9,35 @@ import {
   dialog,
   ipcMain,
   MessageChannelMain,
+  net,
+  protocol,
   safeStorage,
   shell,
   type UtilityProcess,
   utilityProcess,
 } from 'electron';
+
+/**
+ * 世界里的素材文件（背景、立绘……）通过 adv-asset://world/<世界 id>/assets/... 给界面读。
+ * 只能读世界目录下 assets/ 里的文件。要在 app ready 之前注册。
+ */
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'adv-asset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+]);
+
+function serveAssets(): void {
+  protocol.handle('adv-asset', (req) => {
+    const url = new URL(req.url);
+    const [worldId = '', ...rest] = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    if (url.host !== 'world' || !/^[a-z0-9_]{1,64}$/.test(worldId) || rest[0] !== 'assets') {
+      return new Response('not found', { status: 404 });
+    }
+    const root = path.join(dataDir(), 'worlds', worldId, 'assets');
+    const file = path.resolve(root, ...rest.slice(1));
+    if (!file.startsWith(root + path.sep)) return new Response('not found', { status: 404 });
+    return net.fetch(pathToFileURL(file).toString());
+  });
+}
 
 let engine: UtilityProcess | null = null;
 let quitting = false;
@@ -84,6 +109,18 @@ ipcMain.handle('dialog:pickFolder', async (event, title: unknown) => {
   return r.canceled ? null : (r.filePaths[0] ?? null);
 });
 
+/** 选一张图片（换成自己的素材用）。返回 null 表示取消。 */
+ipcMain.handle('dialog:pickImage', async (event, title: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const opts: Electron.OpenDialogOptions = {
+    title: typeof title === 'string' ? title : '选择图片',
+    properties: ['openFile'],
+    filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+  };
+  const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  return r.canceled ? null : (r.filePaths[0] ?? null);
+});
+
 /** 界面请求连接引擎：建一条新的 MessageChannel，两端分别交给引擎和界面，之后它们直接通信。 */
 ipcMain.on('engine:connect', (event) => {
   if (!engine) return;
@@ -135,6 +172,7 @@ if (!app.requestSingleInstanceLock()) {
   app.setAppUserModelId('com.autoadv.app');
 
   void app.whenReady().then(() => {
+    serveAssets();
     engine = startEngine();
     createWindow();
     app.on('activate', () => {

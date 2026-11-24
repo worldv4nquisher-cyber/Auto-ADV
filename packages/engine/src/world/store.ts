@@ -1,7 +1,10 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
+  AssetIndex,
+  AssetSettingsPatch,
   Character,
+  FORMAT_VERSION,
   Location,
   LoreEntry,
   migrate,
@@ -272,6 +275,36 @@ export class WorldStore {
       const file = fileName ? path.join(dir, item.id, fileName) : path.join(dir, `${item.id}.json`);
       await writeFileAtomic(file, json(schema.parse(item)));
     }
+  }
+
+  // ───────────── 素材（18.2） ─────────────
+
+  /** 素材文件的绝对路径。rel 是相对世界目录的路径，只能在 assets/ 下面。 */
+  assetPath(id: string, rel: string): string {
+    const root = path.join(this.dir(id), 'assets');
+    const file = path.resolve(this.dir(id), rel);
+    if (file !== root && !file.startsWith(root + path.sep)) throw new Error('素材路径不合法');
+    return file;
+  }
+
+  async readAssetIndex(id: string): Promise<AssetIndex> {
+    return (await this.read(this.file(id, 'assets', 'index.json'), AssetIndex)) ?? AssetIndex.parse({});
+  }
+
+  writeAssetIndex(id: string, index: AssetIndex) {
+    return writeFileAtomic(this.file(id, 'assets', 'index.json'), json(AssetIndex.parse(index)));
+  }
+
+  /** 这个世界的素材设置（只写和全局不一样的项）。 */
+  async readAssetSettings(id: string): Promise<AssetSettingsPatch> {
+    const raw = await readJsonFile(this.file(id, 'assets', 'settings.json'));
+    if (raw === undefined) return {};
+    const { formatVersion: _v, ...rest } = migrate(raw);
+    return AssetSettingsPatch.parse(rest);
+  }
+
+  writeAssetSettings(id: string, patch: AssetSettingsPatch) {
+    return writeFileAtomic(this.file(id, 'assets', 'settings.json'), json({ formatVersion: FORMAT_VERSION, ...AssetSettingsPatch.parse(patch) }));
   }
 
   writeCharacters(id: string, items: Character[]) {

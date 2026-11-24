@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AssetSettings, MediaRoute } from './assets.ts';
 
 /** 某个接入点上某个模型的价格，单位：每百万 token。 */
 export const ModelPricing = z.object({
@@ -77,5 +78,9 @@ export const AppSettings = z.object({
   formatVersion: z.number().int().default(0),
   endpoints: z.array(Endpoint).default([]),
   roles: z.partialRecord(RoleId, RoleRoute).default({}),
+  /** 图像（以后还有语音、音乐）职责。和文本职责分开：没配就不生成，不会退回「默认」。 */
+  media: z.object({ image: MediaRoute.optional() }).prefault({}),
+  /** 素材管线的全局设置（18.11）。 */
+  assets: AssetSettings.prefault({}),
 });
 export type AppSettings = z.infer<typeof AppSettings>;

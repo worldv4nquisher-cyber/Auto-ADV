@@ -10,8 +10,10 @@ import type { DriftChoice, PlayChunk, PlayView, SaveInfo, WorldDetail } from '@a
 import { foldPlot } from '@auto-adv/engine/progress';
 import { buildTimeline, findStep, type StageStep, type StageView, type Timeline } from '@auto-adv/engine/stage';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { PlaceholderBg, PlaceholderCg } from '../components/placeholder.tsx';
+import { PlaceholderCg } from '../components/placeholder.tsx';
+import { BgImage } from '../lib/assets.tsx';
 import {
+  AssetProgress,
   Backlog,
   CueTags,
   Overlay,
@@ -453,6 +455,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                   {sceneNow.title}
                 </span>
               )}
+              <AssetProgress p="adv" />
               {adv?.drift.paused && (
                 <span className="pointer-events-auto flex items-center gap-[0.6em] rounded bg-warn/20 px-[0.7em] py-[0.25em] text-warn" data-testid="adv-paused">
                   剧情图已暂停，按你的行动自由推进
@@ -819,7 +822,7 @@ function Saves({
         {saves.map((s) => (
           <div key={s.id} className="flex gap-3 rounded-xl border border-line bg-panel p-3" data-testid="adv-save-slot">
             <div className="relative aspect-video w-36 shrink-0 overflow-hidden rounded-md bg-black" style={{ containerType: 'inline-size' }}>
-              {s.thumb?.bg && <PlaceholderBg id={s.thumb.bg} label={false} />}
+              {s.thumb?.bg && <BgImage id={s.thumb.bg} />}
               {s.thumb?.cg && <PlaceholderCg id={s.thumb.cg} />}
               {s.thumb && !s.thumb.cg && s.thumb.chars.length > 0 && (
                 <div className="absolute inset-x-0 bottom-1 flex justify-center gap-1">

@@ -6,3 +6,4 @@ export * from './migrate.ts';
 export * from './genesis.ts';
 export * from './play.ts';
 export * from './plot.ts';
+export * from './assets.ts';
