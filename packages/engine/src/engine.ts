@@ -6,8 +6,18 @@ import {
   probeCapabilities,
   type StreamEvent,
 } from '@auto-adv/providers';
-import { type AppSettings, type Capabilities, type Endpoint, type GenesisStepId, RoleId } from '@auto-adv/schema';
+import {
+  type AppSettings,
+  AssetSettings,
+  type Capabilities,
+  type Endpoint,
+  type GenesisStepId,
+  MediaRoleId,
+  type MediaRoute,
+  RoleId,
+} from '@auto-adv/schema';
 import type {
+  AssetsChunk,
   CreateWorldParams,
   EndpointView,
   GenesisChunk,
@@ -22,6 +32,8 @@ import type {
   SaveEndpointParams,
   SettingsView,
 } from './api.ts';
+import { AssetService } from './assets/service.ts';
+import { BUILTIN_TEMPLATES, DEFAULT_ART_STYLE, TEMPLATE_PLACEHOLDERS } from './assets/templates.ts';
 import { CallLog } from './call-log.ts';
 import { GenesisRunner } from './genesis/pipeline.ts';
 import { ModelGateway } from './llm/gateway.ts';
@@ -45,6 +57,8 @@ export interface EngineOptions {
   callLogFile?: string;
   /** 模型请求超时，默认 120 秒。 */
   timeoutMs?: number;
+  /** 素材生成失败后重试的基础等待时间，默认 2 秒（测试里调小）。 */
+  assetRetryBaseMs?: number;
 }
 
 /** 核心引擎。M0 提供：模型接入点管理、职责路由、能力探测、调试对话、调用日志。 */
@@ -59,6 +73,7 @@ export class Engine {
   readonly worlds: WorldStore;
   readonly genesis: GenesisRunner;
   readonly play: PlayService;
+  readonly assets: AssetService;
 
   constructor(opts: EngineOptions) {
     this.dataDir = opts.dataDir;
@@ -77,10 +92,17 @@ export class Engine {
     this.worlds = new WorldStore(path.join(opts.dataDir, 'worlds'));
     this.genesis = new GenesisRunner(this.worlds, this.gateway);
     this.play = new PlayService(this.worlds, this.gateway);
+    this.assets = new AssetService(this.worlds, this.settings, this.gateway, { retryBaseMs: opts.assetRetryBaseMs });
+    this.play.onView = (worldId, v) => {
+      void this.assets
+        .focus(worldId, { locationId: v.scene.locationId, characterIds: v.scene.presentCharacterIds, sceneId: v.plot.scene })
+        .catch(() => {});
+    };
   }
 
   close(): void {
     this.genesis.abortAll();
+    this.assets.dispose();
     this.play.dispose();
     this.calls.close();
   }
@@ -90,7 +112,20 @@ export class Engine {
   async getSettingsView(): Promise<SettingsView> {
     const s = await this.settings.get();
     const endpoints = await Promise.all(s.endpoints.map((e) => this.toView(e)));
-    return { endpoints, roles: s.roles, secretsEncrypted: await this.secrets.isEncrypted(), dataDir: this.dataDir };
+    return {
+      endpoints,
+      roles: s.roles,
+      media: s.media,
+      assets: s.assets,
+      assetDefaults: {
+        templates: BUILTIN_TEMPLATES,
+        artStyle: DEFAULT_ART_STYLE,
+        placeholders: TEMPLATE_PLACEHOLDERS,
+        settings: AssetSettings.parse({}),
+      },
+      secretsEncrypted: await this.secrets.isEncrypted(),
+      dataDir: this.dataDir,
+    };
   }
 
   private async toView(e: Endpoint): Promise<EndpointView> {
@@ -139,7 +174,8 @@ export class Engine {
       for (const [role, route] of Object.entries(s.roles)) {
         if (route && route.endpointId !== id) roles[role as RoleId] = route;
       }
-      return { ...s, endpoints: s.endpoints.filter((e) => e.id !== id), roles };
+      const media = s.media.image?.endpointId === id ? {} : s.media;
+      return { ...s, endpoints: s.endpoints.filter((e) => e.id !== id), roles, media };
     });
     await this.secrets.delete(endpointKeyId(id));
   }
@@ -157,6 +193,38 @@ export class Engine {
       else delete roles[role];
       return { ...s, roles };
     });
+  }
+
+  async setMediaRole(role: MediaRoleId, route: MediaRoute | null): Promise<void> {
+    MediaRoleId.parse(role);
+    if (route) {
+      await this.getEndpoint(route.endpointId);
+      if (!route.model.trim()) throw new Error('请填写图像模型');
+      route = { ...route, model: route.model.trim() };
+    }
+    await this.settings.update((s) => ({ ...s, media: { ...s.media, [role]: route ?? undefined } }));
+    // 配好了图像模型，已经打开的世界马上开始画
+    await this.assets.refreshAll();
+  }
+
+  async saveAssetSettings(settings: AssetSettings): Promise<void> {
+    const parsed = AssetSettings.parse(settings);
+    await this.settings.update((s) => ({ ...s, assets: parsed }));
+    await this.assets.refreshAll();
+  }
+
+  /** 画一张小图试试图像职责。 */
+  async testImage(route: MediaRoute | undefined, ctx: CallContext) {
+    const h = await this.gateway.forImage('assets.test', route);
+    const r = await h.client.generate(
+      { model: h.model, prompt: '一只坐在窗台上的橘猫，水彩插画，柔和的晨光', size: '1024x1024' },
+      ctx.signal,
+    );
+    return {
+      dataUrl: `data:${r.mime};base64,${Buffer.from(r.data).toString('base64')}`,
+      revisedPrompt: r.revisedPrompt,
+      latencyMs: r.latencyMs,
+    };
   }
 
   // ───────────── 模型调用 ─────────────
@@ -271,20 +339,43 @@ export class Engine {
   async deleteWorld(id: string): Promise<void> {
     assertWorldId(id);
     await this.genesis.stop(id);
+    await this.assets.closeWorld(id);
     await this.play.closeWorld(id);
     await this.worlds.delete(id);
   }
 
+  /** 创世每完成一步，素材清单可能多了东西（比如地点）：马上开始画，不等整个创世做完（18.10 的"五分钟"）。 */
+  private withAssets(emit: (c: GenesisChunk) => void, worldIdOf: () => string | null) {
+    return (c: GenesisChunk) => {
+      emit(c);
+      const id = c.type === 'world' ? c.worldId : worldIdOf();
+      if (id && c.type === 'step' && c.state.status === 'done') void this.assets.refresh(id).catch(() => {});
+    };
+  }
+
   createWorld(p: CreateWorldParams, ctx: CallContext): AsyncGenerator<GenesisChunk, WorldSummary, void> {
     return fromCallback(async (emit) => {
-      const m = await this.genesis.create(p, emit, ctx.signal);
+      let worldId: string | null = null;
+      const m = await this.genesis.create(
+        p,
+        this.withAssets(
+          (c) => {
+            if (c.type === 'world') worldId = c.worldId;
+            emit(c);
+          },
+          () => worldId,
+        ),
+        ctx.signal,
+      );
+      void this.assets.refresh(m.id).catch(() => {});
       return this.summarize(await this.worlds.load(m.id));
     });
   }
 
   runGenesis(worldId: string, from: GenesisStepId | undefined, ctx: CallContext) {
     return fromCallback<GenesisChunk, WorldSummary>(async (emit) => {
-      await this.genesis.run(worldId, from, emit, ctx.signal);
+      await this.genesis.run(worldId, from, this.withAssets(emit, () => worldId), ctx.signal);
+      void this.assets.refresh(worldId).catch(() => {});
       return this.summarize(await this.worlds.load(worldId));
     });
   }
@@ -299,6 +390,9 @@ export class Engine {
       fetchModels: (p) => this.fetchModels(p),
       probe: (p, ctx) => this.probe(p.endpointId, p.model, ctx),
       setRole: (p) => this.setRole(p.role, p.route),
+      setMediaRole: (p) => this.setMediaRole(p.role, p.route),
+      saveAssetSettings: (p) => this.saveAssetSettings(p.settings),
+      testImage: (p, ctx) => this.testImage(p.route, ctx),
       chat: (p, ctx) => this.chat(p, ctx),
       listCalls: (p) => this.calls.list(Math.min(p.limit ?? 100, 500), p.offset ?? 0),
       getCall: (p) => this.calls.get(p.id),
@@ -311,6 +405,14 @@ export class Engine {
       importWorld: (p) => this.importWorld(p.path),
       createWorld: (p, ctx) => this.createWorld(p, ctx),
       runGenesis: (p, ctx) => this.runGenesis(p.worldId, p.from, ctx),
+
+      assetsView: (p) => this.assets.view(p.worldId),
+      assetsWatch: (p, ctx) => fromCallback<AssetsChunk, void>((emit) => this.assets.watch(p.worldId, emit, ctx.signal)),
+      assetAction: (p) => this.assets.act(p.worldId, p.slotId, p.action, p.file),
+      assetSetPrompt: (p) => this.assets.setPrompt(p.worldId, p.slotId, p.prompt, p.redraw),
+      assetUpload: (p) => this.assets.upload(p.worldId, p.slotId, p.path),
+      assetsControl: (p) => this.assets.control(p.worldId, p.action),
+      saveWorldAssetSettings: (p) => this.assets.saveWorldSettings(p.worldId, p.patch),
 
       listPlaythroughs: (p) => this.play.list(p.worldId),
       worldProgress: (p) => this.play.progress(p.worldId),

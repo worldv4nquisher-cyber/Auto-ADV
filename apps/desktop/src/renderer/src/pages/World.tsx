@@ -21,9 +21,11 @@ import { engine, errorMessage } from '../lib/engine.ts';
 import { formatTime, formatTokens } from '../lib/format.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
+import { AssetsProvider, BgImage, useAssetsContext } from '../lib/assets.tsx';
+import { AssetsTab } from './Assets.tsx';
 import { CollectionView } from './Collection.tsx';
 
-type Tab = 'overview' | 'characters' | 'locations' | 'plot' | 'collection' | 'lore' | 'opening';
+type Tab = 'overview' | 'characters' | 'locations' | 'plot' | 'collection' | 'assets' | 'lore' | 'opening';
 
 export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab?: Tab }) {
   const { navigate } = useRouter();
@@ -108,6 +110,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
   };
 
   return (
+    <AssetsProvider worldId={worldId}>
     <div className="flex h-full flex-col">
       <PageHeader
         title={world.manifest.title}
@@ -138,6 +141,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
                 { value: 'locations', label: `地点 ${world.locations.length || ''}` },
                 { value: 'plot', label: '剧情图' },
                 ...(world.graph ? [{ value: 'collection' as const, label: '收集' }] : []),
+                { value: 'assets', label: <AssetsTabLabel /> },
                 { value: 'lore', label: `设定集 ${world.lore.length || ''}` },
                 { value: 'opening', label: '开场' },
               ]}
@@ -155,7 +159,11 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
               <div className="grid grid-cols-2 gap-3">
                 {world.locations.length === 0 && <Empty title="地点还没有生成" />}
                 {world.locations.map((l) => (
-                  <Card key={l.id} className="p-4">
+                  <Card key={l.id} className="overflow-hidden">
+                    <div className="relative aspect-video w-full overflow-hidden bg-black" style={{ containerType: 'inline-size' }}>
+                      <BgImage id={l.id} />
+                    </div>
+                    <div className="p-4">
                     <div className="font-medium">{l.name}</div>
                     <p className="mt-1.5 text-sm leading-relaxed text-muted">{l.description}</p>
                     {l.connections.length > 0 && (
@@ -164,6 +172,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
                         {l.connections.map((id) => world.locations.find((x) => x.id === id)?.name ?? id).join('、')}
                       </div>
                     )}
+                    </div>
                   </Card>
                 ))}
               </div>
@@ -175,6 +184,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
                 <Empty title="剧情图还没有生成">观察模式和剧情 ADV 都按剧情图一幕一幕推进故事。</Empty>
               ))}
             {tab === 'collection' && <CollectionView worldId={worldId} />}
+            {tab === 'assets' && <AssetsTab worldId={worldId} />}
             {tab === 'lore' && (
               <div className="grid gap-2">
                 {world.lore.length === 0 && <Empty title="设定集还没有生成" />}
@@ -344,6 +354,18 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
         />
       )}
     </div>
+    </AssetsProvider>
+  );
+}
+
+/** 标签上的素材进度："素材 3 / 6"。 */
+function AssetsTabLabel() {
+  const v = useAssetsContext()?.view;
+  if (!v || v.counts.total === 0) return <>素材</>;
+  return (
+    <>
+      素材 {v.counts.done}/{v.counts.total}
+    </>
   );
 }
 

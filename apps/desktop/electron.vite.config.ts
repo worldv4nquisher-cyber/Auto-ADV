@@ -10,8 +10,9 @@ function cspPlugin(): Plugin {
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob:",
-    "media-src 'self' data: blob:",
+    // adv-asset: 是世界里的素材文件（主进程的协议，只能读世界目录下的 assets/）
+    "img-src 'self' data: blob: adv-asset:",
+    "media-src 'self' data: blob: adv-asset:",
     "font-src 'self' data:",
     "connect-src 'self'",
   ].join('; ');

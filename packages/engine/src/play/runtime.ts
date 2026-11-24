@@ -115,6 +115,8 @@ export class PlayService {
   private readonly memoryJobs = new Map<string, Promise<void>>();
   private disposed = false;
   readonly observer: ObserverService;
+  /** 每次算出周目的画面后调用（素材管线据此排"马上要用"的优先级）。 */
+  onView: ((worldId: string, view: PlayView) => void) | null = null;
 
   constructor(store: WorldStore, gateway: ModelGateway) {
     this.store = store;
@@ -381,7 +383,7 @@ export class PlayService {
       pt.id,
       events.map((e) => e.id),
     );
-    return {
+    const view: PlayView = {
       playthrough: this.info(ref.worldId, db, pt),
       path,
       scene: sceneAt(events),
@@ -391,6 +393,12 @@ export class PlayService {
       observer: pt.mode === 'observer' ? this.status(ref) : null,
       adv: pt.mode === 'adv' ? advView(world, events, db.listUnlocks(), { ai: await this.gateway.configured('director') }) : null,
     };
+    try {
+      this.onView?.(ref.worldId, view);
+    } catch (err) {
+      console.error('[engine] onView 出错：', err);
+    }
+    return view;
   }
 
   private pathEvent(db: PlayDb, pt: string, e: PlayEvent): PathEvent {

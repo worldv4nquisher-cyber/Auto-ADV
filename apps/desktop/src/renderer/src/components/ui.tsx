@@ -157,7 +157,7 @@ export function Tabs<T extends string>({
 }: {
   value: T;
   onChange: (v: T) => void;
-  items: { value: T; label: string }[];
+  items: { value: T; label: ReactNode }[];
 }) {
   return (
     <div className="flex gap-1 rounded-lg bg-panel-2 p-1">
@@ -165,6 +165,7 @@ export function Tabs<T extends string>({
         <button
           key={it.value}
           type="button"
+          data-testid={`tab-${it.value}`}
           onClick={() => onChange(it.value)}
           className={cx(
             'h-7 rounded-md px-3 text-sm transition-colors',

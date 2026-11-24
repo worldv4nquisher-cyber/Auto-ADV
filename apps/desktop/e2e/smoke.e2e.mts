@@ -5,17 +5,19 @@
  * → 观察模式：在 VN 舞台上自动演出（M3 第 4 步）→ 切到文本看法 → 导演指令 → 暂停 → 接管角色 → 交还（M2）→ 回想里有导演指令
  * → 剧情 ADV（生成的世界，每一幕由 AI 演出）：AI 给的选项 → 跑偏 → 自由输入 → 重抽一拍 → 岔路 → 带检定的选项（M3 第 3 步）
  * → 剧情 ADV：导入手写的示例世界 → VN 舞台上快进、自动、点击推进 → 选项和检定 → 存档 → 好结局
- *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）。
+ *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）
+ * → 素材：配好图像职责 → 素材页里每个地点和剧本里的背景画好 → 重抽 → 改世界的背景尺寸后全部重画 → 换成自己的图
+ *   → 剧情 ADV 舞台上换成真背景（M4 第 1 步）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
  * 设置 E2E_APP_PATH=打包后的可执行文件 可以测试安装包里的应用（例如 release/win-unpacked/Auto-ADV.exe）。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { startMockServer } from '@auto-adv/providers/testing';
+import { encodePng, startMockServer } from '@auto-adv/providers/testing';
 import { _electron as electron, type Page } from 'playwright-core';
 
 const appDir = path.resolve(import.meta.dirname, '..');
@@ -463,6 +465,80 @@ try {
   await page.waitForSelector('[data-testid="collection-cg-view"]', { state: 'detached' });
   await shot(page, '24-collection');
   step('收集：结局 2 / 3，CG 画廊里能看已经解锁的 CG');
+
+  // ── 素材（M4 第 1 步）：没配图像模型时用占位图；配好以后每个地点画一张背景，
+  // 手写剧本里自己起名的背景（不是地点 id 的）也各画一张：3 个地点 + 5 张剧本背景
+  // 只数这个世界的请求（前面生成的世界打开过，配好图像模型后它也会开始画）
+  const libImages = () => server.imageRequests.filter((r) => /旧书库|阅览室|海堤|书中人/.test(String(r.prompt)));
+  await page.click('[data-testid="tab-assets"]');
+  await page.waitForSelector('[data-testid="assets-needs-model"]');
+  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 0 / 8');
+  await page.click('[data-nav="settings"]');
+  await page.click('button:has-text("职责路由")');
+  await page.selectOption('[data-testid="role-endpoint-image"]', endpointId);
+  await page.fill('[data-testid="role-model-image"]', 'mock-image');
+  await page.click('[data-testid="role-save-image"]');
+  await page.waitForSelector('text=已保存「图像」');
+  await page.click('[data-testid="tab-assets"]');
+  await page.waitForSelector('[data-testid="asset-settings-global"] [data-testid="asset-template-background"]');
+  await shot(page, '25-asset-settings');
+  step('设置里配好图像模型；素材的全局设置');
+
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="world-card"] >> text=旧书库的约定');
+  await page.click('[data-testid="tab-assets"]');
+  await page.waitForSelector('[data-testid="assets-progress"] >> text=素材 8 / 8', { timeout: 20_000 });
+  await page.waitForFunction(
+    () => [...document.querySelectorAll('[data-testid="asset-image"]')].filter((i) => (i as HTMLImageElement).naturalWidth > 0).length === 8,
+  );
+  assert.equal(libImages().length, 8);
+  await shot(page, '26-assets');
+  step('每个地点、剧本里的每张背景各画好一张，素材页里看得到');
+
+  // 重抽一张：旧的进"之前的图"
+  const sea = page.locator('[data-testid="asset-slot"][data-slot="bg/loc_seaside"]');
+  await sea.locator('[data-testid="asset-regenerate"]').click();
+  await sea.locator('text=之前的图').waitFor();
+  await page.waitForSelector('[data-testid="asset-slot"][data-slot="bg/loc_seaside"][data-status="done"]');
+  assert.equal(libImages().length, 9);
+  // 这个世界的设置：改背景尺寸 → 标成过期，不自动重画 → 点"全部重画"
+  await page.click('[data-testid="world-asset-settings-toggle"]');
+  await page.fill('[data-testid="asset-size-background"]', '1024x576');
+  await page.click('[data-testid="asset-settings-save"]');
+  await page.waitForSelector('[data-testid="assets-stale"]');
+  assert.equal(libImages().length, 9);
+  await page.click('[data-testid="assets-redraw-stale"]');
+  await page.waitForSelector('[data-testid="assets-stale"]', { state: 'detached' });
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="asset-slot"][data-status="done"]').length === 8);
+  assert.deepEqual(
+    libImages()
+      .slice(9)
+      .map((r) => r.size),
+    Array(8).fill('1024x576'),
+  );
+  step('重抽一张；改了这个世界的背景尺寸以后，点"全部重画"才重画');
+
+  // 换成自己的图（系统的选文件对话框换成直接返回一张图）
+  const mine = path.join(dataDir, 'mine.png');
+  await writeFile(mine, encodePng(32, 18, () => [200, 120, 40, 255]));
+  await app.evaluate(({ dialog }, file) => {
+    dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [file] })) as unknown as typeof dialog.showOpenDialog;
+  }, mine);
+  const reading = page.locator('[data-testid="asset-slot"][data-slot="bg/loc_reading"]');
+  await reading.locator('button:has-text("换成自己的图")').click();
+  await reading.locator('[data-testid="asset-unlock"]').waitFor();
+  await shot(page, '27-assets-upload');
+  step('换成自己的图，自动锁定');
+
+  // 舞台上换成真背景
+  await page.click('[data-testid="playthrough"] >> button:has-text("继续")');
+  await page.waitForSelector('[data-testid="adv-stage"]');
+  await page.waitForFunction(() => {
+    const img = document.querySelector('[data-testid="adv-bg-image"]') as HTMLImageElement | null;
+    return !!img && img.complete && img.naturalWidth > 0;
+  });
+  await shot(page, '28-adv-real-bg');
+  step('剧情 ADV 的舞台上换成了画好的背景');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

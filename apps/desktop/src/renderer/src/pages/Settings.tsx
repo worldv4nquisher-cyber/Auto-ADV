@@ -1,12 +1,13 @@
 import type { EndpointView, ProbeChunk } from '@auto-adv/engine/api';
 import { ENDPOINT_PRESETS, PROBE_STEP_LABELS, type ProbeStep } from '@auto-adv/providers';
-import { type Capabilities, ROLE_IDS, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
+import { type AssetSettings, type Capabilities, MEDIA_ROLE_LABELS, ROLE_IDS, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
 import { useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Card, cx, Empty, Field, Input, PageHeader, Select, Spinner, Tabs, useToast } from '../components/ui.tsx';
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { useSettings } from '../lib/settings.tsx';
+import { AssetSettingsForm } from './AssetSettingsForm.tsx';
 
-type Tab = 'endpoints' | 'roles' | 'about';
+type Tab = 'endpoints' | 'roles' | 'assets' | 'about';
 
 export function SettingsPage() {
   const [tab, setTab] = useState<Tab>('endpoints');
@@ -22,6 +23,7 @@ export function SettingsPage() {
             items={[
               { value: 'endpoints', label: '模型接入点' },
               { value: 'roles', label: '职责路由' },
+              { value: 'assets', label: '素材' },
               { value: 'about', label: '关于' },
             ]}
           />
@@ -30,6 +32,7 @@ export function SettingsPage() {
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-6">
         {tab === 'endpoints' && <EndpointsTab />}
         {tab === 'roles' && <RolesTab />}
+        {tab === 'assets' && <AssetsSettingsTab />}
         {tab === 'about' && <AboutTab />}
       </div>
     </div>
@@ -549,6 +552,147 @@ function RolesTab() {
       {ROLE_IDS.map((role) => (
         <RoleRow key={role} role={role} />
       ))}
+      <h3 className="pt-4 text-sm font-medium text-muted">素材</h3>
+      <ImageRoleRow />
+    </div>
+  );
+}
+
+/** 图像职责：接入点、模型（不会退回「默认」的文本模型）。可以画一张小图试试，会花一张图的额度。 */
+function ImageRoleRow() {
+  const { settings, refresh } = useSettings();
+  const toast = useToast();
+  const current = settings?.media.image;
+  const [endpointId, setEndpointId] = useState(current?.endpointId ?? '');
+  const [model, setModel] = useState(current?.model ?? '');
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [test, setTest] = useState<{ dataUrl: string; latencyMs: number; revisedPrompt: string | null } | null>(null);
+  useEffect(() => {
+    setEndpointId(current?.endpointId ?? '');
+    setModel(current?.model ?? '');
+  }, [current?.endpointId, current?.model]);
+  const endpoint = settings?.endpoints.find((e) => e.id === endpointId);
+  const dirty = endpointId !== (current?.endpointId ?? '') || model !== (current?.model ?? '');
+
+  const save = async (clear = false) => {
+    if (!clear && (!endpointId || !model.trim())) {
+      toast('err', '请选择接入点并填写图像模型');
+      return;
+    }
+    setSaving(true);
+    try {
+      await engine.call('setMediaRole', { role: 'image', route: clear ? null : { endpointId, model: model.trim(), api: 'openai' } });
+      await refresh();
+      toast('ok', clear ? '已清除「图像」' : '已保存「图像」，打开着的世界会开始画背景');
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const runTest = async () => {
+    if (!endpointId || !model.trim()) return;
+    setTesting(true);
+    setTest(null);
+    try {
+      setTest(await engine.call('testImage', { route: { endpointId, model: model.trim(), api: 'openai' } }));
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const label = MEDIA_ROLE_LABELS.image;
+  return (
+    <Card className="px-5 py-3.5" data-testid="role-image">
+      <div className="flex items-center gap-4">
+        <div className="w-44 shrink-0">
+          <div className="flex items-center gap-2 text-sm font-medium">
+            {label.name}
+            {!current && <span className="text-xs font-normal text-faint">未设置，用占位图</span>}
+          </div>
+          <div className="mt-0.5 text-xs leading-snug text-muted">{label.hint}</div>
+        </div>
+        <Select
+          value={endpointId}
+          onChange={(e) => setEndpointId(e.target.value)}
+          className="w-44"
+          data-testid="role-endpoint-image"
+        >
+          <option value="">未设置</option>
+          {settings?.endpoints.map((e) => (
+            <option key={e.id} value={e.id}>
+              {e.name}
+            </option>
+          ))}
+        </Select>
+        <Input
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          placeholder="图像模型名，例如 MiniMax-H3-Image"
+          list="image-models"
+          className="min-w-0 flex-1 font-mono text-xs"
+          disabled={!endpointId}
+          data-testid="role-model-image"
+        />
+        <datalist id="image-models">
+          {endpoint?.models.map((m) => (
+            <option key={m} value={m} />
+          ))}
+        </datalist>
+        <Select value="openai" onChange={() => {}} className="w-36" title="接口类型">
+          <option value="openai">OpenAI 风格</option>
+        </Select>
+        <div className="flex w-40 justify-end gap-1">
+          <Button size="sm" variant="ghost" disabled={!endpointId || !model.trim()} loading={testing} onClick={() => void runTest()} title="画一张小图试试，会花一张图的额度">
+            测试
+          </Button>
+          {dirty ? (
+            <Button size="sm" variant="primary" onClick={() => void save()} loading={saving} data-testid="role-save-image">
+              保存
+            </Button>
+          ) : current ? (
+            <Button size="sm" variant="ghost" onClick={() => void save(true)} loading={saving}>
+              清除
+            </Button>
+          ) : null}
+        </div>
+      </div>
+      {test && (
+        <div className="mt-3 flex items-start gap-3 border-t border-line pt-3 text-xs text-muted">
+          <img src={test.dataUrl} alt="测试图" className="size-24 rounded object-cover" />
+          <div className="space-y-1">
+            <div>画好了，用了 {formatMsShort(test.latencyMs)}。</div>
+            {test.revisedPrompt && <div className="text-faint">服务端改写后的提示词：{test.revisedPrompt}</div>}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+const formatMsShort = (ms: number) => (ms < 1000 ? `${ms} 毫秒` : `${(ms / 1000).toFixed(1)} 秒`);
+
+/** 素材管线的全局设置（18.11）。 */
+function AssetsSettingsTab() {
+  const { settings, refresh } = useSettings();
+  const toast = useToast();
+  if (!settings) return <Spinner />;
+  const save = async (v: unknown) => {
+    await engine.call('saveAssetSettings', { settings: v as AssetSettings });
+    await refresh();
+    toast('ok', '已保存素材设置');
+  };
+  return (
+    <div className="mx-auto max-w-4xl space-y-3">
+      <p className="text-sm text-muted">
+        背景、立绘、BGM、语音的默认做法。每个世界的素材页里还可以单独改（只改和这里不一样的项）。图像模型在「职责路由」里配。
+      </p>
+      <Card className="p-5" data-testid="asset-settings-global">
+        <AssetSettingsForm mode="global" global={settings.assets} value={settings.assets} onSave={save} />
+      </Card>
     </div>
   );
 }

@@ -12,6 +12,7 @@ import { foldPlot } from '@auto-adv/engine/progress';
 import { buildTimeline, type StageView } from '@auto-adv/engine/stage';
 import { type ReactNode, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AssetProgress,
   Backlog,
   CueTags,
   Overlay,
@@ -208,6 +209,7 @@ export function ObserveStage({
                 </span>
               )}
               {place && <span className="rounded bg-black/30 px-[0.7em] py-[0.15em] text-white/55">{place}</span>}
+              <AssetProgress p="observe" />
               <CueTags step={step} stepKey={stepKey} />
             </div>
           </div>

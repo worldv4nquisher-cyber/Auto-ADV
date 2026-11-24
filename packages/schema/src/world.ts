@@ -148,20 +148,6 @@ export const StyleGuide = z.object({
 });
 export type StyleGuide = z.infer<typeof StyleGuide>;
 
-/** assets/index.json 中的一项：素材登记与来源。 */
-export const AssetRecord = z.object({
-  id: z.string(),
-  kind: z.enum(['background', 'sprite', 'cg', 'bgm', 'sfx', 'voice', 'video', 'other']),
-  path: z.string(),
-  purpose: z.string().default(''),
-  prompt: z.string().optional(),
-  model: z.string().optional(),
-  seed: z.number().optional(),
-  source: z.enum(['generated', 'imported', 'builtin']).default('generated'),
-  createdAt: z.string(),
-});
-export type AssetRecord = z.infer<typeof AssetRecord>;
-
 /** story/opening.json：第一个周目的开场。 */
 export const StoryOpening = z.object({
   formatVersion: z.number().int().default(FORMAT_VERSION),
