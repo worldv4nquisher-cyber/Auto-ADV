@@ -121,6 +121,50 @@ describe('舞台时间线', () => {
     expect(findStep(t, { eventId: 'zzz', index: 0 })).toBe(2);
   });
 
+  it('观察模式：没有舞台指令的事件按地点和在场角色自动排舞台；导演指令和悄悄话只进回想', () => {
+    const e = (id: string, extra: Partial<PlayEvent>): PlayEvent => ({ id, parentId: null, kind: 'ai', createdAt: 0, ...extra });
+    const t = buildTimeline(
+      [
+        e('o', {
+          kind: 'opening',
+          scene: { locationId: 'loc_reading', presentCharacterIds: ['char_lin', 'char_01'] },
+          segments: [{ kind: 'narration', text: '雨落在天窗上。' }],
+        }),
+        e('d', { kind: 'directive', text: '让老周出现' }),
+        e('w', { kind: 'whisper', characterId: 'char_lin', text: '他在骗你' }),
+        e('a', {
+          scene: { locationId: 'loc_reading', presentCharacterIds: ['char_lin', 'char_01', 'char_zhou'] },
+          segments: [{ kind: 'line', characterId: 'char_zhou', name: '老周', text: '闭馆了。' }],
+          plot: { scene: 'sc_02' },
+        }),
+        e('p', { kind: 'player', characterId: 'char_lin', text: '再等一会儿。' }),
+        e('b', {
+          scene: { locationId: 'loc_archive', presentCharacterIds: ['char_lin'] },
+          segments: [{ kind: 'narration', text: '铁门在身后合上。' }],
+        }),
+      ],
+      { characters: world.characters, graph: world.graph, auto: { protagonistId: null } },
+    );
+    const chars = (i: number) => t.steps[i]?.view.sprites.map((s) => s.characterId);
+    expect(t.steps[0]).toMatchObject({ kind: 'text', eventId: 'o', view: { bg: { id: 'loc_reading' } } });
+    expect(chars(0)).toEqual(['char_lin', 'char_01']); // 观察模式里主角也上台
+    expect(t.steps[1]).toMatchObject({ kind: 'card', card: { title: '旧书库的门' } });
+    expect(t.steps[2]?.text?.speaker?.name).toBe('老周');
+    expect(chars(2)).toEqual(['char_lin', 'char_01', 'char_zhou']);
+    expect(t.steps[3]).toMatchObject({ eventId: 'p', text: { kind: 'say', text: '再等一会儿。' } });
+    expect(t.steps[4]).toMatchObject({ eventId: 'b', view: { bg: { id: 'loc_archive' } } });
+    expect(chars(4)).toEqual(['char_lin']);
+    expect(t.backlog.filter((b) => b.kind === 'note')).toEqual([
+      { kind: 'note', step: 1, label: '导演指令', text: '让老周出现' },
+      { kind: 'note', step: 1, label: '对林夕的悄悄话', text: '他在骗你' },
+    ]);
+    // 不给 auto 时还是按文本段落播放，没有画面
+    const plain = buildTimeline([e('a', { segments: [{ kind: 'narration', text: '夜深了。' }], scene: { locationId: 'x', presentCharacterIds: [] } })], {
+      characters: [],
+    });
+    expect(plain.steps[0]?.view.bg).toBeNull();
+  });
+
   it('站位写法', () => {
     expect([spriteX('left'), spriteX('Far-Right'), spriteX('40%'), spriteX('120'), spriteX('上面'), spriteX(undefined)]).toEqual([
       28, 86, 40, 95, null, null,

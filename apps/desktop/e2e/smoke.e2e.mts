@@ -2,7 +2,7 @@
  * 端到端冒烟测试：真正启动 Electron 应用，连一个本地模拟的 OpenAI 兼容服务，走一遍完整流程：
  * 添加接入点 → 拉取模型 → 能力探测 → 设置职责路由 → 调试台对话 → 查看调用日志（M0）
  * → 一键创世 → 开始周目 → 对话 → 重抽 / 切换分支 → 存档 → 继续 → 读档（M1）
- * → 观察模式：自动演出 → 导演指令 → 暂停 → 接管角色 → 交还（M2）
+ * → 观察模式：在 VN 舞台上自动演出（M3 第 4 步）→ 切到文本看法 → 导演指令 → 暂停 → 接管角色 → 交还（M2）→ 回想里有导演指令
  * → 剧情 ADV（生成的世界，每一幕由 AI 演出）：AI 给的选项 → 自由输入 → 岔路 → 带检定的选项（M3 第 3 步）
  * → 剧情 ADV：导入手写的示例世界 → VN 舞台上快进、自动、点击推进 → 选项和检定 → 存档 → 好结局
  *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）。
@@ -217,12 +217,23 @@ try {
   await page.click('[data-testid="mode-observer"]');
   await shot(page, '11-start-observer');
   await page.click('[data-testid="start-confirm"]');
+  // 默认是舞台看法：开场停在最后一句上，上面盖着"开始自动演出"
+  await page.waitForSelector('[data-testid="observe-stage"]');
   await page.waitForSelector('[data-testid="observe-stopped"]');
+  await page.waitForSelector('[data-testid="observe-bg"]');
   await page.selectOption('[data-testid="observe-speed"]', '1');
   await page.click('[data-testid="observe-play"]');
-  // 1 倍速：像视觉小说一样逐字播放
+  // 新的一拍在舞台上播：标题卡、立绘、名字牌和逐字显示的台词
+  await page.waitForSelector('[data-testid="observe-card"]', { timeout: 60_000 });
+  await page.waitForSelector('[data-testid="observe-name"]', { timeout: 60_000 });
+  assert.ok((await page.$$('[data-testid="observe-sprite"]')).length >= 1, '舞台上应该有立绘');
+  await shot(page, '11b-observer-stage');
+  step('观察模式在 VN 舞台上自动演出（标题卡、立绘、台词）');
+
+  // 切到文本看法：接着从舞台播到的地方往下，像视觉小说一样逐字播放
+  await page.click('[data-testid="observe-view-text"]');
   await page.waitForSelector('[data-testid="observe-current"]', { timeout: 60_000 });
-  await shot(page, '11b-observer-typing');
+  await shot(page, '11c-observer-typing');
   await page.selectOption('[data-testid="observe-speed"]', '0'); // 即时，不等打字
   const aiCount = () => page.$$eval('[data-testid="play-event"][data-kind="ai"]', (els) => els.length);
   await page.waitForFunction(
@@ -270,6 +281,16 @@ try {
   });
   await page.click('[data-testid="observe-toggle"]');
   step('接管角色说话，交还后继续自动演出');
+
+  // 回到舞台看法：回想里有导演指令和刚才以角色身份说的话
+  await page.click('[data-testid="observe-view-stage"]');
+  await page.waitForSelector('[data-testid="observe-stage"]');
+  await page.click('[data-testid="observe-backlog"]');
+  await page.waitForSelector('[data-testid="observe-backlog-note"] >> text=让白鸦突然出现');
+  await page.waitForSelector('[data-testid="observe-backlog-panel"] >> text=其实我一直在等你回来');
+  await shot(page, '13a-observer-backlog');
+  await page.click('[data-testid="observe-panel-close"]');
+  step('舞台的回想里有导演指令和接管时说的话');
 
   // ── 剧情 ADV：生成的世界没有手写剧本，每一幕由 AI 演出
   await page.click('button:has-text("‹ 雾港谜灯")');

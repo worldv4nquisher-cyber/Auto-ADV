@@ -1,11 +1,11 @@
 /**
- * VN 舞台的播放时间线（M3 第 2 步）：把路径上的事件展开成一步一步的画面。
+ * VN 舞台的播放时间线（M3 第 2 步，第 4 步起观察模式也用它）：把路径上的事件展开成一步一步的画面。
  * 一步 = 玩家点一下看到的东西：一句台词或旁白、一次停顿、一次检定、进入新一幕的标题卡。
  * 每一步都带着当时完整的画面（背景、立绘、CG、音乐），所以回想、存档定位、快进都只需要一个下标。
  * 纯函数，界面和引擎共用（界面从 @auto-adv/engine/stage 引入，不会把引擎其余部分打包进去）。
  */
 import type { PlotGraph, StageCommand } from '@auto-adv/schema';
-import type { CheckResult, PlayEvent, Segment, VarChange } from '../api.ts';
+import type { CheckResult, PlayEvent, SceneState, Segment, VarChange } from '../api.ts';
 import { matchByName } from '../world/render.ts';
 
 type Cast = readonly { id: string; name: string; aliases?: string[] }[];
@@ -105,7 +105,9 @@ export type BacklogEntry =
       rewindTo: string | null;
     }
   | { kind: 'check'; step: number; check: CheckResult }
-  | { kind: 'scene'; step: number; title: string; chapter: string | null };
+  | { kind: 'scene'; step: number; title: string; chapter: string | null }
+  /** 观察模式里观众留下的话：导演指令、悄悄话。不上舞台，只进回想。 */
+  | { kind: 'note'; step: number; label: string; text: string };
 
 export interface Timeline {
   steps: StageStep[];
@@ -118,6 +120,13 @@ export interface TimelineOptions {
   characters: Cast;
   /** 用来给新的一幕出标题卡；不给就不出。 */
   graph?: Pick<PlotGraph, 'scenes' | 'chapters'> | null;
+  /**
+   * 没有舞台指令的事件（观察模式的拍、开场、接管角色时说的话）按事件上记的地点和在场角色自动排出舞台：
+   * 换地点时换背景，在场的人上场，开口的人先上场再说话（stageFromSegments）。导演指令和悄悄话进回想。
+   * 不给时这些事件只按文本段落播放（剧情 ADV 的事件都带着舞台指令）。
+   * protagonistId：不出立绘的角色（剧情 ADV 里玩家扮演的主角）；观察模式里观众不是主角，为 null。
+   */
+  auto?: { protagonistId: string | null };
 }
 
 const emptyView = (): StageView => ({ bg: null, sprites: [], cg: null, bgm: null });
@@ -142,6 +151,9 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
 
   let lastEvent: string | null = null;
   let index = 0;
+  /** 当前的地点和在场角色（自动排舞台用）。 */
+  let place: SceneState = { locationId: null, presentCharacterIds: [] };
+  const nameOf = (id: string | undefined) => (id ? resolveSpeaker(id, opts.characters).name : '');
 
   const push = (ev: PlayEvent, step: Omit<StageStep, 'eventId' | 'index' | 'view' | 'scene'>) => {
     // 标题卡不占序号：出不出标题卡（给没给剧情图）不影响存档位置
@@ -229,6 +241,22 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
   };
 
   for (const ev of path) {
+    if (ev.scene) place = ev.scene;
+    if (opts.auto && (ev.kind === 'directive' || ev.kind === 'whisper')) {
+      const label = ev.kind === 'directive' ? '导演指令' : `对${nameOf(ev.characterId)}的悄悄话`;
+      backlog.push({ kind: 'note', step: steps.length, label, text: ev.text ?? '' });
+      continue;
+    }
+    // 观察模式里接管角色说的话、换场景：和 AI 演的拍一样上舞台
+    if (opts.auto && ((ev.kind === 'player' && ev.characterId) || ev.kind === 'scene')) {
+      const segs: Segment[] =
+        ev.kind === 'player' && ev.characterId
+          ? [{ kind: 'line', characterId: ev.characterId, name: nameOf(ev.characterId), text: ev.text ?? '' }]
+          : [];
+      for (const c of stageFromSegments(segs, { characters: opts.characters, before: view, scene: place, protagonistId: opts.auto.protagonistId }))
+        run(ev, c);
+      continue;
+    }
     if (ev.kind === 'choice') {
       backlog.push({ kind: 'choice', step: steps.length, label: ev.choice?.label ?? '', rewindTo: ev.parentId });
       if (ev.plot?.vars) vars.push(...ev.plot.vars);
@@ -261,8 +289,13 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
       backlog.push({ kind: 'check', step: steps.length - 1, check: ev.check });
     }
     if (ev.plot?.vars) vars.push(...ev.plot.vars);
-    if (ev.stage) {
-      for (const c of ev.stage) run(ev, c);
+    const stage =
+      ev.stage ??
+      (opts.auto && ev.segments
+        ? stageFromSegments(ev.segments, { characters: opts.characters, before: view, scene: place, protagonistId: opts.auto.protagonistId })
+        : undefined);
+    if (stage) {
+      for (const c of stage) run(ev, c);
       // 只放了 CG、后面没有文字：停一下让玩家看到
       if (cgShown) push(ev, { kind: 'pause' });
     } else {
