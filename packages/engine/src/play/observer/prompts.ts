@@ -1,5 +1,5 @@
 import type { ChatMessage } from '@auto-adv/providers';
-import type { Character, ObserverSettings } from '@auto-adv/schema';
+import type { Character, ExpressionDef, ObserverSettings } from '@auto-adv/schema';
 import { z } from 'zod';
 import type { PlayEvent } from '../../api.ts';
 import { GRAPH_RULES, renderScenes } from '../../genesis/graph.ts';
@@ -9,6 +9,7 @@ import type { JsonSpec } from '../../llm/structured.ts';
 import { clip, renderBrief, renderCharacter, renderLocation, renderRelationships } from '../../world/render.ts';
 import type { WorldData } from '../../world/store.ts';
 import { BUDGET, selectLore, transcriptOf } from '../context.ts';
+import { actorFormat, speechRule } from '../expressions.ts';
 import { plotSection } from '../plotprompt.ts';
 import type { StoryState } from '../state.ts';
 
@@ -163,6 +164,7 @@ export function writerSystem(
   memory: string | null,
   knowledge: Record<string, string>,
   pName = '主角',
+  expressions?: readonly ExpressionDef[],
 ) {
   const location = world.locations.find((l) => l.id === state.scene.locationId);
   const present = world.characters.filter((c) => state.scene.presentCharacterIds.includes(c.id));
@@ -171,7 +173,7 @@ export function writerSystem(
     `你是一部持续上演的互动故事的「演员兼旁白」。没有玩家，所有角色都由你来演，导演会告诉你每一拍要演什么。
 
 # 输出格式（必须严格遵守）
-- 角色说话：单独一行，以【角色名】开头，动作和神态写在台词前的括号里。例如：【${present[0]?.name ?? '角色名'}】（抬起头）你来晚了。
+${speechRule(present[0]?.name ?? '角色名', expressions)}
 - 旁白：不带任何前缀的行，用第三人称（开场里如果有「你」，指的是${pName}）。
 - 200～400 字，把导演安排的这一拍完整演出来，然后停下。
 - 角色只能说出他们知道的事；秘密要藏在言行的细节里，导演没安排揭开就不要说破。
@@ -210,6 +212,7 @@ export function writerMessages(
   recent: PlayEvent[],
   instruction: string,
   pName: string,
+  expressions?: readonly ExpressionDef[],
 ): ChatMessage[] {
   const lore = selectLore(world.lore, `${transcriptOf(world, recent.slice(-4), pName)}\n${instruction}`);
   const user = [
@@ -221,7 +224,7 @@ export function writerMessages(
     .filter(Boolean)
     .join('\n\n');
   return [
-    { role: 'system', content: writerSystem(world, state, memory, knowledge, pName) },
+    { role: 'system', content: writerSystem(world, state, memory, knowledge, pName, expressions) },
     { role: 'user', content: user },
   ];
 }
@@ -260,6 +263,7 @@ export interface ActorInput {
   whispers: string[];
   /** 别人告诉过他的秘密。 */
   knownSecrets: string[];
+  expressions?: readonly ExpressionDef[];
 }
 
 export function actorMessages(p: ActorInput): ChatMessage[] {
@@ -271,7 +275,7 @@ export function actorMessages(p: ActorInput): ChatMessage[] {
     .join('\n');
   const system = [
     `你是演员，在一部互动故事里扮演「${me.name}」。你只知道${me.name}知道的事，只替${me.name}说话和行动。
-输出格式：一段话，动作和神态写在括号里，例如：（攥紧衣角）……我不知道你在说什么。
+${actorFormat(p.expressions)}
 - 1～3 句，符合${me.name}的性格和说话方式；可以撒谎、隐瞒、试探，但不要说出${me.name}不可能知道的事。
 - 不要替别人说话，不要写旁白，不要加名字前缀。`,
     world.brief ? `# 世界\n${renderBrief(world.manifest, world.brief, world.style)}` : '',

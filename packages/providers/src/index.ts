@@ -5,3 +5,4 @@ export * from './openai-compatible.ts';
 export * from './probe.ts';
 export * from './presets.ts';
 export * from './images.ts';
+export * from './png.ts';

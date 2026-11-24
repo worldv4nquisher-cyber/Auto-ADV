@@ -26,6 +26,7 @@ import {
   useTyping,
 } from '../components/stage.tsx';
 import { Spinner } from '../components/ui.tsx';
+import { useExpressionTable } from '../lib/assets.tsx';
 
 /** 1 倍速下的节奏（和文本看法一致）：打字速度（字/秒）、每句读完后的停顿（基础 + 每字），换一拍时多停一会儿。 */
 const CPS = 30;
@@ -65,9 +66,11 @@ export function ObserveStage({
   const tint = (id: string | null, name: string) => colorOf(id, name) ?? '#a194ff';
   // 剧情图加上这个周目续写出来的幕：新的一幕出标题卡
   const graph = useMemo(() => (world.graph ? foldPlot(world.graph, world.variables, path).graph : null), [world, path]);
+  // 表情表：台词前括号里的第一个词换表情差分（18.6）
+  const expressions = useExpressionTable();
   const timeline = useMemo(
-    () => buildTimeline(path, { characters: world.characters, graph, auto: { protagonistId: null } }),
-    [path, world.characters, graph],
+    () => buildTimeline(path, { characters: world.characters, graph, auto: { protagonistId: null, ...(expressions ? { expressions } : {}) } }),
+    [path, world.characters, graph, expressions],
   );
   const steps = timeline.steps;
   const eventIndex = useMemo(() => new Map(path.map((e, i) => [e.id, i])), [path]);

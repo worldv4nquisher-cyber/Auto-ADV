@@ -1,10 +1,11 @@
 /**
  * 素材页（18.3）：世界的每个素材槽、生成进度，重抽、锁定、改提示词、换成自己的图；这个世界的素材设置（18.11）。
+ * 立绘按角色分组，每个角色可以单独选要画哪些表情（18.5）。
  */
 import type { AssetAction, AssetSlotView, AssetsControl, AssetsView } from '@auto-adv/engine/api';
 import type { AssetSettings, AssetSettingsPatch } from '@auto-adv/schema';
 import { type ReactNode, useEffect, useState } from 'react';
-import { PlaceholderBg } from '../components/placeholder.tsx';
+import { hueOf, PlaceholderBg, PlaceholderSprite } from '../components/placeholder.tsx';
 import { Badge, Button, Card, ConfirmButton, cx, Empty, Spinner, Textarea, useToast } from '../components/ui.tsx';
 import { assetUrl, useAssetsContext } from '../lib/assets.tsx';
 import { engine, errorMessage } from '../lib/engine.ts';
@@ -112,25 +113,156 @@ export function AssetsTab({ worldId }: { worldId: string }) {
       </Card>
 
       {groups.length === 0 && <Empty title="这个世界还没有要画的素材">创世生成地点、角色之后，这里会列出背景和立绘。</Empty>}
-      {groups.map((g) => (
-        <section key={g.kind} className="space-y-2">
-          <h3 className="text-sm font-medium text-muted">{KIND_TITLE[g.kind]}</h3>
-          <div className="grid grid-cols-2 gap-3">
-            {g.slots.map((s) => (
-              <SlotCard key={s.id} worldId={worldId} slot={s} view={view} onView={setViewing} />
+      {groups.map((g) =>
+        g.kind === 'sprite' ? (
+          <section key={g.kind} className="space-y-3">
+            <h3 className="text-sm font-medium text-muted">{KIND_TITLE[g.kind]}</h3>
+            {byCharacter(g.slots).map(([charId, slots]) => (
+              <CharacterSprites key={charId} worldId={worldId} characterId={charId} slots={slots} view={view} onView={setViewing} />
             ))}
-          </div>
-        </section>
-      ))}
+          </section>
+        ) : (
+          <section key={g.kind} className="space-y-2">
+            <h3 className="text-sm font-medium text-muted">{KIND_TITLE[g.kind]}</h3>
+            <div className="grid grid-cols-2 gap-3">
+              {g.slots.map((s) => (
+                <SlotCard key={s.id} worldId={worldId} slot={s} view={view} onView={setViewing} />
+              ))}
+            </div>
+          </section>
+        ),
+      )}
 
       <WorldAssetSettings worldId={worldId} view={view} />
 
       {viewing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-8" onClick={() => setViewing(null)} data-testid="asset-viewer">
-          <img src={assetUrl(worldId, viewing)} alt="" className="max-h-full max-w-full rounded-lg object-contain" />
+          <img src={assetUrl(worldId, viewing)} alt="" className="max-h-full max-w-full rounded-lg object-contain" style={CHECKER} />
           <EscToClose onClose={() => setViewing(null)} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** 透明的地方显示成棋盘格，一眼能看出抠干净没有。 */
+const CHECKER = { background: 'repeating-conic-gradient(#3a3a40 0 25%, #2a2a2f 0 50%) 50% / 16px 16px' };
+
+/** 立绘按角色分组，保持清单里的顺序。 */
+function byCharacter(slots: AssetSlotView[]): [string, AssetSlotView[]][] {
+  const out = new Map<string, AssetSlotView[]>();
+  for (const s of slots) {
+    const id = s.characterId ?? s.id.split('/')[1] ?? s.id;
+    const list = out.get(id) ?? [];
+    list.push(s);
+    out.set(id, list);
+  }
+  return [...out];
+}
+
+/** 一个角色的立绘：基础立绘和表情差分，加上这个角色画哪些表情。 */
+function CharacterSprites({
+  worldId,
+  characterId,
+  slots,
+  view,
+  onView,
+}: {
+  worldId: string;
+  characterId: string;
+  slots: AssetSlotView[];
+  view: AssetsView;
+  onView: (file: string) => void;
+}) {
+  const name = slots[0]?.title.split(' · ')[0] ?? characterId;
+  const review = slots.filter((s) => s.review).length;
+  const [editing, setEditing] = useState(false);
+  return (
+    <div className="space-y-2" data-testid="asset-character" data-character={characterId}>
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium">{name}</span>
+        <span className="text-xs text-faint">{slots.length} 张</span>
+        {review > 0 && <Badge tone="warn">{review} 张要看一下</Badge>}
+        <button type="button" className="ml-auto text-xs text-accent-strong hover:underline" onClick={() => setEditing((e) => !e)} data-testid="char-expressions-toggle">
+          {editing ? '收起' : '画哪些表情'}
+        </button>
+      </div>
+      {editing && <CharacterExpressions worldId={worldId} characterId={characterId} current={slots.map((s) => s.expression ?? 'neutral')} view={view} />}
+      <div className="grid grid-cols-3 gap-3">
+        {slots.map((s) => (
+          <SlotCard key={s.id} worldId={worldId} slot={s} view={view} onView={onView} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** 这个角色单独选表情（存在这个世界的素材设置里）；不选就按角色类型（主要角色 / 其他角色）的表情组。 */
+function CharacterExpressions({ worldId, characterId, current, view }: { worldId: string; characterId: string; current: string[]; view: AssetsView }) {
+  const toast = useToast();
+  const own = view.settings.world.characters?.[characterId]?.expressions;
+  const [picked, setPicked] = useState<string[]>(own ?? current);
+  const [busy, setBusy] = useState(false);
+  const table = view.settings.effective.expressions;
+  const save = async (list: string[] | null) => {
+    setBusy(true);
+    try {
+      const characters = { ...view.settings.world.characters };
+      if (list) characters[characterId] = { ...characters[characterId], expressions: list };
+      else delete characters[characterId];
+      const { characters: _old, ...rest } = view.settings.world;
+      await engine.call('saveWorldAssetSettings', {
+        worldId,
+        patch: Object.keys(characters).length ? { ...rest, characters } : rest,
+      });
+      if (!list) setPicked(current.filter((e) => e !== 'neutral'));
+      toast('ok', list ? '已保存，缺的表情会接着画' : '已恢复成按角色类型');
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const toggle = (id: string) => setPicked((p) => (p.includes(id) ? p.filter((e) => e !== id) : [...p, id]));
+  return (
+    <div className="space-y-2 rounded-lg bg-panel-2 p-3" data-testid="char-expressions">
+      <p className="text-xs text-faint">
+        基础立绘（{table.find((e) => e.id === 'neutral')?.name ?? '平静'}）一定会画。去掉的表情不再画，已经画好的图留在文件里；
+        AI 写到没画的表情时用基础立绘。{own ? '现在是这个角色单独选的。' : '现在按角色类型的表情组。'}
+      </p>
+      <div className="flex flex-wrap gap-1.5">
+        {table.map((e) => {
+          const on = e.id === 'neutral' || picked.includes(e.id);
+          return (
+            <button
+              key={e.id}
+              type="button"
+              disabled={e.id === 'neutral'}
+              onClick={() => toggle(e.id)}
+              data-testid="char-expression"
+              data-expr={e.id}
+              data-on={on}
+              className={cx(
+                'rounded-full border px-2.5 py-0.5 text-xs',
+                on ? 'border-accent bg-accent/15 text-accent-strong' : 'border-line text-muted hover:border-accent',
+                e.id === 'neutral' && 'opacity-70',
+              )}
+            >
+              {e.name}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex gap-1.5">
+        <Button size="sm" variant="primary" loading={busy} onClick={() => void save(['neutral', ...picked.filter((e) => e !== 'neutral')])} data-testid="char-expressions-save">
+          保存
+        </Button>
+        {own && (
+          <Button size="sm" variant="ghost" disabled={busy} onClick={() => void save(null)}>
+            恢复按角色类型
+          </Button>
+        )}
+      </div>
     </div>
   );
 }
@@ -202,18 +334,28 @@ function SlotCard({
 
   const st = STATUS[slot.status];
   const canDraw = !view.state.needsModel && !slot.locked;
+  const sprite = slot.kind === 'sprite';
   return (
     <Card className="overflow-hidden" data-testid="asset-slot" data-slot={slot.id} data-status={slot.status}>
       <button
         type="button"
-        className="relative block aspect-video w-full overflow-hidden bg-black"
-        style={{ containerType: 'inline-size' }}
+        className={cx('relative block w-full overflow-hidden', sprite ? 'aspect-[2/3]' : 'aspect-video bg-black')}
+        style={{ containerType: 'inline-size', ...(sprite ? CHECKER : {}) }}
         onClick={() => slot.file && onView(slot.file)}
         disabled={!slot.file}
         title={slot.file ? '查看大图' : undefined}
       >
         {slot.file ? (
-          <img src={assetUrl(worldId, slot.file)} alt="" className="absolute inset-0 h-full w-full object-cover" data-testid="asset-image" />
+          <img
+            src={assetUrl(worldId, slot.file)}
+            alt=""
+            className={cx('absolute inset-0 h-full w-full', sprite ? 'object-contain' : 'object-cover')}
+            data-testid="asset-image"
+          />
+        ) : sprite ? (
+          <span className="absolute inset-0 flex justify-center pt-[8%] opacity-60">
+            <PlaceholderSprite name={slot.title.split(' · ')[0] ?? ''} expr={slot.expression ?? 'neutral'} color={`hsl(${hueOf(slot.characterId ?? slot.id)} 45% 60%)`} />
+          </span>
         ) : (
           <PlaceholderBg id={slot.id.replace(/^bg\//, '')} label={false} />
         )}
@@ -225,10 +367,15 @@ function SlotCard({
       </button>
       <div className="space-y-2 p-3">
         <div className="flex items-center gap-2">
-          <span className="min-w-0 truncate text-sm font-medium">{slot.title}</span>
+          <span className="min-w-0 truncate text-sm font-medium">{sprite ? (slot.title.split(' · ')[1] ?? slot.title) : slot.title}</span>
           <Badge tone={st.tone}>{slot.requested && slot.status !== 'running' ? '排队中' : st.text}</Badge>
           {slot.locked && <Badge tone="accent">锁定</Badge>}
           {slot.source === 'uploaded' && <Badge>自己的图</Badge>}
+          {slot.review && (
+            <Badge tone="warn" title={slot.review}>
+              要看一下
+            </Badge>
+          )}
           {slot.upstreamChanged && (
             <Badge tone="warn" title="锁定之后提示词或设置改过，这张图是按原来的参数画的">
               参数改过
@@ -240,6 +387,11 @@ function SlotCard({
           <p className="text-xs text-warn">提示词或设置改过了，还在用原来的图。</p>
         )}
         {slot.error && slot.status === 'failed' && <p className="text-xs break-all text-err">{slot.error}</p>}
+        {slot.review && (
+          <p className="text-xs text-warn" data-testid="asset-review">
+            抠图没过检查（{slot.review}），现在用的是没抠的原图。可以重抽、换成自己的图，或者在设置里换一种透明背景的做法。
+          </p>
+        )}
         <div className="flex flex-wrap gap-1.5">
           {slot.status === 'stale' && !slot.requested && (
             <Button size="sm" variant="primary" disabled={!canDraw} loading={busy === 'redraw'} onClick={() => void act('redraw')} data-testid="asset-redraw">
@@ -317,10 +469,14 @@ function SlotCard({
                 key={h.file}
                 type="button"
                 title="换回这张（会锁定）"
-                className="relative aspect-video w-14 shrink-0 overflow-hidden rounded border border-line hover:border-accent"
+                className={cx(
+                  'relative shrink-0 overflow-hidden rounded border border-line hover:border-accent',
+                  sprite ? 'aspect-[2/3] w-10' : 'aspect-video w-14',
+                )}
+                style={sprite ? CHECKER : undefined}
                 onClick={() => void act('use', h.file)}
               >
-                <img src={assetUrl(worldId, h.file)} alt="" className="absolute inset-0 h-full w-full object-cover" />
+                <img src={assetUrl(worldId, h.file)} alt="" className={cx('absolute inset-0 h-full w-full', sprite ? 'object-contain' : 'object-cover')} />
               </button>
             ))}
           </div>

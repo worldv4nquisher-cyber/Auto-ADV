@@ -253,8 +253,8 @@ export class GenesisRunner {
     await this.store.writeStyle(c.worldId, {
       formatVersion: FORMAT_VERSION,
       prose: { pov: 'second', description: value.proseStyle, samples: [] },
-      art: { prompt: '', negative: '' },
-      music: { description: '' },
+      art: { prompt: value.artStyle.trim(), negative: value.artNegative.trim() },
+      music: { description: value.musicStyle.trim() },
       _meta: { locked: [] },
     });
     await this.store.updateManifest(c.worldId, (m) => ({
@@ -321,7 +321,7 @@ export class GenesisRunner {
         gender: x.gender,
         age: x.age,
         summary: x.summary,
-        appearance: { text: x.appearance, imagePrompt: '' },
+        appearance: { text: x.appearance, imagePrompt: x.imagePrompt.trim() },
         personality: { traits: x.traits, values: x.values, fears: x.fears },
         speech: { style: x.speechStyle, examples: x.speechExamples },
         background: x.background,

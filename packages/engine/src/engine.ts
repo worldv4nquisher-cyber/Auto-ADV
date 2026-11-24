@@ -12,6 +12,8 @@ import {
   type Capabilities,
   type Endpoint,
   type GenesisStepId,
+  MEDIA_ROLE_APIS,
+  MEDIA_ROLE_IDS,
   MediaRoleId,
   type MediaRoute,
   RoleId,
@@ -98,6 +100,7 @@ export class Engine {
         .focus(worldId, { locationId: v.scene.locationId, characterIds: v.scene.presentCharacterIds, sceneId: v.plot.scene })
         .catch(() => {});
     };
+    this.play.expressionTable = async (worldId) => (await this.assets.effectiveSettings(worldId)).expressions;
   }
 
   close(): void {
@@ -174,7 +177,8 @@ export class Engine {
       for (const [role, route] of Object.entries(s.roles)) {
         if (route && route.endpointId !== id) roles[role as RoleId] = route;
       }
-      const media = s.media.image?.endpointId === id ? {} : s.media;
+      const media = { ...s.media };
+      for (const k of MEDIA_ROLE_IDS) if (media[k]?.endpointId === id) delete media[k];
       return { ...s, endpoints: s.endpoints.filter((e) => e.id !== id), roles, media };
     });
     await this.secrets.delete(endpointKeyId(id));
@@ -199,8 +203,10 @@ export class Engine {
     MediaRoleId.parse(role);
     if (route) {
       await this.getEndpoint(route.endpointId);
-      if (!route.model.trim()) throw new Error('请填写图像模型');
-      route = { ...route, model: route.model.trim() };
+      // 抠图服务的模型可以不填（用服务自己的默认模型）
+      if (role === 'image' && !route.model.trim()) throw new Error('请填写图像模型');
+      const apis = MEDIA_ROLE_APIS[role];
+      route = { ...route, model: route.model.trim(), api: apis.includes(route.api) ? route.api : (apis[0] ?? route.api) };
     }
     await this.settings.update((s) => ({ ...s, media: { ...s.media, [role]: route ?? undefined } }));
     // 配好了图像模型，已经打开的世界马上开始画

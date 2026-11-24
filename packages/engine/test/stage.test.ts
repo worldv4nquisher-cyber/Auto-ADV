@@ -10,7 +10,8 @@ import { createPortPair, Engine, type EngineContract, MemorySecretStore, RpcClie
 import { PlayDb } from '../src/play/db.ts';
 import { type AdvWorld } from '../src/plot/runner.ts';
 import { AdvSession, loadAdvWorld } from '../src/plot/session.ts';
-import { buildTimeline, findStep, spriteX, stepText, type Timeline } from '../src/plot/stage.ts';
+import { DEFAULT_EXPRESSIONS } from '@auto-adv/schema';
+import { buildTimeline, expressionOfLine, findStep, spriteX, stageFromSegments, stepText, type Timeline } from '../src/plot/stage.ts';
 import { type WorldData, WorldStore } from '../src/world/store.ts';
 
 const EXAMPLES = path.resolve(import.meta.dirname, '../../../examples/worlds');
@@ -163,6 +164,43 @@ describe('舞台时间线', () => {
       characters: [],
     });
     expect(plain.steps[0]?.view.bg).toBeNull();
+  });
+
+  it('AI 演出的表情：台词前括号里的第一个词换表情差分，对不上就保持上一个表情（18.6）', () => {
+    const of = (t: string) => expressionOfLine(t, DEFAULT_EXPRESSIONS);
+    expect([of('（微笑，抬起头）你来了'), of('（笑了一下）'), of('(愣住了)'), of('（脸红，别过脸）'), of('（Angry）'), of('（压低声音）'), of('没有括号')]).toEqual([
+      'smile',
+      'smile',
+      'surprised',
+      'shy',
+      'angry',
+      null,
+      null,
+    ]);
+    const line = (characterId: string, name: string, text: string) => ({ kind: 'line' as const, characterId, name, text });
+    const segs = [
+      line('char_lin', '林夕', '（微笑）你也来找那本书？'),
+      line('char_lin', '林夕', '（压低声音）小声点。'),
+      line('char_lin', '林夕', '（微笑）我等你很久了。'),
+      line('char_lin', '林夕', '（难过）可她再也没回来。'),
+      line('char_zhou', '老周', '（惊讶）你们怎么还在？'),
+    ];
+    const before = { bg: { id: 'loc_reading' }, sprites: [{ key: 'char_lin', characterId: 'char_lin', name: '林夕', expr: 'neutral', x: 50 }], cg: null, bgm: null };
+    const o = { characters: world.characters, before, scene: { locationId: 'loc_reading', presentCharacterIds: ['char_lin'] }, protagonistId: null };
+    const shows = stageFromSegments(segs, { ...o, expressions: DEFAULT_EXPRESSIONS }).filter((c) => c.op === 'show');
+    expect(shows).toEqual([
+      { op: 'show', char: 'char_lin', expr: 'smile' },
+      { op: 'show', char: 'char_lin', expr: 'sad' },
+      { op: 'show', char: 'char_zhou', expr: 'surprised' },
+    ]);
+    // 不给表情表：只上场，不换表情
+    expect(stageFromSegments(segs, o).filter((c) => c.op === 'show')).toEqual([{ op: 'show', char: 'char_zhou' }]);
+    // 观察模式在界面里按表情表排舞台
+    const t = buildTimeline(
+      [{ id: 'a', parentId: null, kind: 'ai', createdAt: 0, scene: { locationId: 'loc_reading', presentCharacterIds: ['char_lin'] }, segments: segs }],
+      { characters: world.characters, auto: { protagonistId: null, expressions: DEFAULT_EXPRESSIONS } },
+    );
+    expect(t.steps.map((s) => s.view.sprites.find((x) => x.characterId === 'char_lin')?.expr)).toEqual(['smile', 'smile', 'smile', 'sad', 'sad']);
   });
 
   it('站位写法', () => {

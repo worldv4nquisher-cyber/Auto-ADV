@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { OpenAIImageClient, type ImageExchangeRecord, sniffImage } from '../src/index.ts';
+import { decodePng, type ImageExchangeRecord, OpenAIImageClient, RembgCutoutClient, sniffImage } from '../src/index.ts';
 import { type MockServer, type MockServerOptions, startMockServer } from '../src/testing/mock-server.ts';
 
 let server: MockServer | null = null;
@@ -48,5 +48,45 @@ describe('OpenAI 风格的图像接口', () => {
     const { c } = await client({ imageFailFirst: 1, imageRejectIf: '禁' });
     await expect(c.generate({ model: 'm', prompt: 'x' })).rejects.toMatchObject({ status: 500, retryable: true });
     await expect(c.generate({ model: 'm', prompt: '禁' })).rejects.toMatchObject({ status: 400, retryable: false });
+  });
+});
+
+describe('带参考图改图、透明背景、抠图服务', () => {
+  it('改图：multipart 上传参考图，日志里只记参考图大小', async () => {
+    const { c, s, log } = await client();
+    const base = await c.generate({ model: 'm', prompt: '角色立绘，人物：短发', size: '1024x1536' });
+    const r = await c.edit({ model: 'm', prompt: '只改表情：微笑', size: '1024x1536', image: { data: base.data, mime: base.mime } });
+    expect(r.mime).toBe('image/png');
+    expect(s.imageRequests[1]).toMatchObject({ edit: true, model: 'm', prompt: '只改表情：微笑', size: '1024x1536', n: '1', imageBytes: base.data.length });
+    expect(log[1]?.url).toMatch(/\/images\/edits$/);
+    expect(log[1]?.request.image).toMatch(/^参考图 \d+ KB$/);
+  });
+
+  it('要透明背景：带 background；服务不认识就去掉再发', async () => {
+    const a = await client();
+    await a.c.generate({ model: 'm', prompt: 'x', transparent: true });
+    expect(a.s.imageRequests[0]?.background).toBe('transparent');
+    await server?.close();
+    const b = await client({ imageNoBackground: true });
+    const r = await b.c.generate({ model: 'm', prompt: 'x', transparent: true });
+    expect(r.mime).toBe('image/png');
+    expect(b.s.imageRequests).toHaveLength(2);
+    expect(b.s.imageRequests[1]?.background).toBeUndefined();
+    expect(b.log.map((l) => l.status)).toEqual(['error', 'ok']);
+  });
+
+  it('抠图服务（rembg 的接口）：上传图片，拿回透明 PNG；地址写成完整的 /api/remove 也行', async () => {
+    const { c, s } = await client();
+    const img = await c.generate({ model: 'm', prompt: '角色立绘', size: '1024x1536' });
+    const root = s.baseURL.replace(/\/v1$/, '');
+    for (const url of [root, `${root}/api/remove`]) {
+      const log: ImageExchangeRecord[] = [];
+      const cut = new RembgCutoutClient({ baseURL: url, onExchange: (r) => log.push(r) });
+      const out = await cut.remove({ data: img.data, mime: img.mime }, 'isnet-anime');
+      const decoded = decodePng(out.data);
+      expect(decoded.data[3]).toBe(0); // 左上角是背景，抠掉了
+      expect(log[0]).toMatchObject({ status: 'ok', request: { model: 'isnet-anime' } });
+    }
+    expect(s.cutoutRequests.map((r) => r.model)).toEqual(['isnet-anime', 'isnet-anime']);
   });
 });

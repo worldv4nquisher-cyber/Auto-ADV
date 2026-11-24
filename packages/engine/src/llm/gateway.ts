@@ -8,6 +8,7 @@ import {
   OpenAICompatibleClient,
   OpenAIImageClient,
   type ParamFix,
+  RembgCutoutClient,
   type RequestOptions,
   requestOptionsFor,
   type Usage,
@@ -38,6 +39,13 @@ export interface ImageHandle {
   api: MediaRoute['api'];
   client: OpenAIImageClient;
   lastCallId(): string | null;
+}
+
+/** 抠图职责的句柄。 */
+export interface CutoutHandle {
+  endpoint: Endpoint;
+  model: string;
+  client: RembgCutoutClient;
 }
 
 /** 计量回调：每次 HTTP 调用拿到用量后调用一次（重试、校验失败重来的每一次都算）。 */
@@ -117,11 +125,36 @@ export class ModelGateway {
     return { endpoint, model: r.model, api: r.api, client, lastCallId: () => lastCallId };
   }
 
-  private logImage(rec: ImageExchangeRecord, endpoint: Endpoint, model: string, tag: string | null): string | null {
+  /** 抠图职责配了没有。 */
+  async cutoutRoute(): Promise<MediaRoute | null> {
+    const s = await this.o.settings.get();
+    const route = s.media.cutout;
+    return route && s.endpoints.some((e) => e.id === route.endpointId) ? route : null;
+  }
+
+  /** 按抠图职责取接入点（rembg 一类的服务）。 */
+  async forCutout(tag: string | null, route?: MediaRoute): Promise<CutoutHandle> {
+    const s = await this.o.settings.get();
+    const r = route ?? s.media.cutout;
+    if (!r) throw new Error('透明背景选了「抠图服务」，但还没有配「抠图」职责，请到 设置 → 职责路由 配置');
+    const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
+    if (!endpoint) throw new Error('抠图职责指向的接入点已被删除，请重新配置');
+    const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
+    const client = new RembgCutoutClient({
+      baseURL: endpoint.baseURL,
+      apiKey,
+      headers: endpoint.headers,
+      fetch: this.o.fetch,
+      onExchange: (rec) => this.logImage(rec, endpoint, r.model, tag, 'cutout'),
+    });
+    return { endpoint, model: r.model, client };
+  }
+
+  private logImage(rec: ImageExchangeRecord, endpoint: Endpoint, model: string, tag: string | null, role = 'image'): string | null {
     try {
       return this.o.calls.insert({
         ts: rec.startedAt,
-        role: 'image',
+        role,
         tag,
         endpointId: endpoint.id,
         endpointName: endpoint.name,

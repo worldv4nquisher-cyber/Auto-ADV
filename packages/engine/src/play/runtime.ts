@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { ObserverSettings } from '@auto-adv/schema';
+import { DEFAULT_EXPRESSIONS, type ExpressionDef, ObserverSettings } from '@auto-adv/schema';
 import type {
   ObserverChunk,
   ObserverStatus,
@@ -117,6 +117,8 @@ export class PlayService {
   readonly observer: ObserverService;
   /** 每次算出周目的画面后调用（素材管线据此排"马上要用"的优先级）。 */
   onView: ((worldId: string, view: PlayView) => void) | null = null;
+  /** 这个世界的表情表（素材设置里的，18.5）：AI 演出时按台词前括号里的第一个词换表情。 */
+  expressionTable: (worldId: string) => Promise<readonly ExpressionDef[]> = async () => DEFAULT_EXPRESSIONS;
 
   constructor(store: WorldStore, gateway: ModelGateway) {
     this.store = store;
@@ -253,6 +255,7 @@ export class PlayService {
         before: { bg: null, sprites: [], cg: null, bgm: null },
         scene,
         protagonistId: protagonist?.id ?? null,
+        expressions: await this.expressionTable(p.worldId),
       });
       opening = { segments, stage, scene };
     }
@@ -332,6 +335,7 @@ export class PlayService {
       const out = await runAdvBeat({
         gateway: this.gateway,
         world,
+        expressions: await this.expressionTable(ref.worldId),
         playthroughId: pt.id,
         path: events,
         request: r.ai,
@@ -598,6 +602,7 @@ export class PlayService {
       {
         gateway: this.gateway,
         world,
+        expressions: await this.expressionTable(ref.worldId),
         playthroughId: pt.id,
         path: events,
         summary,
