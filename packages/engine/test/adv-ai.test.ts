@@ -213,8 +213,10 @@ describe('剧情 ADV：跑偏时的四个选项（16.6）', () => {
     v = await client.stream('advInput', { ...g.ref, text: '跑题：再点一杯' }, () => {});
     expect(v.path.at(-1)?.plot).toMatchObject({ scene: 'sc_01', offTrack: true, askDrift: true });
     expect(v.adv?.drift).toEqual({ ask: true, paused: false, pullBack: false, detour: true });
-    // ADV 里跑偏了先问玩家，导演不会自己往回拉
+    // ADV 里跑偏了先问玩家，导演不会自己往回拉；offTrack 看玩家的行动，不许把主角挡回这一幕
     expect(lastUserOf(directors().at(-1) as Req)).not.toContain('带回这一幕');
+    expect(systemOf(directors().at(-1) as Req)).toContain('offTrack：看玩家这一次的行动');
+    expect(systemOf(directors().at(-1) as Req)).toContain('不要找理由（拦路、劝阻、让别人代办）');
     return { ...g, v, askAt: v.path.at(-1)?.id as string };
   }
 
@@ -316,6 +318,8 @@ describe('剧情 ADV：跑偏时的四个选项（16.6）', () => {
     v = await client.stream('advChoose', { ...ref, index: 0 }, () => {});
     expect(v.path.at(-1)?.plot).toMatchObject({ scene: 'sc_07', points: ['sc_07_1'] });
     expect(lastUserOf(directors().at(-1) as Req)).toContain('## 当前这一幕：[sc_07] 酒馆里的插曲');
+    // 告诉导演：玩家回到原来那条线上不算偏离，收个尾接回去
+    expect(lastUserOf(directors().at(-1) as Req)).toContain('这一幕是玩家跑偏时插进来的一段，演完就接回「归乡」');
     const graph = foldPlot(world.graph as never, world.variables, v.path).graph;
     const t = buildTimeline(v.path, { characters: world.characters, graph });
     expect(t.steps.filter((s) => s.kind === 'card').map((s) => s.card?.title)).toContain('酒馆里的插曲');

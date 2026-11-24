@@ -4,7 +4,7 @@
  * 模型按下面的格式输出（比 JSON 更适合流式显示，小模型也写得对）：
  *   旁白：不带前缀的行
  *   台词：【角色名】（动作）台词
- * 也兼容「角色名：台词」的写法（仅当名字是已知角色时）。
+ * 也兼容「角色名：台词」和「角色名（动作）台词」的写法（仅当名字是已知角色时）。
  */
 import type { Segment } from '../api.ts';
 import { matchByName } from '../world/render.ts';
@@ -24,6 +24,8 @@ export interface ScriptOptions {
 
 const TAGGED = /^\s*[【[［]([^】\]］\n]{1,24})[】\]］]\s*(.*)$/;
 const COLON = /^\s*([^\s：:「」【】()（）]{1,12})\s*[：:]\s*(.+)$/;
+/** 漏了【】的写法：「角色名（动作）台词」。 */
+const PAREN = /^\s*([^\s：:「」【】()（）]{1,12})\s*([（(][^（）()\n]{1,40}[）)]\s*.+)$/;
 /** 有的模型会给旁白也加前缀：「旁白：……」或「【旁白】……」。 */
 const NARRATOR = /^(?:[【[［]\s*旁白\s*[】\]］]|旁白\s*[：:])\s*/;
 
@@ -70,10 +72,11 @@ export function parseScript(text: string, o: ScriptOptions): Segment[] {
       continue;
     }
     const tagged = TAGGED.exec(line);
-    const colon = tagged ? null : COLON.exec(line);
-    const speakerName = tagged?.[1]?.trim() ?? (colon && matchByName(colon[1] ?? '', o.cast) ? colon[1] : undefined);
+    // 没有【】的写法只认已知角色的名字，免得把「时间：午夜」这样的旁白当成台词
+    const untagged = tagged ? null : ([COLON.exec(line), PAREN.exec(line)].find((m) => m && matchByName(m[1] ?? '', o.cast)) ?? null);
+    const speakerName = tagged?.[1]?.trim() ?? untagged?.[1];
     if (speakerName !== undefined) {
-      const rest = unquote((tagged ? tagged[2] : colon?.[2])?.trim() ?? '');
+      const rest = unquote((tagged ? tagged[2] : untagged?.[2])?.trim() ?? '');
       skipping = isProtagonist(speakerName, o);
       pending = null;
       if (skipping) continue;

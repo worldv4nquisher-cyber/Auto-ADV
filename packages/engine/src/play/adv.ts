@@ -23,7 +23,7 @@ import type { WorldData } from '../world/store.ts';
 import { BUDGET, selectLore, transcriptOf } from './context.ts';
 import type { SummaryRow } from './db.ts';
 import { validatePlan } from './observer/beat.ts';
-import { CheckProposal, DirectorOut, directorSpec, PLOT_REPORT_RULES, plotReportExample } from './observer/prompts.ts';
+import { CheckProposal, DirectorOut, directorSpec, plotReportExample, plotReportRules } from './observer/prompts.ts';
 import { checkInstruction, openExits, plotSection, sceneBrief } from './plotprompt.ts';
 import { parseScript, ScriptStream } from './script.ts';
 import { foldState, type StoryState } from './state.ts';
@@ -57,12 +57,13 @@ function advDirectorSystem(pName: string): string {
 原则：
 - ${pName}的行动只来自玩家：选项、输入和检定的结果。不要替玩家做新的决定，也不要让${pName}说出玩家没有选的话。
 - 按剧情图推进当前这一幕，但不要急：一个要点可以用几拍来铺垫，确实演到了才报告。
+- 玩家的行动离开了这一幕要讲的事，也照着玩家的行动演出结果。世界里确实做不到的事可以演成受阻，但不要找理由（拦路、劝阻、让别人代办）把${pName}挡回这一幕；要不要回到这一幕由玩家决定，你只要如实报告 offTrack，引擎会去问玩家。
 - 每一拍都要有变化：新信息、关系变化、意外。让其他角色按自己的目标和性格主动行动，利用他们之间的张力和秘密。
 - location 只能填「地点」里列出的名字；present、speakers、reveals 只能填「角色」里列出的名字。临时人物在 plan 里交代就行。
 - 这一拍结尾给玩家 2～4 个选项（options）：方向彼此不同、符合${pName}的性格和处境，写成主角要做的事。
   岔路（出口有两个以上）由玩家决定：想让某个选项通往某条路，就在它的 exit 里写目标幕 id；不要自己在 exit 里替玩家选岔路。
   结果不确定、值得掷骰的选项可以带 check；不需要的写 null。结局幕不用给选项。
-${PLOT_REPORT_RULES}`;
+${plotReportRules('adv')}`;
 }
 
 interface AdvPromptInput {

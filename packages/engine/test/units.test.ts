@@ -43,6 +43,15 @@ describe('回复解析', () => {
     ]);
   });
 
+  it('兼容漏了【】的「角色名（动作）台词」，只认已知角色', () => {
+    expect(parseScript('林夕（隔空指向伞骨）第七根。\n白鸦(合上簿子)别碰。\n雨声（远处）渐渐大了。\n林夕（叹气）', { cast })).toEqual([
+      { kind: 'line', characterId: 'char_02', name: '林夕', text: '（隔空指向伞骨）第七根。' },
+      { kind: 'line', characterId: 'char_03', name: '白鸦', text: '(合上簿子)别碰。' },
+      { kind: 'narration', text: '雨声（远处）渐渐大了。' },
+      { kind: 'narration', text: '林夕（叹气）' },
+    ]);
+  });
+
   it('旁白带「旁白：」或【旁白】前缀时去掉前缀', () => {
     expect(parseScript('旁白：盐阶同时震动。\n【林夕】走吧。\n【旁白】灯灭了。\n旁白:风停了。', { cast })).toEqual([
       { kind: 'narration', text: '盐阶同时震动。' },
