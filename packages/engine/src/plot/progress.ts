@@ -95,6 +95,9 @@ function enter(s: PlotState, to: string): void {
   s.visited.push(to);
 }
 
+/** 当前幕是这个周目追加的幕（剧情 ADV 里就是跑偏时"就这样走"插进来的幕）。 */
+export const inAppendedScene = (s: PlotState): boolean => !!s.scene && s.appended.scenes.some((x) => x.id === s.scene?.id);
+
 /** 剧情图暂停或换到新的幕之后，上一拍的选项里带着出口的去掉（那些出口属于原来的幕）。 */
 function withoutExits(menu: PlotMenu | null): PlotMenu | null {
   if (!menu || menu.source !== 'ai') return null;

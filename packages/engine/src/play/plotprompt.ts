@@ -5,7 +5,7 @@
  */
 import type { PlotScene, VariableDef } from '@auto-adv/schema';
 import { OUTCOME_LABELS, type CheckResult } from '../plot/dice.ts';
-import { sceneById, type PlotState } from '../plot/progress.ts';
+import { inAppendedScene, sceneById, type PlotState } from '../plot/progress.ts';
 import { conditionContext } from '../plot/runner.ts';
 import { choosableExits } from '../plot/transition.ts';
 import { evalCondition } from '../plot/conditions.ts';
@@ -76,6 +76,13 @@ export function plotSection(world: Pick<WorldData, 'variables'>, plot: PlotState
         out.push('这是岔路，走哪条路由玩家决定：不要自己替玩家选路。可以在给玩家的选项里带上 exit（目标幕 id），让玩家选。');
       }
     } else out.push('## 出口\n（现在没有打开的出口，继续演这一幕）');
+    if (mode === 'adv' && inAppendedScene(plot) && exits[0]) {
+      // 跑偏时插进来的幕（16.6"就这样走"）：玩家回到原来那条线上不算偏离，收个尾接回去
+      const back = sceneById(plot, exits[0].to);
+      out.push(
+        `这一幕是玩家跑偏时插进来的一段，演完就接回「${back?.title || exits[0].to}」。玩家的行动回到原来那条线上不算偏离（offTrack 写 false），这时把这一幕收个尾，在 exit 里走出口。`,
+      );
+    }
     if (sceneMaxed(plot)) out.push('这一幕已经演满了：这一拍要用故事里自然发生的事把场面过渡出去，并在 exit 里选一条路。');
     if (mode === 'adv' ? plot.pullBack : plot.offTrack >= 2) {
       // 剧情 ADV 里跑偏了要先问玩家（16.6），玩家选了"拉回来"或者恢复剧情图才拉

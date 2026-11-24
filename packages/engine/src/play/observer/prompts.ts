@@ -47,11 +47,19 @@ export const plotReportExample = {
   check: null,
 };
 
-export const PLOT_REPORT_RULES = `剧情图（如果有）：
+/** offTrack 的含义：观察模式看戏本身；剧情 ADV 看玩家的行动（16.6：玩家想离开这一幕，由玩家决定要不要回来）。 */
+const OFF_TRACK_RULE = {
+  observer: '- offTrack：这一拍的戏偏离了当前这一幕要讲的事就写 true。',
+  adv: '- offTrack：看玩家这一次的行动。玩家想离开当前这一幕要讲的事（去别的地方、做和这一幕无关的事）就写 true，哪怕你这一拍把场面接回了这一幕也写 true；玩家的行动还在这一幕里就写 false。玩家这一拍没有新的行动时，看这一拍的戏有没有偏离这一幕。',
+};
+
+export const plotReportRules = (mode: 'observer' | 'adv') => `剧情图（如果有）：
 - points 写这一拍真正演到的要点 id；sceneDone 在这一幕演完时写 true；exit 写要走的出口（目标幕 id），只能从「出口」里选，还不想走就留空。引擎会核对：没演够最少拍数、条件不成立的出口都会被驳回。
-- offTrack：这一拍的戏偏离了当前这一幕要讲的事就写 true。
+${OFF_TRACK_RULE[mode]}
 - set：剧情里发生了影响数值的事才写，op 是 + / - / =；一拍的变化要小，引擎会截到上限。没有就写空数组。
 - check：只有结果不确定、值得掷骰的关键行动才写 {"var": "属性变量 id（纯运气就留空）", "dc": 难度 8～18, "label": "行动，例如：撬开铁门"}；引擎先掷骰，再让演员按结果演。大多数拍写 null。`;
+
+export const PLOT_REPORT_RULES = plotReportRules('observer');
 
 export const DirectorOut = z.object({
   plan: required,

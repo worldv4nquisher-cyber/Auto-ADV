@@ -8,7 +8,7 @@ import type { PlotAppend, PlotMark, PlotMenu } from '../api.ts';
 import type { UnlockKind } from '../play/db.ts';
 import { describeCondition, evalCondition } from './conditions.ts';
 import { type CheckResult, rollCheck } from './dice.ts';
-import { type PlotState, sceneById } from './progress.ts';
+import { inAppendedScene, type PlotState, sceneById } from './progress.ts';
 import { conditionContext } from './runner.ts';
 import { choosableExits, decideTransition } from './transition.ts';
 import { applyEffects, mergeChanges } from './vars.ts';
@@ -75,11 +75,12 @@ export function judgeBeat(p: JudgeInput): Judged {
   // 剧情图暂停中（剧情 ADV）：只核对数值，不推进剧情图
   const paused = p.mode === 'adv' && s.paused && !scene.ending;
 
-  // 要点：只能是当前幕的、还没演到过的
+  // 要点：只能是当前幕的、还没演到过的。模型偶尔把 sc_01_1 写成 sc01_1：只在当前幕里按去掉符号后的写法对一下
   const own = new Set(scene.points.map((x) => x.id));
+  const loose = (id: string) => id.toLowerCase().replace(/[^a-z0-9]/g, '');
   const points: string[] = [];
   for (const raw of paused ? [] : p.report.points) {
-    const id = raw.trim();
+    const id = own.has(raw.trim()) ? raw.trim() : (scene.points.find((x) => loose(x.id) === loose(raw))?.id ?? raw.trim());
     if (!id) continue;
     if (!own.has(id)) notes.push(`要点 ${id} 不属于当前这一幕，不能跳着演`);
     else if (s.points.has(id)) notes.push(`要点 ${id} 之前已经演到过了`);
@@ -138,13 +139,15 @@ export function judgeBeat(p: JudgeInput): Judged {
       changes = mergeChanges(changes, r.changes);
       mark.exit = { to: t.exit.to, by: t.exit.by };
     } else if (t.menu) mark.menu = t.menu;
-    // 剧情 ADV：连续偏离、这一拍又没换幕也没到岔路，就停下来问玩家（玩家选过"不用管"的这一幕不再问）
+    // 剧情 ADV：连续偏离、这一拍又没换幕也没到岔路，就停下来问玩家（玩家选过"不用管"的这一幕不再问；
+    // 跑偏时插进来的幕本来就在剧情图外，最多演 4 拍就接回去，也不再问）
     if (
       p.mode === 'adv' &&
       mark.offTrack &&
       !mark.exit &&
       !mark.menu &&
       !s.driftIgnored &&
+      !inAppendedScene(s) &&
       s.offTrack + 1 >= DRIFT_ASK_AFTER
     ) {
       mark.askDrift = true;
@@ -217,7 +220,12 @@ export function aiMenu(
     if (options.length >= 4) break;
     const opt: PlotMenu['options'][number] = { label, enabled: true };
     // 剧情图暂停中不换幕：选项上的出口不要
-    const to = s.paused ? '' : o.exit?.trim();
+    let to = s.paused ? '' : o.exit?.trim();
+    if (to && s.sceneBeats < scene.minBeats) {
+      // 选项是导演提的，和导演换幕一样要演满最少拍数（s 已经算上了这一拍）
+      notes.push(`这一幕至少要演 ${scene.minBeats} 拍，现在才 ${s.sceneBeats} 拍：选项「${label}」先不带出口`);
+      to = '';
+    }
     if (to) {
       const e = exits.find((x) => x.to === to);
       if (!e) notes.push(`选项「${label}」要去的 ${to} 不是这一幕的出口，改成留在这一幕`);

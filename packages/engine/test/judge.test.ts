@@ -1,4 +1,4 @@
-import { PlotGraph, VariableDef } from '@auto-adv/schema';
+import { PlotGraph, type PlotScene, VariableDef } from '@auto-adv/schema';
 import { describe, expect, it } from 'vitest';
 import type { PlayEvent } from '../src/api.ts';
 import { GraphOut, toGraph } from '../src/genesis/graph.ts';
@@ -63,6 +63,10 @@ describe('judgeBeat：导演报告的进度由引擎核对', () => {
     });
     expect(mark.points).toEqual(['sc_01_2']);
     expect(mark.notes?.join('\n')).toMatch(/sc_01_1 之前已经演到过[\s\S]*sc_02_1 不属于当前这一幕/);
+    // 少写了下划线的 id 在当前幕里对得上就认
+    const loose = judgeBeat({ state: fresh(), variables, mode: 'observer', report: report({ points: ['sc01_2', 'SC-02-1'] }), playerAction: false, check: null });
+    expect(loose.mark.points).toEqual(['sc_01_2']);
+    expect(loose.mark.notes?.join()).toContain('SC-02-1 不属于当前这一幕');
   });
 
   it('数值：每拍有上限，演到要点或检定成功时用突破上限；写法不对的丢掉', () => {
@@ -164,6 +168,10 @@ describe('剧情 ADV 跑偏（16.6）', () => {
     expect(s).toMatchObject({ driftIgnored: false, offTrack: 0 });
     s.offTrack = 1;
     expect(drift(s).askDrift).toBe(true);
+    // 跑偏时插进来的幕（这个周目追加的幕）里不再问：最多演几拍就接回去
+    s.appended = { chapters: [], scenes: [s.scene as PlotScene] };
+    expect(drift(s)).toMatchObject({ offTrack: true });
+    expect(drift(s).askDrift).toBeUndefined();
   });
 
   it('暂停剧情图：只核对数值，不报告要点、不换幕、不算拍数；选项上的出口去掉', () => {
@@ -195,7 +203,7 @@ describe('剧情 ADV 跑偏（16.6）', () => {
 describe('AI 给玩家的选项', () => {
   it('去重、最多 4 个，出口必须是这一幕的，条件不成立的锁住，检定按属性核对', () => {
     const { menu, notes } = aiMenu(
-      fresh(),
+      { ...fresh(), sceneBeats: 2 },
       [
         { label: '跟她走', exit: 'sc_02' },
         { label: '跟她走' },
@@ -235,7 +243,7 @@ describe('AI 给玩家的选项', () => {
       ],
     });
     const { menu, notes } = aiMenu(
-      initialPlotState(g, variables),
+      { ...initialPlotState(g, variables), sceneBeats: 2 },
       [
         { label: '回家', exit: 'sc_02' },
         { label: '翻开那本书', exit: 'sc_03' },
@@ -244,6 +252,19 @@ describe('AI 给玩家的选项', () => {
     );
     expect(menu?.options).toEqual([{ label: '回家', enabled: true, exit: 'sc_02' }]);
     expect(notes.join()).toContain('现在还走不了');
+  });
+
+  it('这一幕没演满最少拍数：选项先不带出口（和导演换幕一样）', () => {
+    const s = fresh();
+    expect(s.scene?.minBeats).toBe(2);
+    const early = aiMenu({ ...s, sceneBeats: 1 }, [{ label: '跟她走', exit: 'sc_02' }, { label: '留下' }], variables);
+    expect(early.menu?.options).toEqual([
+      { label: '跟她走', enabled: true },
+      { label: '留下', enabled: true },
+    ]);
+    expect(early.notes.join()).toContain('至少要演 2 拍');
+    const later = aiMenu({ ...s, sceneBeats: 2 }, [{ label: '跟她走', exit: 'sc_02' }], variables);
+    expect(later.menu?.options).toEqual([{ label: '跟她走', enabled: true, exit: 'sc_02' }]);
   });
 });
 
