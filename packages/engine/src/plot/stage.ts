@@ -5,10 +5,19 @@
  * 纯函数，界面和引擎共用（界面从 @auto-adv/engine/stage 引入，不会把引擎其余部分打包进去）。
  */
 import type { PlotGraph, StageCommand } from '@auto-adv/schema';
-import type { CheckResult, PlayEvent, SceneState, Segment, VarChange } from '../api.ts';
+import type { CheckResult, DriftChoice, PlayEvent, SceneState, Segment, VarChange } from '../api.ts';
 import { matchByName } from '../world/render.ts';
 
 type Cast = readonly { id: string; name: string; aliases?: string[] }[];
+
+/** 剧情 ADV 跑偏时的选择（16.6）显示成的文字。 */
+export const DRIFT_LABELS: Record<DriftChoice, string> = {
+  pull: '拉回来',
+  detour: '就这样走',
+  pause: '暂停剧情图',
+  resume: '恢复剧情图',
+  ignore: '不用管',
+};
 
 /** 说话人：角色 id、去掉 char_ 前缀的 id、名字或别称都可以；都对不上就是临时人物。 */
 export function resolveSpeaker(token: string, cast: Cast): { characterId: string | null; name: string } {
@@ -106,7 +115,7 @@ export type BacklogEntry =
     }
   | { kind: 'check'; step: number; check: CheckResult }
   | { kind: 'scene'; step: number; title: string; chapter: string | null }
-  /** 观察模式里观众留下的话：导演指令、悄悄话。不上舞台，只进回想。 */
+  /** 不上舞台、只进回想的东西：观察模式里观众的导演指令和悄悄话，剧情 ADV 里跑偏时的选择。 */
   | { kind: 'note'; step: number; label: string; text: string };
 
 export interface Timeline {
@@ -255,6 +264,11 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
           : [];
       for (const c of stageFromSegments(segs, { characters: opts.characters, before: view, scene: place, protagonistId: opts.auto.protagonistId }))
         run(ev, c);
+      continue;
+    }
+    if (ev.kind === 'drift') {
+      const text = `${DRIFT_LABELS[ev.drift ?? 'pull']}${ev.drift === 'detour' && ev.text ? `：插进新的一幕「${ev.text}」` : ''}`;
+      backlog.push({ kind: 'note', step: steps.length, label: '剧情图', text });
       continue;
     }
     if (ev.kind === 'choice') {

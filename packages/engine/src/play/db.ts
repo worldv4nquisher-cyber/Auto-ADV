@@ -46,7 +46,7 @@ interface EventRow {
 
 type EventData = Pick<
   PlayEvent,
-  'text' | 'segments' | 'scene' | 'edited' | 'characterId' | 'beat' | 'plot' | 'stage' | 'choice' | 'check'
+  'text' | 'segments' | 'scene' | 'edited' | 'characterId' | 'beat' | 'plot' | 'stage' | 'choice' | 'check' | 'drift'
 >;
 
 function toEvent(r: EventRow): PlayEvent {
@@ -65,6 +65,7 @@ function dataOf(e: PlayEvent): string {
   if (e.stage !== undefined) d.stage = e.stage;
   if (e.choice !== undefined) d.choice = e.choice;
   if (e.check !== undefined) d.check = e.check;
+  if (e.drift !== undefined) d.drift = e.drift;
   if (e.edited) d.edited = true;
   return JSON.stringify(d);
 }

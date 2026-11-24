@@ -248,8 +248,14 @@ export interface BeatMeta {
   similarity?: number;
 }
 
-/** 走出口的原因：auto 条件成立、剧本 jump、玩家选项、只有一条路、演满 maxBeats 走 default、导演判断。 */
-export type ExitReason = 'auto' | 'script' | 'choice' | 'single' | 'default' | 'director';
+/** 走出口的原因：auto 条件成立、剧本 jump、玩家选项、只有一条路、演满 maxBeats 走 default、导演判断、剧情 ADV 跑偏时"就这样走"进入新插进来的一幕。 */
+export type ExitReason = 'auto' | 'script' | 'choice' | 'single' | 'default' | 'director' | 'drift';
+
+/**
+ * 剧情 ADV 跑偏时玩家的选择（16.6）：pull 拉回来（只管下一拍）；detour 就这样走（把跑偏的这一段写成新的一幕，演完接回已有的幕）；
+ * pause 暂停剧情图（之后自由推进）；resume 恢复剧情图；ignore 不用管（这一幕不再提醒）。
+ */
+export type DriftChoice = 'pull' | 'detour' | 'pause' | 'resume' | 'ignore';
 
 /** 一拍结束时弹出的选项（等玩家选）。 */
 export interface PlotMenu {
@@ -297,6 +303,10 @@ export interface PlotMark {
   append?: PlotAppend;
   /** 导演标记这一拍偏离了当前幕（16.6）。 */
   offTrack?: boolean;
+  /** 剧情 ADV：连续几拍偏离了当前幕，这一拍之后问玩家怎么处理（16.6）。 */
+  askDrift?: boolean;
+  /** 剧情 ADV：这一拍是在剧情图暂停时演的（不推进剧情图，不算这一幕的拍数）。 */
+  paused?: boolean;
 }
 
 /**
@@ -308,7 +318,7 @@ export interface PlotMark {
 export interface PlayEvent {
   id: string;
   parentId: string | null;
-  kind: 'opening' | 'player' | 'ai' | 'scene' | 'directive' | 'whisper' | 'script' | 'choice' | 'check';
+  kind: 'opening' | 'player' | 'ai' | 'scene' | 'directive' | 'whisper' | 'script' | 'choice' | 'check' | 'drift';
   createdAt: number;
   /** player / directive / whisper 的原文。 */
   text?: string;
@@ -331,6 +341,8 @@ export interface PlayEvent {
   choice?: { index: number; label: string };
   /** check：检定结果；ai：导演安排里的检定（先掷骰，再演出结果）。 */
   check?: CheckResult;
+  /** drift：剧情 ADV 跑偏时玩家的选择；detour 时 text 是新幕的标题，plot 上记着追加的幕和走向它的出口。 */
+  drift?: DriftChoice;
 }
 
 export interface PathEvent extends PlayEvent {
@@ -400,6 +412,11 @@ export interface AdvView {
   aiScene: boolean;
   /** 这一幕要由 AI 演出，但还没有配置模型（只能看到占位旁白）。 */
   needsModel: boolean;
+  /**
+   * 跑偏（16.6）：ask 是连续几拍偏离了当前这一幕，要玩家先决定怎么处理；paused 是剧情图暂停中；
+   * pullBack 是下一拍要把场面带回这一幕；detour 是能不能"就这样走"（要调模型写新的一幕）。
+   */
+  drift: { ask: boolean; paused: boolean; pullBack: boolean; detour: boolean };
   vars: Record<string, Scalar>;
   /** 跨周目进度。隐藏结局达成之前不计入总数，标题显示为"？？？"。 */
   progress: {
@@ -409,6 +426,19 @@ export interface AdvView {
     cgs: { unlocked: string[]; total: number };
     scenes: { visited: number; total: number };
   };
+}
+
+/**
+ * 一个世界的跨周目收集（16.8）：结局、CG、走过的幕。只增不减，回退、换分支、删周目都不影响。
+ * 没达成的隐藏结局不计入总数、标题显示为"？？？"；没解锁的 CG 不告诉出现在哪一幕。
+ */
+export interface WorldProgress {
+  endings: { id: string; title: string; kind: 'good' | 'normal' | 'bad'; hidden: boolean; reached: boolean; firstAt: number | null }[];
+  reached: number;
+  total: number;
+  /** 手写剧本里出现的 CG，按剧情图里幕的顺序。 */
+  cgs: { id: string; unlocked: boolean; firstAt: number | null; scene: string | null }[];
+  scenes: { visited: number; total: number };
 }
 
 /** 剧情图上的进度（从事件折叠出来的，见 plot/progress.ts）。世界没有剧情图时除了 time 都是空的。 */
@@ -499,7 +529,7 @@ export type ObserverChunk =
   | { type: 'event'; event: PathEvent };
 
 export type PlayChunk =
-  | { type: 'phase'; phase: 'memory' | 'thinking' | 'writing' }
+  | { type: 'phase'; phase: 'memory' | 'thinking' | 'writing' | 'detour' }
   /** 已保存的玩家输入。 */
   | { type: 'player'; event: PathEvent }
   /** 第 index 段的最新内容（流式更新，同一段会多次出现）。 */
@@ -529,6 +559,8 @@ export type EngineContract = {
   runGenesis: Streaming<{ worldId: string; from?: GenesisStepId }, GenesisChunk, WorldSummary>;
 
   listPlaythroughs: Unary<{ worldId: string }, PlaythroughInfo[]>;
+  /** 跨周目的收集：结局、CG 画廊、走过的幕。世界没有剧情图时为 null。 */
+  worldProgress: Unary<{ worldId: string }, WorldProgress | null>;
   startPlaythrough: Unary<StartPlaythroughParams, PlayView>;
   getPlaythrough: Unary<PlayRef, PlayView>;
   deletePlaythrough: Unary<PlayRef, void>;
@@ -554,6 +586,8 @@ export type EngineContract = {
   advChoose: Streaming<PlayRef & { index: number }, PlayChunk, PlayView>;
   /** 剧情 ADV：在 AI 演出的幕里输入一句自由行动（代替选项）。 */
   advInput: Streaming<PlayRef & { text: string }, PlayChunk, PlayView>;
+  /** 剧情 ADV：跑偏时的选择（16.6）。"就这样走"要调模型把跑偏的这一段写成新的一幕。 */
+  advDrift: Streaming<PlayRef & { choice: DriftChoice }, PlayChunk, PlayView>;
   /** 剧情 ADV：舞台第一次显示了某张 CG（记跨周目解锁）。 */
   advShown: Unary<PlayRef & { eventId: string; cg: string }, { unlocked: boolean }>;
 

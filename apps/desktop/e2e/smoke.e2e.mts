@@ -22,9 +22,9 @@ const appDir = path.resolve(import.meta.dirname, '..');
 const shotsDir = process.env.E2E_SCREENSHOTS;
 const API_KEY = 'sk-e2e-secret-key';
 
-/** 点舞台（避开文本框里的按钮），一直到出现选项或周目结束。 */
-async function advUntil(page: Page, what: 'menu' | 'ending', max = 300) {
-  const sel = what === 'menu' ? '[data-testid="adv-menu"]' : '[data-testid="adv-ending"]';
+/** 点舞台（避开文本框里的按钮），一直到出现选项、跑偏的提示或周目结束。 */
+async function advUntil(page: Page, what: 'menu' | 'ending' | 'drift', max = 300) {
+  const sel = `[data-testid="adv-${what}"]`;
   for (let i = 0; i < max; i++) {
     if (await page.$(sel)) return;
     // AI 在演这一拍：等它演完再点
@@ -36,7 +36,7 @@ async function advUntil(page: Page, what: 'menu' | 'ending', max = 300) {
     await page.click('[data-testid="adv-stage"]', { position: { x: 12, y: 12 } });
     await page.waitForTimeout(15);
   }
-  throw new Error(`点了 ${max} 次还没有${what === 'menu' ? '出现选项' : '到结局'}`);
+  throw new Error(`点了 ${max} 次还没有${what === 'menu' ? '出现选项' : what === 'drift' ? '出现跑偏的提示' : '到结局'}`);
 }
 
 async function choose(page: Page, index: number, label: string) {
@@ -304,6 +304,29 @@ try {
   await shot(page, '13b-adv-ai-menu');
   step('剧情 ADV：AI 演出第一幕，给出选项');
 
+  // 跑偏：连续两拍离开这一幕要讲的事，停下来问玩家（模拟导演看到"跑题"就报告偏离）
+  for (const [text, until] of [
+    ['跑题：先去码头边的酒馆坐坐', 'menu'],
+    ['跑题：再要一杯热茶', 'drift'],
+  ] as const) {
+    await page.fill('[data-testid="adv-input"] input', text);
+    await page.press('[data-testid="adv-input"] input', 'Enter');
+    await page.waitForSelector(`[data-testid="adv-text"] >> text=你决定：${text}`, { timeout: 60_000 });
+    await advUntil(page, until);
+  }
+  assert.match((await page.textContent('[data-testid="adv-drift"]')) ?? '', /离开了「归乡」要讲的事[\s\S]*拉回来[\s\S]*就这样走[\s\S]*暂停剧情图[\s\S]*不用管/);
+  assert.equal(await page.$('[data-testid="adv-menu"]'), null, '跑偏的提示先于选项');
+  await shot(page, '13b2-adv-drift');
+  await page.click('[data-testid="adv-drift-pause"]');
+  await page.waitForSelector('[data-testid="adv-paused"]');
+  await page.waitForSelector('[data-testid="adv-menu"]');
+  await page.click('[data-testid="adv-resume"]');
+  await page.waitForSelector('[data-testid="adv-paused"]', { state: 'detached' });
+  await page.click('[data-testid="adv-backlog"]');
+  assert.match((await page.textContent('[data-testid="adv-backlog-panel"]')) ?? '', /暂停剧情图[\s\S]*恢复剧情图/);
+  await page.click('[data-testid="adv-panel-close"]');
+  step('跑偏时停下来问玩家；暂停剧情图、再恢复');
+
   await page.fill('[data-testid="adv-input"] input', '问她那晚看到了什么');
   await page.press('[data-testid="adv-input"] input', 'Enter');
   await page.waitForSelector('[data-testid="adv-text"] >> text=你决定：问她那晚看到了什么', { timeout: 60_000 });
@@ -417,6 +440,21 @@ try {
   await page.waitForSelector('[data-testid="adv-check"] >> text=难度 12', { timeout: 20_000 });
   await shot(page, '22-adv-check');
   step('带检定的选项：舞台显示掷骰结果');
+
+  // 收集：结局和 CG 画廊跨周目累计
+  await page.click('[data-testid="adv-exit"]');
+  await page.click('button:has-text("收集")');
+  await page.waitForSelector('[data-testid="collection"]');
+  assert.equal(await page.textContent('[data-testid="collection-endings"]'), '达成 2 / 3');
+  assert.equal(await page.textContent('[data-testid="collection-cgs"]'), '1 / 2');
+  assert.equal((await page.$$('[data-testid="collection-cg-locked"]')).length, 1);
+  await page.click('[data-testid="collection-cg"]');
+  await page.waitForSelector('[data-testid="collection-cg-view"] >> text=潮汐归来');
+  await shot(page, '23-collection-cg');
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('[data-testid="collection-cg-view"]', { state: 'detached' });
+  await shot(page, '24-collection');
+  step('收集：结局 2 / 3，CG 画廊里能看已经解锁的 CG');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

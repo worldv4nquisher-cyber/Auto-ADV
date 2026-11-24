@@ -21,17 +21,18 @@ import { engine, errorMessage } from '../lib/engine.ts';
 import { formatTime, formatTokens } from '../lib/format.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
+import { CollectionView } from './Collection.tsx';
 
-type Tab = 'overview' | 'characters' | 'locations' | 'plot' | 'lore' | 'opening';
+type Tab = 'overview' | 'characters' | 'locations' | 'plot' | 'collection' | 'lore' | 'opening';
 
-export function WorldPage({ worldId }: { worldId: string }) {
+export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab?: Tab }) {
   const { navigate } = useRouter();
   const genesis = useGenesis();
   const toast = useToast();
   const [world, setWorld] = useState<WorldDetail | null>(null);
   const [plays, setPlays] = useState<PlaythroughInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('overview');
+  const [tab, setTab] = useState<Tab>(initialTab ?? 'overview');
   const [starting, setStarting] = useState(false);
   const [dialog, setDialog] = useState(false);
   const job = genesis.jobs[worldId];
@@ -136,6 +137,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
                 { value: 'characters', label: `角色 ${world.characters.length || ''}` },
                 { value: 'locations', label: `地点 ${world.locations.length || ''}` },
                 { value: 'plot', label: '剧情图' },
+                ...(world.graph ? [{ value: 'collection' as const, label: '收集' }] : []),
                 { value: 'lore', label: `设定集 ${world.lore.length || ''}` },
                 { value: 'opening', label: '开场' },
               ]}
@@ -172,6 +174,7 @@ export function WorldPage({ worldId }: { worldId: string }) {
               ) : (
                 <Empty title="剧情图还没有生成">观察模式和剧情 ADV 都按剧情图一幕一幕推进故事。</Empty>
               ))}
+            {tab === 'collection' && <CollectionView worldId={worldId} />}
             {tab === 'lore' && (
               <div className="grid gap-2">
                 {world.lore.length === 0 && <Empty title="设定集还没有生成" />}

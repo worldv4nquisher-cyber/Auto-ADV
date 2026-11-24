@@ -80,6 +80,7 @@ const EXIT_REASONS = {
   single: '唯一的路',
   default: '演满了，默认',
   director: '导演判断',
+  drift: '跑偏后插进的新一幕',
 } as const;
 
 function stageLine(c: StageCommand, name: (token: string) => string): string | null {

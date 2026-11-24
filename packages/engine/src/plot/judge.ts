@@ -43,6 +43,9 @@ export interface JudgeInput {
   append?: PlotAppend;
 }
 
+/** 剧情 ADV：连续几拍偏离当前幕就问玩家怎么处理（16.6）。 */
+export const DRIFT_ASK_AFTER = 2;
+
 export interface Judged {
   mark: PlotMark;
   /** 这一拍解锁的东西（16.8）。 */
@@ -69,10 +72,13 @@ export function judgeBeat(p: JudgeInput): Judged {
   const firstBeat = s.sceneBeats === 0;
   const notes: string[] = [];
 
+  // 剧情图暂停中（剧情 ADV）：只核对数值，不推进剧情图
+  const paused = p.mode === 'adv' && s.paused && !scene.ending;
+
   // 要点：只能是当前幕的、还没演到过的
   const own = new Set(scene.points.map((x) => x.id));
   const points: string[] = [];
-  for (const raw of p.report.points) {
+  for (const raw of paused ? [] : p.report.points) {
     const id = raw.trim();
     if (!id) continue;
     if (!own.has(id)) notes.push(`要点 ${id} 不属于当前这一幕，不能跳着演`);
@@ -95,11 +101,13 @@ export function judgeBeat(p: JudgeInput): Judged {
 
   const mark: PlotMark = { scene: scene.id };
   if (p.append) mark.append = p.append;
-  if (p.report.offTrack && !scene.ending) mark.offTrack = true;
+  if (p.report.offTrack && !scene.ending && !paused) mark.offTrack = true;
   const unlocks: Judged['unlocks'] = [];
-  if (firstBeat) unlocks.push({ kind: 'scene', id: scene.id });
+  if (firstBeat && !paused) unlocks.push({ kind: 'scene', id: scene.id });
 
-  if (scene.ending) {
+  if (paused) {
+    mark.paused = true;
+  } else if (scene.ending) {
     // 结局幕：第一拍把结局写出来，这一拍提交时就算达成结局
     mark.ending = scene.id;
     mark.finished = true;
@@ -130,6 +138,17 @@ export function judgeBeat(p: JudgeInput): Judged {
       changes = mergeChanges(changes, r.changes);
       mark.exit = { to: t.exit.to, by: t.exit.by };
     } else if (t.menu) mark.menu = t.menu;
+    // 剧情 ADV：连续偏离、这一拍又没换幕也没到岔路，就停下来问玩家（玩家选过"不用管"的这一幕不再问）
+    if (
+      p.mode === 'adv' &&
+      mark.offTrack &&
+      !mark.exit &&
+      !mark.menu &&
+      !s.driftIgnored &&
+      s.offTrack + 1 >= DRIFT_ASK_AFTER
+    ) {
+      mark.askDrift = true;
+    }
   }
 
   if (points.length) mark.points = points;
@@ -197,7 +216,8 @@ export function aiMenu(
     if (!label || options.some((x) => x.label === label)) continue;
     if (options.length >= 4) break;
     const opt: PlotMenu['options'][number] = { label, enabled: true };
-    const to = o.exit?.trim();
+    // 剧情图暂停中不换幕：选项上的出口不要
+    const to = s.paused ? '' : o.exit?.trim();
     if (to) {
       const e = exits.find((x) => x.to === to);
       if (!e) notes.push(`选项「${label}」要去的 ${to} 不是这一幕的出口，改成留在这一幕`);

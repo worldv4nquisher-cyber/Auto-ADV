@@ -105,10 +105,14 @@ function directorPlan(user: string, count: number): string {
 /**
  * 剧情 ADV 的导演：和观察模式一样报告进度，再给玩家三个选项（其中一个带检定）。
  * 岔路演完时引擎会弹出出口菜单，这里不替玩家选路。
+ * 玩家输入里有"跑题"就报告偏离了这一幕、不推进（测跑偏时的四个选项）；剧情图暂停时不报告进度。
  */
 function advBeat(user: string, count: number): string {
   const plan = JSON.parse(directorPlan(user, count)) as Record<string, unknown> & { present: string[] };
-  const report = plotReport(user);
+  const action = /# 玩家这一次的行动\n(.+)/.exec(user)?.[1] ?? '';
+  const paused = user.includes('玩家暂停了剧情图');
+  const drifting = action.includes('跑题') && !user.includes('玩家想回到这一幕');
+  const report = paused || drifting ? { ...plotReport(user), points: [], sceneDone: false, exit: '', offTrack: drifting && !paused } : plotReport(user);
   const ending = user.includes('这是结局幕');
   const who = plan.present[0] ?? '对方';
   const options = ending
@@ -118,7 +122,24 @@ function advBeat(user: string, count: number): string {
         { label: '仔细观察四周', exit: '', check: { var: report.attribute ?? '', dc: 12, label: '仔细观察四周' } },
         { label: '先把话题岔开', exit: '', check: null },
       ];
-  return JSON.stringify({ ...plan, options });
+  return JSON.stringify({ ...plan, ...report, options });
+}
+
+/** 剧情 ADV 跑偏时"就这样走"：把跑偏的这一段写成一幕，接回列出的最后一个幕。 */
+function advDetour(user: string): string {
+  const block = (name: string) => (user.split(`# ${name}`)[1] ?? '').split(/\n# /)[0] ?? '';
+  const targets = [...block('演完之后可以接回的幕').matchAll(/^- (sc_\d+)「/gm)].map((m) => m[1] as string);
+  const location = /^- (\S+)/m.exec(block('地点'))?.[1] ?? '';
+  const who = /^- ([^：\n]+)/m.exec(block('角色'))?.[1] ?? '';
+  return JSON.stringify({
+    title: '酒馆里的插曲',
+    what: '主角在酒馆里打听消息，意外听到了一段传闻。',
+    points: ['在酒馆里听到传闻', '有人注意到了主角'],
+    done: '主角离开酒馆',
+    location,
+    cast: who ? [who] : [],
+    rejoin: targets.at(-1) ?? '',
+  });
 }
 
 /**
@@ -278,6 +299,8 @@ export function storyReply(info: MockRequestInfo): string | undefined {
       return directorPlan(lastUser, info.count);
     case 'adv_beat':
       return advBeat(lastUser, info.count);
+    case 'adv_detour':
+      return advDetour(lastUser);
     case 'story_memory': {
       const names = [...firstUser.slice(0, firstUser.indexOf('# 之前的前情提要')).matchAll(/^- (\S+)/gm)].map((m) => m[1]);
       return JSON.stringify({

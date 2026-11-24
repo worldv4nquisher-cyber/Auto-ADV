@@ -313,6 +313,7 @@ export class Engine {
       runGenesis: (p, ctx) => this.runGenesis(p.worldId, p.from, ctx),
 
       listPlaythroughs: (p) => this.play.list(p.worldId),
+      worldProgress: (p) => this.play.progress(p.worldId),
       startPlaythrough: (p) => this.play.start(p),
       getPlaythrough: (p) => this.play.view(p),
       deletePlaythrough: (p) => this.play.delete(p),
@@ -330,6 +331,7 @@ export class Engine {
       advNext: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'continue' }, emit, ctx.signal)),
       advChoose: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'choose', index: p.index }, emit, ctx.signal)),
       advInput: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'input', text: p.text }, emit, ctx.signal)),
+      advDrift: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'drift', choice: p.choice }, emit, ctx.signal)),
       advShown: (p) => this.play.advShown(p, p.eventId, p.cg),
 
       observerControl: (p) => this.play.observerControl(p, p.action),

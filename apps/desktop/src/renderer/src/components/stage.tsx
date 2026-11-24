@@ -334,7 +334,8 @@ export function Backlog({
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' });
   }, []);
-  const entries = timeline.backlog.filter((b) => b.step <= cursor);
+  // 播到最后一步时，记在最后一步之后的东西（刚做的选择、跑偏时的选择）也显示出来
+  const entries = timeline.backlog.filter((b) => b.step <= cursor || cursor >= timeline.steps.length - 1);
   if (!entries.length) return <p className="text-sm text-faint">还没有内容。</p>;
   return (
     <div className="mx-auto max-w-3xl space-y-3 text-[15px] leading-7">

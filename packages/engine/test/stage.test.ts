@@ -240,6 +240,16 @@ describe('应用里的剧情 ADV', () => {
     v = await client.call('getPlaythrough', ref);
     expect(v.adv?.progress.cgs.unlocked).toEqual(['cg_reunion']);
     expect(v.playthrough.preview).toContain('潮水漫过了堤岸');
+
+    // 世界的收集：CG 画廊按幕的顺序列出，没解锁的不告诉在哪一幕；隐藏结局没达成时是"？？？"
+    const prog = await client.call('worldProgress', { worldId });
+    expect(prog?.cgs).toEqual([
+      { id: 'cg_reunion', unlocked: true, firstAt: expect.any(Number), scene: '潮汐归来' },
+      { id: 'cg_book', unlocked: false, firstAt: null, scene: null },
+    ]);
+    expect(prog).toMatchObject({ reached: 1, total: 3, scenes: { total: 8 } });
+    expect(prog?.endings.find((e) => e.id === 'sc_05')).toMatchObject({ title: '潮汐归来', reached: true, firstAt: expect.any(Number) });
+    expect(prog?.endings.find((e) => e.id === 'sc_08')).toMatchObject({ title: '？？？', reached: false, firstAt: null });
   });
 
   it('存档记住舞台播到哪一句；回到岔路换一条路；跨周目进度累计', async () => {

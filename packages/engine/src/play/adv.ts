@@ -5,25 +5,26 @@
  * 选项和检定、岔路由玩家决定、数值上限这些规则都在引擎里（plot/judge.ts、plot/transition.ts），不靠提示词。
  */
 import type { ChatMessage } from '@auto-adv/providers';
-import type { Character } from '@auto-adv/schema';
+import { type Character, PlotScene } from '@auto-adv/schema';
 import { z } from 'zod';
 import type { BeatMeta, PlayChunk, PlayEvent, PlotMark, SceneState, Segment } from '../api.ts';
-import { required, text } from '../genesis/specs.ts';
+import { list, required, text } from '../genesis/specs.ts';
 import type { Meter, ModelGateway } from '../llm/gateway.ts';
 import { generateJson, type JsonSpec, stripThinking } from '../llm/structured.ts';
 import type { CheckResult } from '../plot/dice.ts';
 import { aiMenu, checkSpecOf, judgeBeat, rollFor } from '../plot/judge.ts';
-import { cloneState, type PlotState, reducePlot } from '../plot/progress.ts';
+import { checkPlot } from '../plot/check.ts';
+import { cloneState, maxIdNumber, type PlotState, reducePlot, sceneById } from '../plot/progress.ts';
 import type { AiRequest, EventDraft } from '../plot/runner.ts';
 import { buildTimeline, stageFromSegments } from '../plot/stage.ts';
 import type { UnlockKind } from './db.ts';
-import { clip, renderBrief, renderCharacter, renderLocation, renderRelationships } from '../world/render.ts';
+import { clip, matchByName, renderBrief, renderCharacter, renderLocation, renderRelationships } from '../world/render.ts';
 import type { WorldData } from '../world/store.ts';
 import { BUDGET, selectLore, transcriptOf } from './context.ts';
 import type { SummaryRow } from './db.ts';
 import { validatePlan } from './observer/beat.ts';
 import { CheckProposal, DirectorOut, directorSpec, PLOT_REPORT_RULES, plotReportExample } from './observer/prompts.ts';
-import { checkInstruction, plotSection, sceneBrief } from './plotprompt.ts';
+import { checkInstruction, openExits, plotSection, sceneBrief } from './plotprompt.ts';
 import { parseScript, ScriptStream } from './script.ts';
 import { foldState, type StoryState } from './state.ts';
 
@@ -281,4 +282,169 @@ export async function runAdvBeat(p: AdvBeatInput): Promise<{ draft: EventDraft; 
     ...(changed ? { scene: nextScene } : {}),
   };
   return { draft, unlocks: judged.unlocks };
+}
+
+// ───────────── 跑偏："就这样走" ─────────────
+
+export const DetourOut = z.object({
+  title: required,
+  what: required,
+  points: list,
+  done: text.default(''),
+  location: text.default(''),
+  cast: list,
+  rejoin: text.default(''),
+});
+export type DetourOut = z.infer<typeof DetourOut>;
+
+export const advDetourSpec: JsonSpec<DetourOut> = {
+  name: 'adv_detour',
+  schema: DetourOut,
+  example: {
+    title: '新的一幕的标题（4～12 字）',
+    what: '这一幕要发生什么：接着最近跑偏的这段戏，把它写成一个完整的小场面（一两句）',
+    points: ['要点：这一幕里陆续要出现的事（1～3 条）'],
+    done: '演到什么程度算这一幕演完了（一句话）',
+    location: '地点名（只能用「地点」里列出的）',
+    cast: ['出场角色名'],
+    rejoin: '演完之后接回哪一幕：只能从「演完之后可以接回的幕」里选一个 id',
+  },
+};
+
+/** 新插进来的一幕演几拍：是一段插曲，比正常的幕短。 */
+const DETOUR_BEATS = { min: 1, max: 4 };
+/** 新的一幕最多几个要点。 */
+const DETOUR_POINTS = 3;
+
+/**
+ * "就这样走"之后可以接回的幕：当前这一幕（回来接着演）；当前幕只有一个打开的出口时，也可以直接接到它通往的幕。
+ * 当前幕是岔路时不能接到岔路后面的幕（岔路只能由玩家决定）。
+ */
+export function rejoinTargets(plot: PlotState): string[] {
+  const scene = plot.scene;
+  if (!scene) return [];
+  const exits = openExits(plot);
+  return [scene.id, ...(exits.length === 1 && exits[0] ? [exits[0].to] : [])];
+}
+
+const pad = (n: number) => String(n).padStart(2, '0');
+
+/** 模型写的新幕转成正式的幕：编号接着这个周目的剧情图往后排，只有一个出口，通往接回的幕。 */
+export function detourScene(world: Pick<WorldData, 'characters' | 'locations'>, plot: PlotState, raw: DetourOut): { scene: PlotScene; notes: string[] } {
+  const current = plot.scene as PlotScene;
+  const notes: string[] = [];
+  const id = `sc_${pad(maxIdNumber(plot.graph.scenes, 'sc') + 1)}`;
+  const targets = rejoinTargets(plot);
+  const want = raw.rejoin.trim();
+  const byTitle = plot.graph.scenes.find((x) => x.title && x.title === want)?.id;
+  let rejoin = targets.find((t) => t === want || t === byTitle);
+  if (!rejoin) {
+    rejoin = current.id;
+    if (want) notes.push(`新的一幕想接回的「${want}」不在可以接回的幕里，改成接回「${current.title || current.id}」`);
+  }
+  const location = raw.location.trim() ? matchByName(raw.location, [...world.locations])?.id : undefined;
+  const cast = [...new Set(raw.cast.flatMap((n) => matchByName(n, [...world.characters])?.id ?? []))];
+  const scene = PlotScene.parse({
+    id,
+    ...(current.chapter ? { chapter: current.chapter } : {}),
+    title: raw.title,
+    what: raw.what,
+    points: raw.points
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .slice(0, DETOUR_POINTS)
+      .map((t, i) => ({ id: `${id}_${i + 1}`, text: t })),
+    done: raw.done,
+    ...(location ? { location } : {}),
+    cast,
+    minBeats: DETOUR_BEATS.min,
+    maxBeats: DETOUR_BEATS.max,
+    exits: [{ to: rejoin, label: '', when: '', auto: false, set: [] }],
+  });
+  return { scene, notes };
+}
+
+function detourPrompt(world: WorldData, plot: PlotState, memory: string | null, transcript: string, pName: string): string {
+  const scene = plot.scene as PlotScene;
+  const targets = rejoinTargets(plot).map((id) => {
+    const t = sceneById(plot, id);
+    return `- ${id}「${t?.title || id}」${t?.what ? `：${t.what}` : ''}${id === scene.id ? '（回到刚才这一幕，接着把它演完）' : '（这一幕演完之后本来就要去的地方）'}`;
+  });
+  return [
+    `# 世界\n${world.brief ? renderBrief(world.manifest, world.brief, world.style) : world.manifest.title}`,
+    `# 角色\n${world.characters.map((c) => `- ${c.name}${c.summary ? `：${clip(c.summary, 60)}` : ''}`).join('\n')}`,
+    `# 地点\n${world.locations.map((l) => `- ${l.name}`).join('\n')}`,
+    `# 剧情图上当前这一幕：[${scene.id}] ${scene.title || scene.id}\n${scene.what}${
+      scene.points.length ? `\n要点：\n${scene.points.map((p) => `- [${plot.points.has(p.id) ? 'x' : ' '}] ${p.text}`).join('\n')}` : ''
+    }`,
+    `# 演完之后可以接回的幕\n${targets.join('\n')}`,
+    memory ? `# 前情提要\n${memory}` : '',
+    `# 最近发生的事\n${transcript || '（刚刚开场）'}`,
+    `# 要做的事\n最近几拍，玩家扮演的${pName}离开了这一幕要讲的事，玩家选择"就这样走"。请把跑偏的这段戏写成剧情图上新的一幕，插在当前这一幕后面：
+- 接着现在正在发生的事往下写，不要把场面拉回去；
+- 这是一段插曲，演 ${DETOUR_BEATS.min}～${DETOUR_BEATS.max} 拍，points 写 1～${DETOUR_POINTS} 个要点；
+- 不要提前揭开主线的秘密，也不要替玩家做决定；
+- rejoin 从「演完之后可以接回的幕」里选一个，让这段插曲演完之后自然地回到主线上。`,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+export interface AdvDetourInput {
+  gateway: ModelGateway;
+  world: WorldData;
+  path: PlayEvent[];
+  protagonist: Character | null;
+  summary: SummaryRow | null;
+  signal: AbortSignal;
+  meter: Meter;
+  emit: (c: PlayChunk) => void;
+}
+
+/**
+ * 剧情 ADV 跑偏时玩家选了"就这样走"（16.6）：导演把跑偏的这一段写成新的一幕，插在当前幕后面，演完接回已有的幕。
+ * 新的一幕记在 drift 事件上（plot.append），只属于这个周目，要过结构检查；先承诺后判定，已有的幕都不改。
+ */
+export async function runAdvDetour(p: AdvDetourInput): Promise<EventDraft> {
+  const { world, gateway } = p;
+  const pName = p.protagonist?.name ?? '主角';
+  const state = foldState(world, p.path);
+  const plot = state.plot;
+  if (!plot?.scene || plot.scene.ending) throw new Error('现在不能把这一段写成新的一幕');
+  const current = plot.scene;
+  const from = p.summary ? p.path.findIndex((e) => e.id === p.summary?.eventId) + 1 : 0;
+  const recent = p.path.slice(from).slice(-RECENT_EVENTS);
+  const known = new Set(plot.graph.scenes.map((x) => x.id));
+  const check = (raw: DetourOut) => {
+    const { scene } = detourScene(world, plot, raw);
+    const r = checkPlot({
+      graph: { ...plot.graph, start: scene.id, scenes: [scene] },
+      variables: world.variables,
+      characters: world.characters,
+      locations: world.locations,
+      known,
+    });
+    return { scene, errors: r.errors.map((e) => e.message) };
+  };
+
+  p.emit({ type: 'phase', phase: 'detour' });
+  const director = await gateway.forRole('director', 'adv.detour', p.meter);
+  const { value } = await generateJson(gateway, director, {
+    system: `你是一部剧情 ADV（视觉小说）的导演，负责维护剧情图。剧情图由"幕"组成，是骨架，不是剧本：只规定每一幕必须发生什么，具体怎么演留给演出时即兴发挥。`,
+    user: detourPrompt(world, plot, p.summary?.text ?? null, transcriptOf(world, recent, pName), pName),
+    spec: advDetourSpec,
+    signal: p.signal,
+    validate: (v) => {
+      const errors = check(v).errors;
+      return errors.length ? `新的一幕有这些问题，请修改：\n${errors.map((e) => `- ${e}`).join('\n')}` : null;
+    },
+  });
+  const { scene, notes } = detourScene(world, plot, value);
+  const mark: PlotMark = {
+    scene: current.id,
+    append: { chapters: [], scenes: [scene] },
+    exit: { to: scene.id, by: 'drift' },
+    ...(notes.length ? { notes } : {}),
+  };
+  return { kind: 'drift', drift: 'detour', text: scene.title || scene.id, plot: mark };
 }

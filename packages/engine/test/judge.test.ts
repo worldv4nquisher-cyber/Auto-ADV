@@ -133,6 +133,65 @@ describe('judgeBeat：导演报告的进度由引擎核对', () => {
   });
 });
 
+describe('剧情 ADV 跑偏（16.6）', () => {
+  const ev = (e: Partial<PlayEvent>): PlayEvent => ({ id: '', parentId: null, createdAt: 0, kind: 'ai', ...e }) as PlayEvent;
+  const drift = (s: PlotState, mode: 'adv' | 'observer' = 'adv') =>
+    judgeBeat({ state: s, variables, mode, report: report({ offTrack: true }), playerAction: true, check: null }).mark;
+
+  it('连续两拍偏离才问；观察模式不问；到了岔路不问；不用管之后这一幕不问，换幕后重新算', () => {
+    const s = withBeats(1);
+    const first = drift(s);
+    expect(first).toMatchObject({ offTrack: true });
+    expect(first.askDrift).toBeUndefined();
+    reducePlot(s, ev({ plot: first }));
+    expect(s.offTrack).toBe(1);
+    expect(drift(s).askDrift).toBe(true);
+    expect(drift(s, 'observer').askDrift).toBeUndefined();
+    // 演满了、岔路弹出出口菜单：玩家本来就要做选择，不再问
+    const full = withBeats(7);
+    full.offTrack = 1;
+    expect(drift(full)).toMatchObject({ menu: { source: 'exits' } });
+    expect(drift(full).askDrift).toBeUndefined();
+
+    reducePlot(s, ev({ plot: drift(s) }));
+    expect(s.driftAsk).toBe(true);
+    reducePlot(s, ev({ kind: 'drift', drift: 'ignore' }));
+    expect(s).toMatchObject({ driftAsk: false, driftIgnored: true, offTrack: 0 });
+    reducePlot(s, ev({ plot: drift(s) }));
+    expect(drift(s).askDrift).toBeUndefined();
+    // 换到下一幕：重新提醒
+    reducePlot(s, ev({ kind: 'choice', choice: { index: 0, label: '一起走' }, plot: { scene: 'sc_01', exit: { to: 'sc_02', by: 'choice' } } }));
+    expect(s).toMatchObject({ driftIgnored: false, offTrack: 0 });
+    s.offTrack = 1;
+    expect(drift(s).askDrift).toBe(true);
+  });
+
+  it('暂停剧情图：只核对数值，不报告要点、不换幕、不算拍数；选项上的出口去掉', () => {
+    const s = withBeats(1);
+    s.menu = { source: 'ai', options: [{ label: '跟她走', enabled: true, exit: 'sc_02' }, { label: '四处看看', enabled: true }] };
+    reducePlot(s, ev({ kind: 'drift', drift: 'pause' }));
+    expect(s.paused).toBe(true);
+    expect(s.menu?.options.map((o) => o.label)).toEqual(['四处看看']);
+    const { mark, unlocks } = judgeBeat({
+      state: s,
+      variables,
+      mode: 'adv',
+      report: report({ points: ['sc_01_1'], sceneDone: true, exit: 'sc_02', offTrack: true, set: [{ var: 'affinity.lin', op: '+', value: 2 }] }),
+      playerAction: true,
+      check: null,
+    });
+    expect(mark).toEqual({ scene: 'sc_01', paused: true, vars: [{ var: 'affinity.lin', from: 30, to: 32 }] });
+    expect(unlocks).toEqual([]);
+    reducePlot(s, ev({ plot: mark }));
+    expect(s.sceneBeats).toBe(1);
+    expect(aiMenu(s, [{ label: '跟她去码头', exit: 'sc_02' }], variables).menu?.options).toEqual([{ label: '跟她去码头', enabled: true }]);
+    reducePlot(s, ev({ kind: 'drift', drift: 'resume' }));
+    expect(s).toMatchObject({ paused: false, pullBack: true });
+    reducePlot(s, ev({ plot: { scene: 'sc_01' } }));
+    expect(s.pullBack).toBe(false);
+  });
+});
+
 describe('AI 给玩家的选项', () => {
   it('去重、最多 4 个，出口必须是这一幕的，条件不成立的锁住，检定按属性核对', () => {
     const { menu, notes } = aiMenu(

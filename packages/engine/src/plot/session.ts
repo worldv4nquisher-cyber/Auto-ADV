@@ -3,7 +3,7 @@
  * 命令行和 PlayService（应用里的 VN 舞台）共用。
  */
 import type { PlayMode, PlotEnding, PlotGraph } from '@auto-adv/schema';
-import type { AdvView, PlayEvent } from '../api.ts';
+import type { AdvView, PlayEvent, WorldProgress } from '../api.ts';
 import type { PlayDb, UnlockRow } from '../play/db.ts';
 import { shortId } from '../util.ts';
 import type { WorldData } from '../world/store.ts';
@@ -123,6 +123,7 @@ export function advView(
           .join('；')}`,
     aiScene: !!s.scene && !s.finished && !(s.scene.id in world.scripts),
     needsModel: !opts.ai && !!s.scene && !s.finished && !(s.scene.id in world.scripts),
+    drift: { ask: s.driftAsk, paused: s.paused, pullBack: s.pullBack, detour: !!opts.ai },
     vars: { ...s.vars },
     progress: {
       endings: prog.endings.map((e) => ({ ...e, title: e.hidden && !e.reached ? '？？？' : e.title })),
@@ -142,6 +143,8 @@ export interface ActResult {
   state: PlotState;
   /** 接下来这一拍要由 AI 演出（玩家的行动和检定已经写进去了），演完用 commit 写入。 */
   ai?: AiRequest;
+  /** 玩家选了"就这样走"：调模型写出新的一幕（play/adv.ts 的 runAdvDetour），再用 commit 写入。 */
+  detour?: boolean;
 }
 
 /** 周目的开场（树根）：生成的世界有开场白；手写的世界没有，树根是空的。 */
@@ -257,6 +260,47 @@ export class AdvSession {
       };
       if (this.db.unlock(row)) unlocked.push(row);
     }
-    return { events, unlocked, state: this.state(pt), ...(step.ai ? { ai: step.ai } : {}) };
+    return { events, unlocked, state: this.state(pt), ...(step.ai ? { ai: step.ai } : {}), ...(step.detour ? { detour: true } : {}) };
   }
+}
+
+/**
+ * 世界的跨周目收集（16.8）：结局、CG 画廊、走过的幕。
+ * 没达成的隐藏结局标题显示为"？？？"；没解锁的 CG 不告诉出现在哪一幕（剧透）。
+ */
+export function worldProgress(
+  world: Pick<WorldData, 'graph' | 'scripts'>,
+  unlocks: readonly UnlockRow[],
+): WorldProgress | null {
+  const g = world.graph;
+  if (!g) return null;
+  const first = (kind: UnlockRow['kind'], id: string) => unlocks.find((u) => u.kind === kind && u.id === id)?.firstAt ?? null;
+  const prog = endingProgress(g, unlocks);
+  const parsed = parseScripts(world);
+  const cgs: WorldProgress['cgs'] = [];
+  const seen = new Set<string>();
+  const order = [...g.scenes.map((s) => s.id), ...[...parsed.keys()].filter((id) => !g.scenes.some((s) => s.id === id))];
+  for (const sceneId of order) {
+    const p = parsed.get(sceneId);
+    if (!p) continue;
+    walkScript(p.commands, (c) => {
+      if (c.op !== 'cg' || seen.has(c.id)) return;
+      seen.add(c.id);
+      const at = first('cg', c.id);
+      const sc = g.scenes.find((s) => s.id === sceneId);
+      cgs.push({ id: c.id, unlocked: at !== null, firstAt: at, scene: at !== null ? (sc?.title || sceneId) : null });
+    });
+  }
+  const sceneIds = new Set(g.scenes.map((x) => x.id));
+  return {
+    endings: prog.endings.map((e) => ({
+      ...e,
+      title: e.hidden && !e.reached ? '？？？' : e.title,
+      firstAt: first('ending', e.id),
+    })),
+    reached: prog.reached,
+    total: prog.total,
+    cgs,
+    scenes: { visited: unlocks.filter((u) => u.kind === 'scene' && sceneIds.has(u.id)).length, total: g.scenes.length },
+  };
 }
