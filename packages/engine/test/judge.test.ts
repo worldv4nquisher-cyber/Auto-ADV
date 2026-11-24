@@ -254,6 +254,35 @@ describe('AI 给玩家的选项', () => {
     expect(notes.join()).toContain('现在还走不了');
   });
 
+  it('出口上写了检定：带这个出口的选项显示出口的检定，AI 给的检定不要', () => {
+    const g = PlotGraph.parse({
+      start: 'sc_01',
+      scenes: [
+        {
+          id: 'sc_01',
+          exits: [
+            { to: 'sc_02', label: '翻墙', check: { var: 'skill.wit', dc: 14, label: '翻过围墙' } },
+            { to: 'sc_03', label: '回家' },
+          ],
+        },
+        { id: 'sc_02', ending: {} },
+        { id: 'sc_03', ending: {} },
+      ],
+    });
+    const { menu } = aiMenu(
+      { ...initialPlotState(g, variables), sceneBeats: 2 },
+      [
+        { label: '翻过围墙', exit: 'sc_02', check: { dc: 8, label: '随便跳' } },
+        { label: '回家', exit: 'sc_03', check: { dc: 9, label: '走回去' } },
+      ],
+      variables,
+    );
+    expect(menu?.options).toEqual([
+      { label: '翻过围墙', enabled: true, exit: 'sc_02', check: { var: 'skill.wit', dc: 14, label: '翻过围墙' } },
+      { label: '回家', enabled: true, exit: 'sc_03', check: { dc: 9, label: '走回去' } },
+    ]);
+  });
+
   it('这一幕没演满最少拍数：选项先不带出口（和导演换幕一样）', () => {
     const s = fresh();
     expect(s.scene?.minBeats).toBe(2);

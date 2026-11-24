@@ -33,7 +33,7 @@ export interface PlotState {
    * 玩家刚选了剧本里或 AI 给的选项，选完之后的内容还没演（正常情况下和选项一起生成，只有中途失败或回退到选项事件上才会停在这里）。
    * parentId 是选项事件的父事件（检定的种子），rolled 表示检定已经掷过了。
    */
-  pendingChoice: { index: number; parentId: string | null; rolled: boolean; source: 'script' | 'ai'; label: string } | null;
+  pendingChoice: { index: number; parentId: string | null; rolled: boolean; source: 'script' | 'ai' | 'exits'; label: string } | null;
   /** 剧情 ADV：玩家刚输入了一句自由行动，还没演。 */
   pendingInput: string | null;
   /** 达成的结局（结局幕 id；续写之后再达成的结局会覆盖它）。 */
@@ -213,11 +213,11 @@ export function reducePlot(s: PlotState, e: PlayEvent): PlotState {
     s.menu = null;
     s.pendingInput = null;
     const index = e.choice?.index;
-    // 岔路选项选完就换幕；剧本和 AI 的选项选完之后还要演一拍
-    const done = index === undefined || source === 'exits' || (!source && !!e.plot?.exit);
+    // 选完之后还要演一拍（岔路选项选完就换幕，在新的幕里演这一拍；出口上有检定的话先掷骰）
+    const done = index === undefined || (!source && !!e.plot?.exit);
     s.pendingChoice = done
       ? null
-      : { index, parentId: e.parentId, rolled: false, source: source === 'ai' ? 'ai' : 'script', label: e.choice?.label ?? '' };
+      : { index, parentId: e.parentId, rolled: false, source: source === 'ai' || source === 'exits' ? source : 'script', label: e.choice?.label ?? '' };
     if (e.plot) applyMark(s, e.plot);
     return s;
   }

@@ -261,6 +261,23 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     void act('advInput', { text }).then((ok) => ok && setAction(''));
   };
 
+  /**
+   * 重抽 AI 演的最后一拍：舞台停在这一拍上时可以重抽，原来的一拍留作分支。
+   * 玩家的选择和检定不变，从新的一拍的第一步开始播。
+   */
+  const last = view.path.at(-1);
+  const canRegenerate = last?.kind === 'ai' && !!last.plot && !adv?.needsModel && !busy && (step?.eventId === last.id || atEnd);
+  const regenerate = async () => {
+    if (!canRegenerate) return;
+    setMode('normal');
+    const place = (t: Timeline) => {
+      const id = t.steps.at(-1)?.eventId;
+      const i = t.steps.findIndex((s) => s.eventId === id);
+      return i >= 0 ? i : t.steps.length - 1;
+    };
+    await call((sig) => engine.stream('advRegenerate', ref, onChunk, sig), place);
+  };
+
   /** 回到某个选项之前重新选（之后的内容保留为分支）。 */
   const rewindTo = async (eventId: string) => {
     if (await call(() => engine.call('rewind', { ...ref, eventId }), (t) => t.steps.length - 1)) {
@@ -382,6 +399,11 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
       <ToolButton testId="adv-skip" active={skipping} onClick={() => setMode(mode === 'skip' ? 'normal' : 'skip')}>
         快进
       </ToolButton>
+      {canRegenerate && (
+        <ToolButton testId="adv-regenerate" onClick={() => void regenerate()}>
+          重抽
+        </ToolButton>
+      )}
       <ToolButton testId="adv-save" onClick={() => setPanel('save')}>
         存档
       </ToolButton>

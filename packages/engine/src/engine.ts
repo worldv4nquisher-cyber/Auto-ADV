@@ -332,6 +332,7 @@ export class Engine {
       advChoose: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'choose', index: p.index }, emit, ctx.signal)),
       advInput: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'input', text: p.text }, emit, ctx.signal)),
       advDrift: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'drift', choice: p.choice }, emit, ctx.signal)),
+      advRegenerate: (p, ctx) => fromCallback((emit) => this.play.advAct(p, { kind: 'continue' }, emit, ctx.signal, { regenerate: true })),
       advShown: (p) => this.play.advShown(p, p.eventId, p.cg),
 
       observerControl: (p) => this.play.observerControl(p, p.action),

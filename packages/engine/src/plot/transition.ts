@@ -7,7 +7,7 @@
  * 4. 演满 maxBeats 还没走（只对 AI 演出）：只有一条路或有 default 就走过去；ADV 的岔路弹出选项，观察模式要求导演下一拍选一条；
  * 5. 结局幕没有出口，由调用方处理。
  */
-import type { PlayMode, PlotExit, PlotScene, VariableDef } from '@auto-adv/schema';
+import type { CheckSpec, PlayMode, PlotExit, PlotScene, VariableDef } from '@auto-adv/schema';
 import type { ExitReason, PlotMenu } from '../api.ts';
 import { type ConditionContext, describeCondition, evalCondition } from './conditions.ts';
 
@@ -46,6 +46,12 @@ export interface TransitionInput {
   lookup?: (id: string) => PlotScene | undefined;
 }
 
+/** 出口上的检定在菜单里怎么显示（和选项上的检定一样）。 */
+export const exitCheckShown = (c: CheckSpec) => ({ ...(c.var ? { var: c.var } : {}), dc: c.dc, ...(c.label ? { label: c.label } : {}) });
+
+/** 出口上的检定 id（参与骰子种子）：没写就用"幕 id:exit:目标幕"。 */
+export const exitCheckId = (scene: PlotScene, e: PlotExit) => e.check?.id ?? `${scene.id}:exit:${e.to}`;
+
 /** 不是 auto 的出口：岔路选项从这里来。两个以上就是岔路。 */
 export const choosableExits = (s: PlotScene) => s.exits.filter((e) => !e.auto);
 
@@ -66,6 +72,7 @@ export function exitMenu(
         label: e.label || target?.title || e.to,
         enabled,
         ...(enabled ? {} : { lockedBy: describeCondition(e.if, { vars }) }),
+        ...(e.check ? { check: exitCheckShown(e.check) } : {}),
       };
     }),
   };

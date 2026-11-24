@@ -201,6 +201,41 @@ describe('剧情 ADV：AI 演出没有手写剧本的幕', () => {
   });
 });
 
+describe('剧情 ADV：重抽 AI 演的一拍', () => {
+  it('在同一个位置生成新的一拍，原来的留作分支；玩家的选择和检定不变；只能重抽 AI 演的拍', async () => {
+    const { world, ref } = await generated();
+    const heroine = world.characters.find((c) => c.role !== 'protagonist')?.name as string;
+    await expect(client.stream('advRegenerate', ref, () => {})).rejects.toThrow('只能重抽 AI 演的一拍');
+    await client.stream('advNext', ref, () => {});
+    const v = await client.stream('advChoose', { ...ref, index: 1 }, () => {});
+    const [, check, beat] = v.path.slice(-3) as PlayEvent[];
+    expect(kinds([check as PlayEvent, beat as PlayEvent])).toEqual(['check', 'ai']);
+    const n = directors().length;
+    const chunks: PlayChunk[] = [];
+    const r = await client.stream('advRegenerate', ref, (c) => chunks.push(c));
+    expect(chunks.filter((c) => c.type === 'phase').map((c) => c.type === 'phase' && c.phase)).toEqual(['thinking', 'writing']);
+    const fresh = r.path.at(-1) as PlayEvent;
+    expect(fresh).toMatchObject({ kind: 'ai', parentId: check?.id });
+    expect(fresh.id).not.toBe(beat?.id);
+    expect(r.path.slice(0, -1).map((e) => e.id)).toEqual(v.path.slice(0, -1).map((e) => e.id));
+    // 重新调了一次导演，检定结果和玩家的选择照样交给导演和演员
+    expect(directors().length).toBe(n + 1);
+    expect(lastUserOf(directors().at(-1) as Req)).toContain('# 检定结果');
+    expect(lastUserOf(writers().at(-1) as Req)).toContain('［玩家选择：仔细观察四周］');
+    // 原来的一拍还在，可以切回去
+    const back = await client.call('switchBranch', { ...ref, eventId: beat?.id as string });
+    expect(back.path.at(-1)?.id).toBe(beat?.id);
+
+    // 岔路选完、新的幕里的第一拍：重抽时还记得玩家选的是哪条路
+    const fork = await client.stream('advChoose', { ...ref, index: 0 }, () => {});
+    expect(kinds(fork.path.slice(-2))).toEqual(['choice', 'ai']);
+    const again = await client.stream('advRegenerate', ref, () => {});
+    expect(again.path.at(-1)?.parentId).toBe(fork.path.at(-2)?.id);
+    expect(again.adv?.scene?.id).toBe('sc_02');
+    expect(lastUserOf(writers().at(-1) as Req)).toContain(`［玩家选择：和${heroine}一起去灯塔］`);
+  });
+});
+
 describe('剧情 ADV：跑偏时的四个选项（16.6）', () => {
   /** 生成的世界里演一拍，再输入两次跑题的行动：导演连续两拍报告偏离，停下来问玩家。 */
   async function drifted() {

@@ -188,6 +188,74 @@ describe('检定跟剧情位置绑定', () => {
   });
 });
 
+describe('出口上的检定（16.4）', () => {
+  /** 示例世界第一幕的岔路「独自离开」加一个检定。 */
+  function withExitCheck() {
+    const graph = PlotGraph.parse({
+      ...world.graph,
+      scenes: world.graph?.scenes.map((sc) =>
+        sc.id === 'sc_01'
+          ? { ...sc, exits: sc.exits.map((e) => (e.to === 'sc_07' ? { ...e, check: { var: 'attr.wit', dc: 12, label: '冒雨离开' } } : e)) }
+          : sc,
+      ),
+    });
+    const w2: WorldData = { ...world, graph };
+    expect(checkWorldPlot(w2)).toEqual({ ok: true, errors: [], warnings: [] });
+    let n = 0;
+    const db = new PlayDb(':memory:');
+    const s = new AdvSession(db, loadAdvWorld(w2).adv, { newId: (p) => (p === 'pt' ? 'pt_exit' : `${p}_${++n}`), now: () => 1000 + n });
+    return { s, db, pt: s.start('出口检定') };
+  }
+
+  it('选了这条路才掷：记在换幕之后，下一幕按结果演；回退再选结果不变', () => {
+    const { s, db, pt } = withExitCheck();
+    play(s, pt, [0]);
+    const head = db.getPlaythrough(pt).headId;
+    expect(s.state(pt).menu).toEqual({
+      source: 'exits',
+      options: [
+        { label: '一起去旧书库', enabled: true },
+        { label: '独自离开', enabled: true, check: { var: 'attr.wit', dc: 12, label: '冒雨离开' } },
+      ],
+    });
+    const a = s.choose(pt, 1).events;
+    expect(a.map((e) => e.kind)).toEqual(['choice', 'check', 'script']);
+    expect(a[0]?.plot?.exit).toEqual({ to: 'sc_07', by: 'choice' });
+    expect(a[1]?.check).toMatchObject({ id: 'sc_01:exit:sc_07', label: '冒雨离开', dc: 12, modifier: 1 });
+    expect(a[2]?.plot).toMatchObject({ scene: 'sc_07', ending: 'sc_07' });
+    // 回退再选：同一个父事件，骰子不变
+    s.rewind(pt, head);
+    const b = s.choose(pt, 1).events;
+    expect(b[1]?.check).toEqual(a[1]?.check);
+    // 回退到选项事件本身（还没掷骰）再继续：补掷的还是同一个结果
+    s.rewind(pt, (a[0] as PlayEvent).id);
+    const c = s.next(pt).events;
+    expect(c.map((e) => e.kind)).toEqual(['check', 'script']);
+    expect(c[0]?.check).toEqual(a[1]?.check);
+    // 另一条路没有检定
+    s.rewind(pt, head);
+    expect(s.choose(pt, 0).events.map((e) => e.kind)).toEqual(['choice', 'script']);
+  });
+
+  it('结构检查：auto 出口和只有一条路的幕上的检定不会掷骰，变量要是数值', () => {
+    const graph = PlotGraph.parse({
+      ...world.graph,
+      scenes: world.graph?.scenes.map((sc) => {
+        if (sc.id === 'sc_02') return { ...sc, exits: sc.exits.map((e) => (e.auto ? { ...e, check: { dc: 10 } } : e)) };
+        if (sc.id === 'sc_04') return { ...sc, exits: sc.exits.map((e) => ({ ...e, check: { var: 'flags.door_open', dc: 10 } })) };
+        return sc;
+      }),
+    });
+    const r = checkWorldPlot({ ...world, graph });
+    if (!r) throw new Error('世界没有剧情图');
+    expect(r.errors.map((e) => e.message)).toEqual(['出口 1（→ sc_06）的检定变量 flags.door_open 不是数值']);
+    expect(r.warnings.map((e) => e.message)).toEqual([
+      '出口 3（→ sc_07）是 auto 出口，上面的检定不会掷骰',
+      '出口 1（→ sc_06）上有检定，但这一幕不是岔路：只有一条路时由导演换幕，检定不会掷骰',
+    ]);
+  });
+});
+
 describe('回退和换分支：进度从事件折叠，自动正确', () => {
   it('回到最后的岔路换一条路，结局进度不会被撤销', () => {
     const { s, pt, db } = session();

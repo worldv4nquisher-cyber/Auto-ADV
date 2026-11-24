@@ -588,6 +588,11 @@ export type EngineContract = {
   advInput: Streaming<PlayRef & { text: string }, PlayChunk, PlayView>;
   /** 剧情 ADV：跑偏时的选择（16.6）。"就这样走"要调模型把跑偏的这一段写成新的一幕。 */
   advDrift: Streaming<PlayRef & { choice: DriftChoice }, PlayChunk, PlayView>;
+  /**
+   * 剧情 ADV：重抽 AI 演的最后一拍。在同一个位置生成一个新分支（原来的一拍留作分支），
+   * 玩家的选择和检定不变（骰子跟剧情位置绑定，重抽换不了结果）。
+   */
+  advRegenerate: Streaming<PlayRef, PlayChunk, PlayView>;
   /** 剧情 ADV：舞台第一次显示了某张 CG（记跨周目解锁）。 */
   advShown: Unary<PlayRef & { eventId: string; cg: string }, { unlocked: boolean }>;
 

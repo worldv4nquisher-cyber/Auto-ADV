@@ -140,6 +140,15 @@ export function checkPlot(input: PlotCheckInput): PlotCheckResult {
     }
   };
 
+  /** 检定用的变量：要存在、是数值；不是属性类只提醒。 */
+  const checkCheckVar = (id: string | undefined, where: string, scene: string, line?: number) => {
+    if (!id) return;
+    const def = vars.get(id);
+    if (!def) err(`${where}用了不存在的变量 ${id}`, scene, line);
+    else if (def.type !== 'number') err(`${where}变量 ${id} 不是数值`, scene, line);
+    else if (def.category !== 'attribute') warn(`${where}变量 ${id} 不是属性类（category: attribute）`, scene, line);
+  };
+
   const checkEffects = (effects: readonly VarEffect[], where: string, scene: string, line?: number) => {
     for (const e of effects) {
       const def = vars.get(e.var);
@@ -180,6 +189,12 @@ export function checkPlot(input: PlotCheckInput): PlotCheckResult {
       checkCondition(e.if, where, s.id);
       checkEffects(e.set, where, s.id);
       if (e.auto && !e.if) warn(`${where}是 auto 出口但没有条件，进入这一幕后马上就会走`, s.id);
+      if (e.check) {
+        checkCheckVar(e.check.var, `${where}的检定`, s.id);
+        // 出口上的检定只在玩家从岔路里选的时候掷
+        if (e.auto) warn(`${where}是 auto 出口，上面的检定不会掷骰`, s.id);
+        else if (nonAuto(s).length < 2) warn(`${where}上有检定，但这一幕不是岔路：只有一条路时由导演换幕，检定不会掷骰`, s.id);
+      }
       if (migrated && !e.if && e.when && byId.get(e.to)?.ending) {
         warn(`${where}的结局条件「${e.when}」是从旧骨架迁移来的文字，只能交给导演判断，建议改成结构化条件`, s.id);
       }
@@ -240,14 +255,7 @@ export function checkPlot(input: PlotCheckInput): PlotCheckResult {
         if (o.goto) checkJump(o.goto, o.line);
         checkEffects(o.set, `选项「${o.label}」`, s.id, o.line);
         checkCondition(o.if, `选项「${o.label}」`, s.id, o.line);
-        if (o.check?.var) {
-          const def = vars.get(o.check.var);
-          if (!def) err(`选项「${o.label}」的检定用了不存在的变量 ${o.check.var}`, s.id, o.line);
-          else if (def.type !== 'number') err(`选项「${o.label}」的检定变量 ${o.check.var} 不是数值`, s.id, o.line);
-          else if (def.category !== 'attribute') {
-            warn(`选项「${o.label}」的检定变量 ${o.check.var} 不是属性类（category: attribute）`, s.id, o.line);
-          }
-        }
+        checkCheckVar(o.check?.var, `选项「${o.label}」的检定`, s.id, o.line);
       },
     );
   }

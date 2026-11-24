@@ -3,7 +3,7 @@
  * 添加接入点 → 拉取模型 → 能力探测 → 设置职责路由 → 调试台对话 → 查看调用日志（M0）
  * → 一键创世 → 开始周目 → 对话 → 重抽 / 切换分支 → 存档 → 继续 → 读档（M1）
  * → 观察模式：在 VN 舞台上自动演出（M3 第 4 步）→ 切到文本看法 → 导演指令 → 暂停 → 接管角色 → 交还（M2）→ 回想里有导演指令
- * → 剧情 ADV（生成的世界，每一幕由 AI 演出）：AI 给的选项 → 自由输入 → 岔路 → 带检定的选项（M3 第 3 步）
+ * → 剧情 ADV（生成的世界，每一幕由 AI 演出）：AI 给的选项 → 跑偏 → 自由输入 → 重抽一拍 → 岔路 → 带检定的选项（M3 第 3 步）
  * → 剧情 ADV：导入手写的示例世界 → VN 舞台上快进、自动、点击推进 → 选项和检定 → 存档 → 好结局
  *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）。
  *
@@ -333,6 +333,14 @@ try {
   await advUntil(page, 'menu');
   assert.match((await page.textContent('[data-testid="adv-menu"]')) ?? '', /接下来去哪里/);
   step('自由输入行动，演完这一幕后在岔路停下');
+
+  // 重抽 AI 演的这一拍：在同一个位置重新演，从新的一拍开头播
+  assert.doesNotMatch((await page.textContent('[data-testid="adv-text"]')) ?? '', /你决定：问她那晚看到了什么/);
+  await page.click('[data-testid="adv-regenerate"]');
+  await page.waitForSelector('[data-testid="adv-text"] >> text=你决定：问她那晚看到了什么', { timeout: 60_000 });
+  await advUntil(page, 'menu');
+  assert.match((await page.textContent('[data-testid="adv-menu"]')) ?? '', /接下来去哪里/);
+  step('重抽 AI 演的一拍，从新的一拍开头重新播');
 
   await choose(page, 0, '一起去灯塔');
   await page.waitForSelector('[data-testid="adv-card"] >> text=同行', { timeout: 60_000 });
