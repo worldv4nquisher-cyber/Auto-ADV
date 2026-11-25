@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { CustomApi } from './custom-api.ts';
 import { FORMAT_VERSION } from './version.ts';
 
 /**
@@ -386,9 +387,12 @@ export const MediaRoute = z.object({
   /**
    * 接口类型。openai：/images/generations 和 /images/edits（图像）；
    * rembg：POST <地址>/api/remove，multipart 上传 file，返回抠好的 PNG（抠图，rembg 自带的 HTTP 服务就是这样）；
-   * minimax：POST <Base URL>/music_generation（音乐，MiniMax 的接口，和文本接口用同一个 Base URL 和密钥）。
+   * minimax：POST <Base URL>/music_generation（音乐，MiniMax 的接口，和文本接口用同一个 Base URL 和密钥）；
+   * custom：自定义接口，按 custom 里写的请求模板发（通用 HTTP 适配器）。
    */
-  api: z.enum(['openai', 'rembg', 'minimax']).default('openai'),
+  api: z.enum(['openai', 'rembg', 'minimax', 'custom']).default('openai'),
+  /** api 为 custom 时的请求模板。 */
+  custom: CustomApi.optional(),
 });
 export type MediaRoute = z.infer<typeof MediaRoute>;
 
@@ -404,7 +408,7 @@ export const MEDIA_ROLE_LABELS: Record<MediaRoleId, { name: string; hint: string
 
 /** 每个媒体职责能用的接口类型。 */
 export const MEDIA_ROLE_APIS: Record<MediaRoleId, MediaRoute['api'][]> = {
-  image: ['openai'],
-  cutout: ['rembg'],
-  music: ['minimax'],
+  image: ['openai', 'custom'],
+  cutout: ['rembg', 'custom'],
+  music: ['minimax', 'custom'],
 };

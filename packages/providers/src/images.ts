@@ -267,7 +267,7 @@ export interface CutoutClientConfig {
 /**
  * 抠图服务（18.5 的第 3 种做法）。接口和 rembg 自带的 HTTP 服务一样：
  * POST <地址>/api/remove，multipart 上传 file（可以带 model），返回抠好的 PNG。
- * 别的抠图服务等通用 HTTP 适配器（18.9，第 6 步）。
+ * 别的抠图服务在接口类型里选「自定义」（通用 HTTP 适配器，custom.ts）。
  */
 export class RembgCutoutClient {
   readonly url: string;

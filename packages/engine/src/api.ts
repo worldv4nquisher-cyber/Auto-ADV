@@ -723,6 +723,8 @@ export type EngineContract = {
   /** 用图像职责（或给的 route）画一张小图试试。会花一张图的额度。 */
   testImage: Unary<{ route?: MediaRoute }, { dataUrl: string; revisedPrompt: string | null; latencyMs: number }>;
   testMusic: Unary<{ route?: MediaRoute }, { dataUrl: string; durationMs: number | null; latencyMs: number }>;
+  /** 用抠图职责（或给的 route）抠一张示例图试试。 */
+  testCutout: Unary<{ route?: MediaRoute }, { dataUrl: string; latencyMs: number }>;
   /** 内置曲库的曲目和授权（「关于」页）。 */
   builtinBgm: Unary<void, BuiltinTrackInfo[]>;
   chat: Streaming<PlaygroundChatParams, StreamEvent, PlaygroundResult>;
