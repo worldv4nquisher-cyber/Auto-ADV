@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { AssetIndex, AssetKind, AssetSettings, AssetSlotRecord, AssetToggle, Character, ExpressionDef } from '@auto-adv/schema';
 import { parseAdv, walkScript } from '../plot/adv.ts';
-import { resolveSpeaker } from '../plot/stage.ts';
+import { bgVariantId, resolveSpeaker } from '../plot/stage.ts';
 import type { WorldData } from '../world/store.ts';
 import {
   AVOID,
@@ -21,6 +21,7 @@ import {
  * 再加上手写剧本里 `bg <id>` 用到、又不是地点 id 的背景，每个 id 一张。
  * 第 2 步加上立绘：每个角色一张基础立绘（平静），再按设置画表情差分（拿基础立绘当参考图改图）。
  * 第 3 步加上 BGM：情绪表里每个情绪一首（bgm/<情绪 id>），用音乐模型生成。本地曲库和内置曲库不是槽（assets/bgm.ts）。
+ * 第 5 步加上 CG（手写剧本里的 cg 指令、AI 演出时导演标的高光时刻）和时段背景（bg/<地点 id>@<时段 id>，用到了才画）。
  */
 
 export interface SlotParams {
@@ -63,6 +64,11 @@ export interface PlannedSlot {
   expression?: string;
   /** BGM：哪个情绪。 */
   mood?: string;
+  /** CG：CG id；ai 是导演标的（不是手写剧本里的）。 */
+  cgId?: string;
+  ai?: boolean;
+  /** 时段背景：哪个时段。 */
+  timeOfDay?: string;
 }
 
 export const hashOf = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -112,7 +118,11 @@ export function planAssets(world: WorldData, settings: AssetSettings, index: Ass
     };
     const { negative: _n, size: _s, mode: _m, transparency: _t, keyColor: _k, ...rest } = base;
     // 背景的哈希保持第 1 步的算法（不然升级以后所有背景都算过期）
-    const extra = params.transparency ? [params.mode, params.transparency, params.keyColor] : [];
+    const extra = params.transparency
+      ? [params.mode, params.transparency, params.keyColor]
+      : base.kind === 'cg' || base.toggle === 'timeOfDay'
+        ? [params.mode]
+        : [];
     out.push({ ...rest, params, paramsHash: hashOf([base.kind, params.prompt, params.negative, params.size, variant, ...extra]) });
   };
 
@@ -163,6 +173,37 @@ export function planAssets(world: WorldData, settings: AssetSettings, index: Ass
     });
   }
 
+  // 时段背景（18.4）：故事里用到了才画。默认拿白天的那张当参考图改光线
+  const tod = settings.timeOfDay;
+  const todTemplate = settings.templates.timeOfDay.trim() || BUILTIN_TEMPLATES.timeOfDay;
+  for (const key of index.variants) {
+    const [locId = '', vid = ''] = key.split('@');
+    const loc = world.locations.find((l) => l.id === locId);
+    const v = tod.variants.find((x) => x.id === vid);
+    if (!loc || !v || out.some((p) => p.id === `bg/${key}`)) continue;
+    const place = [loc.name, loc.description.trim()].filter(Boolean).join('。');
+    const light = v.prompt.trim() || v.name;
+    const edit = tod.mode === 'edit';
+    add({
+      id: `bg/${bgVariantId(loc.id, v.id)}`,
+      kind: 'background',
+      toggle: 'timeOfDay',
+      title: `${loc.name} · ${v.name}`,
+      subtitle: clip(light, 60),
+      deps: edit ? [`bg/${loc.id}`] : [],
+      defaultPrompt: edit
+        ? renderTemplate(todTemplate, { ...bgCommon, 内容: place, 时段: v.name, 时段描述: light, 构图: COMPOSITION.background })
+        : renderTemplate(bgTemplate, { ...bgCommon, 内容: `${place.replace(/[。.]+$/, '')}。${light}`, 构图: COMPOSITION.background }),
+      negative: bgCommon.避免,
+      size: settings.sizes.background,
+      mode: edit ? 'edit' : 'generate',
+      dir: 'bg',
+      slug: `${loc.id}@${v.id}`,
+      locationId: loc.id,
+      timeOfDay: v.id,
+    });
+  }
+
   // 立绘：基础立绘（平静）→ 表情差分
   const spriteTemplate = settings.templates.sprite.trim() || BUILTIN_TEMPLATES.sprite;
   const exprTemplate = settings.templates.expression.trim() || BUILTIN_TEMPLATES.expression;
@@ -176,10 +217,7 @@ export function planAssets(world: WorldData, settings: AssetSettings, index: Ass
     const def = (id: string) => expressionDef(id, settings.expressions);
     const neutral = def('neutral');
     const baseId = `sprite/${c.id}/neutral`;
-    const content = [c.gender, c.age && /^\d+$/.test(c.age.trim()) ? `${c.age.trim()} 岁` : c.age, c.appearance.imagePrompt.trim() || c.appearance.text.trim()]
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .join('，');
+    const content = appearanceOf(c);
     const sprite = { kind: 'sprite' as const, size: settings.sizes.sprite, transparency: settings.transparency, keyColor: settings.transparency === 'none' ? null : key };
     add({
       ...sprite,
@@ -222,6 +260,73 @@ export function planAssets(world: WorldData, settings: AssetSettings, index: Ass
     }
   }
 
+  // CG（18.6）：手写剧本里的、AI 演出时导演标的。画面里有角色、开着参考图时，拿第一个有立绘的角色的基础立绘当参考图
+  const cgTemplate = settings.templates.cg.trim() || BUILTIN_TEMPLATES.cg;
+  const cgCommon = common(world, settings, 'cg');
+  const drawn = new Set(spriteCharacters(world, settings).map((c) => c.id));
+  const addCg = (o: { id: string; title: string; subtitle: string; content: string; cast: string[]; locationId?: string | null; sceneIds?: string[]; ai: boolean }) => {
+    const cast = o.cast.flatMap((id) => world.characters.find((c) => c.id === id) ?? []);
+    const ref = settings.cg.reference && settings.enabled.sprite ? cast.find((c) => drawn.has(c.id)) : undefined;
+    const loc = o.locationId ? world.locations.find((l) => l.id === o.locationId) : undefined;
+    const content = [o.content.trim().replace(/[。.]+$/, ''), loc ? `地点：${loc.name}` : ''].filter(Boolean).join('。');
+    add({
+      id: `cg/${o.id}`,
+      kind: 'cg',
+      toggle: 'cg',
+      title: o.title,
+      subtitle: o.subtitle,
+      deps: ref ? [`sprite/${ref.id}/neutral`] : [],
+      defaultPrompt: renderTemplate(cgTemplate, {
+        ...cgCommon,
+        内容: content || o.id,
+        人物: cast.map((c) => `${c.name}（${appearanceOf(c) || c.summary}）`).join('；'),
+        参考: ref
+          ? `参考图是${ref.name}的立绘：画面里的${ref.name}要保持参考图里的长相、发型和服装，姿势、表情、背景和构图按上面的画面重新画，不要照搬立绘的姿势和纯色背景`
+          : '',
+        构图: COMPOSITION.cg,
+      }),
+      negative: cgCommon.避免,
+      size: settings.sizes.cg,
+      mode: ref ? 'edit' : 'generate',
+      dir: 'cg',
+      slug: o.id,
+      cgId: o.id,
+      ai: o.ai,
+      ...(o.locationId ? { locationId: o.locationId } : {}),
+      ...(o.sceneIds ? { sceneIds: o.sceneIds } : {}),
+    });
+  };
+  for (const sc of scriptCgList(world)) {
+    const scene = world.graph?.scenes.find((x) => x.id === sc.sceneIds[0]);
+    const sceneTitles = sc.sceneIds.map((id) => world.graph?.scenes.find((s) => s.id === id)?.title || id);
+    const content = [scene?.title, ...sc.narration]
+      .map((x) => x?.trim().replace(/[。.]+$/, ''))
+      .filter(Boolean)
+      .join('。');
+    addCg({
+      id: sc.id,
+      title: scene?.title ? `${scene.title} · ${sc.id}` : sc.id,
+      subtitle: clip(`剧本里的 CG，用在「${sceneTitles.join('」「')}」${sc.narration[0] ? `：${sc.narration[0]}` : ''}`, 60),
+      content: content || scene?.what || '',
+      cast: sc.cast,
+      locationId: sc.locationId ?? null,
+      sceneIds: sc.sceneIds,
+      ai: false,
+    });
+  }
+  for (const [id, def] of Object.entries(index.cgs)) {
+    if (out.some((p) => p.id === `cg/${id}`)) continue;
+    addCg({
+      id,
+      title: def.title.trim() || '高光时刻',
+      subtitle: clip(def.description, 60),
+      content: def.description.trim(),
+      cast: def.cast,
+      locationId: def.locationId,
+      ai: true,
+    });
+  }
+
   // BGM：每个情绪一首纯音乐（18.7）
   const musicTemplate = settings.bgm.template.trim() || BUILTIN_MUSIC_TEMPLATE;
   const musicStyle = world.style?.music.description.trim() || DEFAULT_MUSIC_STYLE;
@@ -243,6 +348,14 @@ export function planAssets(world: WorldData, settings: AssetSettings, index: Ass
     });
   }
   return out;
+}
+
+/** 画图用的外貌：性别、年龄、外貌提示词（没有就用外貌描述）。 */
+function appearanceOf(c: Character): string {
+  return [c.gender, c.age && /^\d+$/.test(c.age.trim()) ? `${c.age.trim()} 岁` : c.age, c.appearance.imagePrompt.trim() || c.appearance.text.trim()]
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .join('，');
 }
 
 /** 要画立绘的角色（设置里可以不画主角）。 */
@@ -324,6 +437,55 @@ export function scriptBackgrounds(world: WorldData): ScriptBackground[] {
   return [...found.values()];
 }
 
+interface ScriptCg {
+  id: string;
+  sceneIds: string[];
+  locationId?: string;
+  /** cg 指令之后（下一个 bg、cg 之前）的旁白，最多三句，拿来描述画面。 */
+  narration: string[];
+  /** 画面里的角色：cg 时台上的立绘，加上之后开口的角色。 */
+  cast: string[];
+}
+
+/** 手写剧本里的 CG，按剧情图里幕的顺序。 */
+export function scriptCgList(world: WorldData): ScriptCg[] {
+  const found = new Map<string, ScriptCg>();
+  for (const scene of world.graph?.scenes ?? []) {
+    const text = world.scripts[scene.id];
+    if (!text) continue;
+    let shown: string[] = [];
+    let current: ScriptCg | null = null;
+    const who = (token: string) => resolveSpeaker(token, world.characters).characterId;
+    walkScript(parseAdv(text).commands, (c) => {
+      if (c.op === 'bg') {
+        shown = [];
+        current = null;
+      } else if (c.op === 'show') {
+        const id = who(c.char);
+        if (id && !shown.includes(id)) shown.push(id);
+      } else if (c.op === 'hide') {
+        const id = who(c.char);
+        shown = shown.filter((x) => x !== id);
+      } else if (c.op === 'cg') {
+        const had = found.get(c.id);
+        if (had) {
+          if (!had.sceneIds.includes(scene.id)) had.sceneIds.push(scene.id);
+          current = null;
+        } else {
+          current = { id: c.id, sceneIds: [scene.id], ...(scene.location ? { locationId: scene.location } : {}), narration: [], cast: [...shown] };
+          found.set(c.id, current);
+        }
+      } else if (current && c.op === 'narrate') {
+        if (current.narration.length < 3) current.narration.push(c.text);
+      } else if (current && (c.op === 'say' || c.op === 'think') && c.char) {
+        const id = who(c.char);
+        if (id && !current.cast.includes(id)) current.cast.push(id);
+      }
+    });
+  }
+  return [...found.values()];
+}
+
 /**
  * 输入哈希：生成参数 + 依赖槽现在的文件。依赖重画了、换成了你上传的图、换回了之前的图，下游都过期。
  * 文件名里带着它自己的输入哈希（上传的带内容哈希），所以用文件名就够了。
@@ -398,6 +560,13 @@ export function priorityOf(slot: PlannedSlot, world: WorldData, focus: AssetFocu
     const id = slot.characterId ?? '';
     if (slot.expression === 'neutral') return present.has(id) ? 1 : soon.has(id) ? 2 : 4;
     return present.has(id) ? 3 : 4;
+  }
+  if (slot.kind === 'cg') {
+    // 导演标的 CG 要在这一拍还没播完时画好；剧本里的跟着幕走
+    if (slot.ai) return 2;
+    if (sceneId && slot.sceneIds?.includes(sceneId)) return 2;
+    if (slot.sceneIds?.some((id) => next.has(id))) return 3;
+    return 5;
   }
   if (slot.kind === 'background' && slot.sceneIds) {
     // 剧本里的背景跟着幕走：这一幕的先画，紧接着的幕其次

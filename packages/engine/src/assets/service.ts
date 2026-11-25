@@ -26,6 +26,8 @@ import { z } from 'zod';
 import type { AssetAction, AssetSlotView, AssetsChunk, AssetsControl, AssetsView, BgmView } from '../api.ts';
 import type { ImageHandle, ModelGateway, MusicHandle } from '../llm/gateway.ts';
 import { generateJson } from '../llm/structured.ts';
+import type { PlannedBeat } from '../play/cg.ts';
+import { bgVariantId, variantOfTime } from '../plot/stage.ts';
 import type { SettingsStore } from '../settings-store.ts';
 import { SerialQueue, writeFileAtomic } from '../util.ts';
 import type { WorldData, WorldStore } from '../world/store.ts';
@@ -364,6 +366,35 @@ export class AssetService {
     void this.pumpAll();
   }
 
+  /**
+   * 导演安排好一拍（还没演出）：登记这一拍的 CG（18.6）和这一拍用到的时段背景（18.4），马上排队画，
+   * 这样演出的同时图就在画了。时段背景只登记一次（<地点 id>@<时段 id>），以后到了同一个地点、同一个时段直接用。
+   */
+  async beatPlanned(worldId: string, b: PlannedBeat): Promise<void> {
+    const w = await this.load(worldId);
+    const loc = b.scene.locationId;
+    const tod = w.settings.enabled.timeOfDay && w.settings.enabled.background;
+    const variant = tod && loc && w.world.locations.some((l) => l.id === loc) ? variantOfTime(b.time, w.settings.timeOfDay.variants) : null;
+    const key = loc && variant ? bgVariantId(loc, variant) : null;
+    const cg = b.cg;
+    if (!cg && (!key || w.index.variants.includes(key))) return;
+    await this.mutate(w, (idx) => {
+      if (cg) {
+        idx.cgs[cg.id] = {
+          title: cg.title,
+          description: cg.description,
+          cast: cg.cast,
+          locationId: loc,
+          sceneId: b.sceneId,
+          playthroughId: b.playthroughId,
+          createdAt: now(),
+        };
+      }
+      if (key && !idx.variants.includes(key)) idx.variants.push(key);
+    });
+    void this.pumpAll();
+  }
+
   /** 订阅变化：先推一次当前状态，之后每次变化推一次，signal 中止时结束。 */
   async watch(worldId: string, emit: (c: AssetsChunk) => void, signal: AbortSignal): Promise<void> {
     const w = await this.load(worldId);
@@ -395,6 +426,8 @@ export class AssetService {
 
   private enabled(w: WorldAssets, slot: PlannedSlot) {
     if (!w.settings.enabled[slot.toggle]) return false;
+    // 时段背景跟着背景的开关走
+    if (slot.toggle === 'timeOfDay' && !w.settings.enabled.background) return false;
     // BGM：按来源顺序轮到了音乐模型（前面的来源没有这个情绪的曲子）才生成；你点了重新生成也生成
     if (isMusic(slot)) {
       // 本地曲库正在按文件名挑情绪：等挑完再定哪些情绪要生成
@@ -476,6 +509,7 @@ export class AssetService {
       },
       settings: { world: w.patch, effective: w.settings, global: w.global },
       bgm,
+      castKey: w.world.characters.map((c) => [c.id, c.name, ...c.aliases].join('/')).join('|'),
     };
   }
 

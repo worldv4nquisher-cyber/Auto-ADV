@@ -1,4 +1,5 @@
 import type { Character, ExpressionDef, MoodDef, ObserverSettings } from '@auto-adv/schema';
+import { type CgRules, cgLeft, cgOfPlan, type PlannedBeat } from '../cg.ts';
 import { moodOfPlan } from '../moods.ts';
 import type { BeatMeta, ObserverChunk, PlayEvent, PlotAppend, PlotMark, SceneState, Segment } from '../../api.ts';
 import { checkGraphOut, graphSpec } from '../../genesis/graph.ts';
@@ -45,6 +46,10 @@ export interface BeatInput {
   expressions?: readonly ExpressionDef[];
   /** 情绪表：导演每一拍报告 mood（舞台在界面里按它换 BGM）。 */
   moods?: readonly MoodDef[] | undefined;
+  /** 导演能不能标 CG、每幕每章最多几张（18.6）；null 就不问。 */
+  cg?: CgRules | null;
+  /** 导演安排好这一拍（还没演出）时调用：素材管线马上开始画 CG 和时段背景。 */
+  onPlanned?: (b: PlannedBeat) => void;
 }
 
 /** 导演最多看最近这么多条原文（更早的靠前情提要）。 */
@@ -183,6 +188,8 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
 
   // 3. 导演
   p.emit({ type: 'phase', phase: 'director' });
+  const plotScene = state.plot?.scene ?? null;
+  const left = p.cg ? cgLeft(p.path, plotScene && state.plot ? state.plot.graph.scenes : null, plotScene?.id ?? null, p.cg) : 0;
   const whispers = state.whispers;
   const director = await gateway.forRole('director', 'observer.director', p.meter);
   const { value: plan } = await generateJson(gateway, director, {
@@ -199,6 +206,7 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
       rejected: lastBeat?.beat?.rejected ?? [],
       whispers,
       ...(p.moods ? { moods: p.moods } : {}),
+      cgLeft: left,
     }),
     spec: directorSpec,
     signal: p.signal,
@@ -209,6 +217,9 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
   const mood = moodOfPlan(plan.mood, p.moods);
   if (mood) meta.mood = mood;
   if (v.reveals.length) meta.reveals = v.reveals;
+  const cg = cgOfPlan(plan.cg, world.characters, left);
+  if (cg) meta.cg = cg;
+  p.onPlanned?.({ playthroughId: p.playthroughId, cg, scene: v.scene, time: meta.time ?? state.time, sceneId: plotScene?.id ?? null });
 
   // 剧情图：导演安排里的检定先掷骰，再核对要点、数值和出口
   const plot: PlotState | null = state.plot?.scene ? state.plot : null;

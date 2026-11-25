@@ -5,9 +5,23 @@ import { Button, Card, ConfirmButton, cx, Input, Markdown, Select, Spinner, Text
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatTime } from '../lib/format.ts';
 import { useRouter } from '../lib/router.tsx';
-import { AssetsProvider } from '../lib/assets.tsx';
+import { AssetsProvider, useAssetsContext } from '../lib/assets.tsx';
 import { AdvPage } from './Adv.tsx';
 import { ObservePage } from './Observe.tsx';
+
+/**
+ * 游玩时世界里的角色变了（临时人物升级成了正式角色，18.5）：重新读一次世界，舞台上认得出新角色，名字、立绘、配音都对得上。
+ * 素材管线推送的状态里带着角色表的摘要，和手上的世界对不上就重新读。
+ */
+function CastWatch({ world, onChange }: { world: WorldDetail; onChange: (w: WorldDetail) => void }) {
+  const castKey = useAssetsContext()?.view?.castKey;
+  const mine = world.characters.map((c) => [c.id, c.name, ...c.aliases].join('/')).join('|');
+  useEffect(() => {
+    if (!castKey || castKey === mine) return;
+    engine.call('getWorld', { id: world.manifest.id }).then(onChange, () => {});
+  }, [castKey, mine]);
+  return null;
+}
 
 interface Streaming {
   /** 显示到哪个事件为止（含），之后是正在生成的内容。 */
@@ -125,6 +139,7 @@ export function PlayPage({ worldId, playthroughId }: { worldId: string; playthro
   if (view.playthrough.mode === 'adv') {
     return (
       <AssetsProvider worldId={worldId}>
+        <CastWatch world={world} onChange={setWorld} />
         <AdvPage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />
       </AssetsProvider>
     );
@@ -132,6 +147,7 @@ export function PlayPage({ worldId, playthroughId }: { worldId: string; playthro
   if (view.playthrough.mode === 'observer') {
     return (
       <AssetsProvider worldId={worldId}>
+        <CastWatch world={world} onChange={setWorld} />
         <ObservePage world={world} initial={view} onBack={() => navigate({ page: 'world', worldId })} />
       </AssetsProvider>
     );

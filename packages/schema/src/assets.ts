@@ -8,12 +8,13 @@ import { FORMAT_VERSION } from './version.ts';
  */
 
 /** 可以单独开关的素材类型（18.11）。 */
-export const ASSET_TOGGLES = ['background', 'sprite', 'expression', 'cg', 'bgm', 'voice'] as const;
+export const ASSET_TOGGLES = ['background', 'timeOfDay', 'sprite', 'expression', 'cg', 'bgm', 'voice'] as const;
 export const AssetToggle = z.enum(ASSET_TOGGLES);
 export type AssetToggle = z.infer<typeof AssetToggle>;
 
 export const ASSET_TOGGLE_LABELS: Record<AssetToggle, string> = {
   background: '背景',
+  timeOfDay: '时段背景',
   sprite: '立绘',
   expression: '表情差分',
   cg: 'CG',
@@ -197,6 +198,69 @@ export const BgmSettings = z.object({
 });
 export type BgmSettings = z.infer<typeof BgmSettings>;
 
+/** 时段 id：和表情 id 一样，小写字母开头，字母、数字、下划线。 */
+export const TimeVariantId = ExpressionId;
+
+/**
+ * 时段表里的一项（18.4）：故事时间里出现 words 里的词（"深夜""傍晚"……），AI 演出的幕就用这个时段的背景变体
+ * （bg/<地点 id>@<时段 id>）；name 是给人看的名字，prompt 是画变体时告诉图像模型的光线和天色。
+ */
+export const TimeVariantDef = z.object({
+  id: TimeVariantId,
+  name: z.string().trim().min(1, '时段要有名字'),
+  words: z.array(z.string().trim().min(1)).default([]),
+  prompt: z.string().default(''),
+});
+export type TimeVariantDef = z.infer<typeof TimeVariantDef>;
+
+/** 默认的时段表：黄昏和夜晚。白天就是地点本来的背景，不用写。 */
+export const DEFAULT_TIME_VARIANTS: TimeVariantDef[] = [
+  {
+    id: 'dusk',
+    name: '黄昏',
+    words: ['黄昏', '傍晚', '日落', '夕阳', '薄暮', '入夜前', 'dusk', 'sunset', 'evening'],
+    prompt: '黄昏，夕阳从低处照进来，暖橙色的光和长长的影子，天色开始变暗',
+  },
+  {
+    id: 'night',
+    name: '夜晚',
+    words: ['夜', '晚上', '当晚', '今晚', '午夜', '半夜', '凌晨', '入夜', '熄灯', 'night', 'midnight'],
+    prompt: '夜晚，天色全黑，只有室内灯光、路灯或月光照明，整体偏暗偏冷',
+  },
+];
+
+/** 时段背景的设置（18.4、18.11）。总开关是 enabled.timeOfDay。 */
+export const TimeOfDaySettings = z.object({
+  /** 时段表。 */
+  variants: z
+    .array(TimeVariantDef)
+    .refine((list) => new Set(list.map((v) => v.id)).size === list.length, '时段 id 不能重复')
+    .default(DEFAULT_TIME_VARIANTS),
+  /** edit：拿白天的背景当参考图改光线（构图和物件不变）；generate：按地点描述重新画一张。 */
+  mode: z.enum(['edit', 'generate']).default('edit'),
+});
+export type TimeOfDaySettings = z.infer<typeof TimeOfDaySettings>;
+
+/** CG 的设置（18.6、18.11）。总开关是 enabled.cg。 */
+export const CgSettings = z.object({
+  /** AI 演出时导演每幕最多标几张 CG（0 就是不标；手写剧本的 CG 不算）。 */
+  perScene: z.number().int().min(0).max(10).default(1),
+  /** 每章最多几张（没有剧情图的观察模式不按章算）。 */
+  perChapter: z.number().int().min(0).max(50).default(2),
+  /** 拿画面里第一个角色的基础立绘当参考图改图（长相、服装和立绘一致）；关掉就按文字描述画。 */
+  reference: z.boolean().default(true),
+});
+export type CgSettings = z.infer<typeof CgSettings>;
+
+/** 临时人物的设置（18.5）：AI 演出时世界里没有的人物（路人、守卫、伙计）。 */
+export const ExtrasSettings = z.object({
+  /** 上台时用内置的剪影立绘（按名字换颜色）；关掉就只出名字，不上台。 */
+  silhouette: z.boolean().default(true),
+  /** 同一个人在一个周目里开口满几拍，就升级成正式角色（补外貌，之后画立绘、分配音色）；0 就是不升级。 */
+  upgradeAfter: z.number().int().min(0).max(20).default(3),
+});
+export type ExtrasSettings = z.infer<typeof ExtrasSettings>;
+
 /** 音色表里的一个音色：id 是语音接口认的音色 id，name 和 description 给人和分配音色的模型看（性别、年龄、声音特点）。 */
 export const VoiceDef = z.object({
   id: z.string().trim().min(1, '音色要有 id'),
@@ -252,6 +316,7 @@ export const ImageTemplates = z.object({
   sprite: z.string().default(''),
   expression: z.string().default(''),
   cg: z.string().default(''),
+  timeOfDay: z.string().default(''),
 });
 export type ImageTemplates = z.infer<typeof ImageTemplates>;
 
@@ -260,6 +325,7 @@ export const AssetSettings = z.object({
   enabled: z
     .object({
       background: z.boolean().default(true),
+      timeOfDay: z.boolean().default(true),
       sprite: z.boolean().default(true),
       expression: z.boolean().default(true),
       cg: z.boolean().default(true),
@@ -304,6 +370,12 @@ export const AssetSettings = z.object({
   bgm: BgmSettings.prefault({}),
   /** 语音（18.8）。 */
   voice: VoiceSettings.prefault({}),
+  /** CG（18.6）。 */
+  cg: CgSettings.prefault({}),
+  /** 时段背景（18.4）。 */
+  timeOfDay: TimeOfDaySettings.prefault({}),
+  /** 临时人物（18.5）。 */
+  extras: ExtrasSettings.prefault({}),
   /** 同一个图像接入点同时画几张。 */
   imageConcurrency: z.number().int().min(1).max(16).default(2),
   /** 同一个音乐接入点同时生成几首。 */
@@ -358,6 +430,12 @@ export const AssetSettingsPatch = z.object({
     })
     .partial()
     .optional(),
+  cg: z
+    .object({ perScene: z.number().int().min(0).max(10), perChapter: z.number().int().min(0).max(50), reference: z.boolean() })
+    .partial()
+    .optional(),
+  timeOfDay: z.object({ variants: z.array(TimeVariantDef), mode: z.enum(['edit', 'generate']) }).partial().optional(),
+  extras: z.object({ silhouette: z.boolean(), upgradeAfter: z.number().int().min(0).max(20) }).partial().optional(),
 });
 export type AssetSettingsPatch = z.infer<typeof AssetSettingsPatch>;
 
@@ -380,6 +458,9 @@ export function mergeAssetSettings(base: AssetSettings, patch: AssetSettingsPatc
     characters: { ...base.characters, ...patch.characters },
     bgm: { ...base.bgm, ...patch.bgm },
     voice: { ...base.voice, ...patch.voice },
+    cg: { ...base.cg, ...patch.cg },
+    timeOfDay: { ...base.timeOfDay, ...patch.timeOfDay },
+    extras: { ...base.extras, ...patch.extras },
   });
 }
 
@@ -427,6 +508,23 @@ export const AssetSlotRecord = z.object({
 });
 export type AssetSlotRecord = z.infer<typeof AssetSlotRecord>;
 
+/**
+ * AI 演出时导演标的一张 CG（18.6）：画什么、谁在画面里。导演安排好这一拍就登记，素材管线按它排一个 cg/<id> 槽。
+ * 同样的内容也记在这一拍的事件上（beat.cg），登记丢了也能从事件里找回来。
+ */
+export const AiCgDef = z.object({
+  title: z.string().default(''),
+  description: z.string().default(''),
+  /** 画面里的角色 id。 */
+  cast: z.array(z.string()).default([]),
+  locationId: z.string().nullable().default(null),
+  /** 在剧情图上的哪一幕（没有剧情图为 null）。 */
+  sceneId: z.string().nullable().default(null),
+  playthroughId: z.string().default(''),
+  createdAt: z.string().default(''),
+});
+export type AiCgDef = z.infer<typeof AiCgDef>;
+
 /** assets/index.json：素材槽的登记。 */
 export const AssetIndex = z.object({
   formatVersion: z.number().int().default(FORMAT_VERSION),
@@ -439,6 +537,10 @@ export const AssetIndex = z.object({
   capExtra: z.number().int().min(0).default(0),
   /** 暂停生成。 */
   paused: z.boolean().default(false),
+  /** AI 演出时导演标的 CG（id 以 ai_ 开头）。 */
+  cgs: z.record(z.string(), AiCgDef).default({}),
+  /** 用到过的时段背景变体：<地点 id>@<时段 id>。故事第一次在这个时段到这个地点时加进来，然后才排队画（18.4）。 */
+  variants: z.array(z.string()).default([]),
 });
 export type AssetIndex = z.infer<typeof AssetIndex>;
 

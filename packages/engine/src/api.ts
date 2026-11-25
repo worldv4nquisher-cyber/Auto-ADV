@@ -2,6 +2,7 @@
  * 引擎对外提供的接口契约。界面进程只依赖这个文件里的类型（和 rpc），不会把引擎实现打包进去。
  */
 import type { ChatMessage, ProbeStep, StreamEvent, ToolCall, Usage } from '@auto-adv/providers';
+import type { AssetEstimate } from './assets/estimate.ts';
 import type {
   AppSettings,
   AssetKind,
@@ -220,9 +221,13 @@ export interface AssetsView {
   };
   settings: { world: AssetSettingsPatch; effective: AssetSettings; global: AssetSettings };
   bgm: BgmView;
+  /** 世界里的角色（id、名字、别称）：游玩时临时人物升级成正式角色会变，界面据此重新读世界（18.5）。 */
+  castKey: string;
 }
 
 export type AssetsChunk = { type: 'view'; view: AssetsView };
+
+export type { AssetEstimate } from './assets/estimate.ts';
 
 /** 配音表里的一个角色（18.8）。 */
 export interface VoiceCastCharacter {
@@ -467,6 +472,16 @@ export interface BeatMeta {
   similarity?: number;
   /** 导演报告的这一拍的情绪（情绪表里的 id，18.7），舞台按它换 BGM。 */
   mood?: string;
+  /** 导演标的高光时刻（18.6）：素材管线按它画一张 CG（cg/<id>），舞台在这一拍中间那句话上放出来。 */
+  cg?: BeatCg;
+}
+
+/** 导演标的一张 CG。id 以 ai_ 开头；cast 是画面里的角色 id。 */
+export interface BeatCg {
+  id: string;
+  title: string;
+  description: string;
+  cast: string[];
 }
 
 /** 走出口的原因：auto 条件成立、剧本 jump、玩家选项、只有一条路、演满 maxBeats 走 default、导演判断、剧情 ADV 跑偏时"就这样走"进入新插进来的一幕。 */
@@ -799,6 +814,8 @@ export type EngineContract = {
   /** 从文件夹导入一个世界（例如 examples/worlds/ 里的示例）。 */
   importWorld: Unary<{ path: string }, WorldSummary>;
   createWorld: Streaming<CreateWorldParams, GenesisChunk, WorldSummary>;
+  /** 创世前估算新世界的素材用量：图片张数、音乐首数、每拍念多少字（6.5、18.3）。 */
+  estimateAssets: Unary<{ options: GenesisOptions }, AssetEstimate>;
   /** 续跑没完成的步骤；给了 from 则从这一步起（含下游）全部重新生成。 */
   runGenesis: Streaming<{ worldId: string; from?: GenesisStepId }, GenesisChunk, WorldSummary>;
 

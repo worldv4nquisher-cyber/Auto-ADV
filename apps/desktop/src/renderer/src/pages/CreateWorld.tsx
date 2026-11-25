@@ -1,8 +1,8 @@
-import type { GenesisOptions } from '@auto-adv/engine/api';
+import type { AssetEstimate, GenesisOptions } from '@auto-adv/engine/api';
 import { GENESIS_PRESETS, GENESIS_STEPS, type GenesisPresetId, ROLE_LABELS } from '@auto-adv/schema';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button, Card, cx, Field, Input, PageHeader, Select, Textarea, useToast } from '../components/ui.tsx';
-import { errorMessage } from '../lib/engine.ts';
+import { engine, errorMessage } from '../lib/engine.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
 import { useSettings } from '../lib/settings.tsx';
@@ -168,6 +168,7 @@ export function CreateWorldPage() {
                 ))}
               </ol>
             </Card>
+            <UsageEstimate characterCount={opts.characterCount ?? 3} />
             {routeName && (
               <p className="px-1 text-xs leading-relaxed text-faint">
                 使用模型：{routeName}
@@ -179,5 +180,56 @@ export function CreateWorldPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+const range = ([a, b]: [number, number], unit: string) => (a === b ? `${a} ${unit}` : `${a}～${b} ${unit}`);
+
+/** 创世前估算新世界的素材用量（6.5、18.3）：按素材设置和角色数量，给出图片张数、音乐首数、每拍念的字数。 */
+function UsageEstimate({ characterCount }: { characterCount: number }) {
+  const { navigate } = useRouter();
+  const [est, setEst] = useState<AssetEstimate | null>(null);
+  useEffect(() => {
+    let live = true;
+    engine.call('estimateAssets', { options: { characterCount } }).then(
+      (e) => live && setEst(e),
+      () => live && setEst(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, [characterCount]);
+  if (!est) return null;
+  const im = est.images;
+  return (
+    <Card className="p-5" data-testid="usage-estimate">
+      <div className="text-xs font-medium text-muted">预计素材用量</div>
+      <ul className="mt-3 space-y-2 text-sm">
+        {est.imageReady ? (
+          <>
+            <li data-testid="usage-images">
+              开局画 {range(im.upfront, '张')}
+              <div className="text-xs text-faint">
+                背景 {range(im.backgrounds, '张')}，立绘 {range(im.sprites, '张')}（含表情差分）
+              </div>
+            </li>
+            <li className="text-xs text-faint">
+              玩的时候：CG 每个周目 {range(im.cgs, '张')}；时段背景用到才画，最多 {im.timeOfDay[1]} 张
+            </li>
+            <li className="text-xs text-faint">每个世界最多画 {im.cap} 张（算上重抽），可以在设置里改</li>
+          </>
+        ) : (
+          <li className="text-xs text-faint">没配图像模型：不画图，舞台上用占位图</li>
+        )}
+        <li data-testid="usage-music">
+          {est.music.tracks ? `音乐：生成 ${est.music.tracks} 首` : '音乐：不生成'}
+          {est.music.note && <div className="text-xs text-faint">{est.music.note}</div>}
+        </li>
+        <li data-testid="usage-voice">{est.voice ? `语音：每拍约 ${range(est.voice.perBeat, '字')}` : '语音：不配音'}</li>
+      </ul>
+      <button type="button" className="mt-3 text-xs text-accent-strong hover:underline" onClick={() => navigate({ page: 'settings' })}>
+        改素材设置
+      </button>
+    </Card>
   );
 }

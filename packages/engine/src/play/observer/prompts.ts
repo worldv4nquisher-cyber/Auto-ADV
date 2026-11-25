@@ -9,6 +9,7 @@ import type { JsonSpec } from '../../llm/structured.ts';
 import { clip, renderBrief, renderCharacter, renderLocation, renderRelationships } from '../../world/render.ts';
 import type { WorldData } from '../../world/store.ts';
 import { BUDGET, selectLore, transcriptOf } from '../context.ts';
+import { CgProposal, cgSection } from '../cg.ts';
 import { actorFormat, speechRule } from '../expressions.ts';
 import { moodSection } from '../moods.ts';
 import { plotSection } from '../plotprompt.ts';
@@ -77,6 +78,7 @@ export const DirectorOut = z.object({
     .catch([])
     .default([]),
   mood: text.default(''),
+  cg: CgProposal,
   ...plotReportFields,
 });
 export type DirectorOut = z.infer<typeof DirectorOut>;
@@ -92,6 +94,7 @@ export const directorSpec: JsonSpec<DirectorOut> = {
     speakers: [{ name: '这一拍开口或行动的角色名，按顺序', intent: '他这一拍想做什么、想说什么' }],
     reveals: [{ owner: '秘密的主人', to: ['这一拍得知这个秘密的角色名'] }],
     mood: '这一拍的气氛：从「音乐情绪」里选一个 id（没有这一节就留空）',
+    cg: null,
     ...plotReportExample,
   },
 };
@@ -120,6 +123,8 @@ export interface DirectorInput {
   whispers: PlayEvent[];
   /** 情绪表（BGM，18.7）：导演按它报告 mood。不给就不问。 */
   moods?: readonly MoodDef[] | undefined;
+  /** 这一拍还能标几张 CG（18.6）；0 就不问。 */
+  cgLeft?: number;
 }
 
 export function directorPrompt(p: DirectorInput): string {
@@ -141,6 +146,7 @@ export function directorPrompt(p: DirectorInput): string {
     `# 最近发生的事\n${transcriptOf(world, p.recent, pName) || '（刚刚开场）'}`,
     `# 现在\n地点：${location?.name ?? '未指定'}；在场：${present.join('、') || '无'}${state.time ? `；时间：${state.time}` : ''}`,
     moodSection(p.moods),
+    cgSection(p.cgLeft ?? 0),
   ];
   if (state.directives.length) {
     parts.push(`# 观众的导演指令（尽量满足）\n${state.directives.map((d) => `- ${d.text}`).join('\n')}`);

@@ -429,7 +429,7 @@ describe('观察模式', () => {
   });
 });
 
-const noReport = { points: [], sceneDone: false, exit: '', offTrack: false, set: [], check: null, mood: '' };
+const noReport = { points: [], sceneDone: false, exit: '', offTrack: false, set: [], check: null, mood: '', cg: null };
 
 describe('观察模式的纯逻辑', () => {
   it('validatePlan：不存在的地点和角色、没有秘密的揭示都被驳回', async () => {

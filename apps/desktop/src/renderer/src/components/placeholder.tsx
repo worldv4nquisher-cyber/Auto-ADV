@@ -64,6 +64,27 @@ export function PlaceholderSprite({ name, expr, color, dim }: { name: string; ex
   );
 }
 
+/** 临时人物的剪影（18.5）：世界里没有的路人、守卫……按名字换个颜色，下面写名字。 */
+export function Silhouette({ name, dim }: { name: string; dim?: boolean }) {
+  const h = hueOf(name);
+  const gid = `s${h}`;
+  return (
+    <div className={cx('flex h-full flex-col items-center transition-[filter] duration-300', dim && 'brightness-[.6]')} data-testid="stage-silhouette">
+      <svg viewBox="0 0 200 420" className="h-full w-auto drop-shadow-[0_0_18px_rgba(0,0,0,.5)]" aria-hidden>
+        <defs>
+          <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor={`hsl(${h} 30% 22%)`} stopOpacity=".95" />
+            <stop offset="1" stopColor={`hsl(${h} 30% 10%)`} stopOpacity=".85" />
+          </linearGradient>
+        </defs>
+        <ellipse cx="100" cy="88" rx="46" ry="54" fill={`url(#${gid})`} stroke={`hsl(${h} 55% 55% / .45)`} strokeWidth="2" />
+        <path d="M100 148c-56 0-90 36-96 98L2 420h196l-2-174c-6-62-40-98-96-98z" fill={`url(#${gid})`} stroke={`hsl(${h} 55% 55% / .45)`} strokeWidth="2" />
+      </svg>
+      <span className="absolute top-[30%] rounded bg-black/50 px-[0.6em] py-[0.15em] text-[max(11px,1.1cqw)] text-white/80">{name}</span>
+    </div>
+  );
+}
+
 /** CG：盖住整个舞台的一幅"画"。 */
 export function PlaceholderCg({ id }: { id: string }) {
   const h = hueOf(id);

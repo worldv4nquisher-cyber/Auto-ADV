@@ -27,7 +27,7 @@ import {
 } from '../components/stage.tsx';
 import { Spinner } from '../components/ui.tsx';
 import { BgmTag, useStageBgm } from '../components/bgm.tsx';
-import { useBgmRules, useExpressionTable } from '../lib/assets.tsx';
+import { useBgmRules, useExpressionTable, useExtrasOnStage, useTimeOfDayRules } from '../lib/assets.tsx';
 import { useStageVoice, VoiceTag, voiceCps } from '../components/voice.tsx';
 
 /** 1 倍速下的节奏（和文本看法一致）：打字速度（字/秒）、每句读完后的停顿（基础 + 每字），换一拍时多停一会儿。 */
@@ -72,15 +72,20 @@ export function ObserveStage({
   const expressions = useExpressionTable();
   // 导演每一拍报告的情绪：按它换 BGM（18.7）
   const bgmRules = useBgmRules();
+  // 故事时间到了黄昏、夜晚：换时段背景（18.4）
+  const timeOfDay = useTimeOfDayRules();
+  // 临时人物开口时上台（剪影，18.5）
+  const extras = useExtrasOnStage();
   const timeline = useMemo(
     () =>
       buildTimeline(path, {
         characters: world.characters,
         graph,
-        auto: { protagonistId: null, ...(expressions ? { expressions } : {}) },
+        auto: { protagonistId: null, ...(expressions ? { expressions } : {}), ...(extras ? { extras } : {}) },
         ...(bgmRules ? { bgm: bgmRules } : {}),
+        ...(timeOfDay ? { timeOfDay } : {}),
       }),
-    [path, world.characters, graph, expressions, bgmRules],
+    [path, world.characters, graph, expressions, bgmRules, timeOfDay, extras],
   );
   const steps = timeline.steps;
   const eventIndex = useMemo(() => new Map(path.map((e, i) => [e.id, i])), [path]);

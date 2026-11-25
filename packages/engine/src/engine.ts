@@ -39,6 +39,7 @@ import type {
 } from './api.ts';
 import { AssetService } from './assets/service.ts';
 import { VoiceService } from './voice/service.ts';
+import { estimateAssets } from './assets/estimate.ts';
 import {
   BUILTIN_MUSIC_TEMPLATE,
   BUILTIN_TEMPLATES,
@@ -124,6 +125,21 @@ export class Engine {
     this.play.moodTable = async (worldId) => {
       const a = await this.assets.effectiveSettings(worldId);
       return a.enabled.bgm ? a.bgm.moods : undefined;
+    };
+    this.play.cgRules = async (worldId) => {
+      const a = await this.assets.effectiveSettings(worldId);
+      if (!a.enabled.cg || a.cg.perScene <= 0 || !(await this.gateway.imageRoute())) return null;
+      return { perScene: a.cg.perScene, perChapter: a.cg.perChapter };
+    };
+    this.play.extrasRules = async (worldId) => {
+      const a = await this.assets.effectiveSettings(worldId);
+      return { silhouette: a.extras.silhouette, upgradeAfter: a.extras.upgradeAfter };
+    };
+    this.play.onWorldChanged = (worldId) => {
+      void this.assets.refresh(worldId).catch((err) => console.error('[assets] 重算素材清单失败：', err));
+    };
+    this.play.onBeatPlanned = (worldId, b) => {
+      void this.assets.beatPlanned(worldId, b).catch((err) => console.error('[assets] 登记这一拍的素材失败：', err));
     };
   }
 
@@ -503,6 +519,15 @@ export class Engine {
       deleteWorld: (p) => this.deleteWorld(p.id),
       importWorld: (p) => this.importWorld(p.path),
       createWorld: (p, ctx) => this.createWorld(p, ctx),
+      estimateAssets: async (p) => {
+        const [s, image, music, voice] = await Promise.all([
+          this.settings.get(),
+          this.gateway.imageRoute(),
+          this.gateway.musicRoute(),
+          this.gateway.voiceRoute(),
+        ]);
+        return estimateAssets(p.options, s.assets, { image: !!image, music: !!music, voice: !!voice });
+      },
       runGenesis: (p, ctx) => this.runGenesis(p.worldId, p.from, ctx),
 
       assetsView: (p) => this.assets.view(p.worldId),

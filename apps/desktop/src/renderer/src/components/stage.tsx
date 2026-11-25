@@ -5,9 +5,9 @@
  */
 import type { StageStep, StageText, StageView, Timeline } from '@auto-adv/engine/stage';
 import { type ReactNode, type RefObject, useEffect, useRef, useState } from 'react';
-import { BgImage, useAssetsContext, useSpriteUrl } from '../lib/assets.tsx';
+import { BgImage, CgImage, isAiCg, useAssetsContext, useAssetUrl, useBgUrl, useSpriteUrl } from '../lib/assets.tsx';
 import { useRouter } from '../lib/router.tsx';
-import { PlaceholderCg, PlaceholderSprite } from './placeholder.tsx';
+import { PlaceholderSprite, Silhouette } from './placeholder.tsx';
 import { Button, cx } from './ui.tsx';
 
 export const OUTCOME = { crit: '大成功', success: '成功', narrow: '险胜', fail: '失败' } as const;
@@ -94,10 +94,12 @@ export function StageLayers({
   dimAll?: boolean;
 }) {
   const speaker = step?.text?.speaker ?? null;
+  // 时段背景还没画好时用的是白天那张：画好了换过去（按实际用的文件淡入，同一张图不重复淡入）
+  const bgUrl = useBgUrl(stage.bg?.id);
   return (
     <>
       {stage.bg ? (
-        <div key={stage.bg.id} className={cx('absolute inset-0', stage.bg.transition !== 'none' && 'stage-fade')} data-testid={`${p}-bg`} data-bg={stage.bg.id}>
+        <div key={bgUrl ?? stage.bg.id} className={cx('absolute inset-0', stage.bg.transition !== 'none' && 'stage-fade')} data-testid={`${p}-bg`} data-bg={stage.bg.id}>
           <BgImage id={stage.bg.id} testId={`${p}-bg-image`} />
         </div>
       ) : (
@@ -122,15 +124,22 @@ export function StageLayers({
           />
         </div>
       ))}
-      {stage.cg && (
-        <div key={stage.cg} className="stage-fade absolute inset-0" data-testid={`${p}-cg`}>
-          <PlaceholderCg id={stage.cg} />
-        </div>
-      )}
+      {stage.cg && <StageCg key={stage.cg} p={p} id={stage.cg} />}
       {step?.cues?.some((c) => c.op === 'effect' && c.id === 'flash') && (
         <div key={`flash${stepKey}`} className="stage-flash pointer-events-none absolute inset-0 bg-white" />
       )}
     </>
+  );
+}
+
+/** 舞台上的 CG：导演标的 CG 画好之前不显示，画好了在当前位置淡入（18.6）。 */
+function StageCg({ p, id }: { p: string; id: string }) {
+  const url = useAssetUrl(`cg/${id}`);
+  if (!url && isAiCg(id)) return null;
+  return (
+    <div className="stage-fade absolute inset-0" data-testid={`${p}-cg`} data-cg={id} data-ready={url ? 'true' : 'false'}>
+      <CgImage id={id} testId={`${p}-cg-image`} />
+    </div>
   );
 }
 
@@ -151,6 +160,8 @@ function SpriteImage({
   dim: boolean;
 }) {
   const url = useSpriteUrl(characterId, expr);
+  // 世界里没有的临时人物：剪影
+  if (!characterId) return <Silhouette name={name} dim={dim} />;
   if (!url) return <PlaceholderSprite name={name} expr={expr} color={color} dim={dim} />;
   return (
     <img
@@ -381,6 +392,53 @@ export function Overlay({
 }
 
 /** 回想：播过的台词、选择、检定、换幕，以及观众留下的导演指令和悄悄话。 */
+/** 回想里导演标的 CG：画好了点开看大图。 */
+function BacklogCg({ p, id, title }: { p: string; id: string; title: string }) {
+  const url = useAssetUrl(`cg/${id}`);
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="flex items-center gap-2 text-sm text-muted" data-testid={`${p}-backlog-cg`} data-cg={id}>
+      <span>🖼 CG「{title}」</span>
+      {url ? (
+        <Button size="sm" variant="ghost" data-testid={`${p}-backlog-cg-open`} onClick={() => setOpen(true)}>
+          看大图
+        </Button>
+      ) : (
+        <span className="text-xs text-faint">还没画好</span>
+      )}
+      {open && url && <CgLightbox url={url} caption={title} onClose={() => setOpen(false)} testId={`${p}-cg-view`} />}
+    </div>
+  );
+}
+
+/** 全屏看一张 CG：点任意处或按 Esc 关闭。 */
+export function CgLightbox({ url, caption, onClose, testId }: { url: string; caption: string; onClose: () => void; testId?: string }) {
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', down, true);
+    return () => window.removeEventListener('keydown', down, true);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black/90"
+      data-testid={testId}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClose();
+      }}
+    >
+      <img src={url} alt="" className="max-h-[85vh] max-w-[90vw] rounded-lg object-contain" />
+      <div className="text-sm text-white/70">{caption}</div>
+      <div className="text-xs text-white/40">点击任意处或按 Esc 关闭</div>
+    </div>
+  );
+}
+
 export function Backlog({
   p,
   timeline,
@@ -446,6 +504,7 @@ export function Backlog({
             </div>
           );
         }
+        if (b.kind === 'cg') return <BacklogCg key={i} p={p} id={b.id} title={b.title} />;
         const t = b.text;
         const at = timeline.steps[b.step];
         return (
