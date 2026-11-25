@@ -32,6 +32,7 @@ import type {
   StoryOpening,
   StyleGuide,
   VariableDef,
+  VoiceDef,
   WorldBrief,
   WorldManifest,
 } from '@auto-adv/schema';
@@ -222,6 +223,53 @@ export interface AssetsView {
 }
 
 export type AssetsChunk = { type: 'view'; view: AssetsView };
+
+/** 配音表里的一个角色（18.8）。 */
+export interface VoiceCastCharacter {
+  id: string;
+  name: string;
+  role: string;
+  /** 分到的音色；还没分配（或者音色表里没有了）为 null。 */
+  voiceId: string | null;
+  voiceName: string;
+  /** 你自己选的，不会被自动改掉。 */
+  locked: boolean;
+  /** 这个角色配不配（主角默认不配）。 */
+  enabled: boolean;
+}
+
+/** 一个世界的配音表：谁用什么音色、谁配音。 */
+export interface VoiceCastView {
+  worldId: string;
+  /** 能配音：语音开着、配了语音职责、音色表不空。 */
+  ready: boolean;
+  /** 不能配音的原因。 */
+  reason: string | null;
+  /** 音色表。 */
+  voices: VoiceDef[];
+  characters: VoiceCastCharacter[];
+  narrator: { enabled: boolean; voiceId: string | null };
+  /** 世界里没有的临时人物用的音色。 */
+  extra: { voiceId: string | null };
+  /** 最近一次分配音色出的问题（例如文本模型没配，按描述里的性别挑的）。 */
+  note: string | null;
+}
+
+/** 要念的一句。speaker 为 null 是旁白（或没写角色的心声）。voiceId 给了就用它（试听）。 */
+export interface VoiceLineParams {
+  speaker: { characterId: string | null; name: string } | null;
+  kind: 'say' | 'narrate' | 'think';
+  text: string;
+  /** 说话时的表情（按设置换成情绪）。 */
+  expr?: string | null;
+  voiceId?: string;
+}
+
+/** 念好的一句：文件（相对世界目录，在 assets/voice/ 下）和时长（服务报告的；没有为 null）。 */
+export interface VoiceLineResult {
+  file: string;
+  durationMs: number | null;
+}
 
 /**
  * 素材槽上的操作：regenerate 重抽（换个种子画一张新的）；redraw 按现在的参数重画（过期的槽）；retry 失败后重试；
@@ -723,6 +771,18 @@ export type EngineContract = {
   /** 用图像职责（或给的 route）画一张小图试试。会花一张图的额度。 */
   testImage: Unary<{ route?: MediaRoute }, { dataUrl: string; revisedPrompt: string | null; latencyMs: number }>;
   testMusic: Unary<{ route?: MediaRoute }, { dataUrl: string; durationMs: number | null; latencyMs: number }>;
+  /** 用语音职责（或给的 route）念一句试试。voice 不给就用音色表里的第一个。 */
+  testVoice: Unary<{ route?: MediaRoute; voice?: string; text?: string }, { dataUrl: string; durationMs: number | null; latencyMs: number }>;
+  /** 语音服务上的音色（MiniMax 从服务拉取，OpenAI 是固定的一套）。 */
+  fetchVoices: Unary<{ route: MediaRoute }, VoiceDef[]>;
+  /** 一个世界的配音表（还没分配的角色会先分配，可能要等文本模型）。 */
+  voiceCast: Unary<{ worldId: string }, VoiceCastView>;
+  /** 给一个角色换音色（锁定）；voiceId 为 null 是解除锁定、自动重新分配。 */
+  setCharacterVoice: Unary<{ worldId: string; characterId: string; voiceId: string | null }, VoiceCastView>;
+  /** 没锁定的角色全部重新分配。 */
+  recastVoices: Unary<{ worldId: string }, VoiceCastView>;
+  /** 念一句台词：有缓存直接用，没有就生成。不配音的返回 null。 */
+  voiceLine: Unary<{ worldId: string; line: VoiceLineParams }, VoiceLineResult | null>;
   /** 用抠图职责（或给的 route）抠一张示例图试试。 */
   testCutout: Unary<{ route?: MediaRoute }, { dataUrl: string; latencyMs: number }>;
   /** 内置曲库的曲目和授权（「关于」页）。 */

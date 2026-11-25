@@ -28,6 +28,7 @@ import {
 import { Spinner } from '../components/ui.tsx';
 import { BgmTag, useStageBgm } from '../components/bgm.tsx';
 import { useBgmRules, useExpressionTable } from '../lib/assets.tsx';
+import { useStageVoice, VoiceTag, voiceCps } from '../components/voice.tsx';
 
 /** 1 倍速下的节奏（和文本看法一致）：打字速度（字/秒）、每句读完后的停顿（基础 + 每字），换一拍时多停一会儿。 */
 const CPS = 30;
@@ -117,7 +118,9 @@ export function ObserveStage({
   const step = steps[shownIdx];
   const stepKey = step ? `${shownIdx}:${step.eventId}:${step.index}` : 'none';
   const textLen = textLength(step);
-  const { shown: typedChars, typed, complete } = useTyping(stepKey, textLen, CPS * speed, speed === 0);
+  // 配音（18.8）：2 倍速以内念（跟着倍速放快），更快和即时不念
+  const voice = useStageVoice({ steps, cursor: shownIdx, stepKey, active: speed > 0 && speed <= 2, rate: speed || 1 });
+  const { shown: typedChars, typed, complete } = useTyping(stepKey, textLen, voiceCps(CPS * speed, textLen, voice), speed === 0, voice.hold);
   const stage: StageView = step?.view ?? timeline.end;
   const bgm = useStageBgm(stage.bgm);
   useShake(stageRef, step, stepKey);
@@ -131,11 +134,13 @@ export function ObserveStage({
   // 自动播放
   useEffect(() => {
     if (!playing || panel || hidden || waitingForMore || !typed || !step) return;
+    // 有配音：等这句念完
+    if (voice.status === 'playing') return;
     const next = steps[cursor + 1];
     const gap = next && next.eventId !== step.eventId ? GAP : 0;
     const base =
       step.kind === 'text'
-        ? HOLD_BASE + textLen * HOLD_PER_CHAR
+        ? HOLD_BASE + (voice.status === 'ended' ? 0 : textLen * HOLD_PER_CHAR)
         : step.kind === 'card'
           ? 1800
           : step.kind === 'check'
@@ -145,7 +150,7 @@ export function ObserveStage({
               : 1500;
     const t = setTimeout(() => setCursor((c) => c + 1), speed === 0 ? 0 : (base + gap) / speed);
     return () => clearTimeout(t);
-  }, [playing, panel, hidden, waitingForMore, typed, stepKey, cursor, speed]);
+  }, [playing, panel, hidden, waitingForMore, typed, stepKey, cursor, speed, voice.status]);
 
   // 键盘：空格 / 回车往下看，PageUp 回想，H 隐藏文本框，Esc 关闭
   useEffect(() => {
@@ -184,6 +189,11 @@ export function ObserveStage({
       <ToolButton testId="observe-backlog" onClick={() => setPanel('backlog')}>
         回想
       </ToolButton>
+      {voice.available && (
+        <ToolButton testId="observe-voice-toggle" active={!voice.muted} onClick={voice.toggleMute}>
+          配音
+        </ToolButton>
+      )}
       <ToolButton testId="observe-hide" onClick={() => setHidden(true)}>
         隐藏
       </ToolButton>
@@ -254,6 +264,7 @@ export function ObserveStage({
                     <span data-testid="observe-phase">{phaseText}</span>
                   </>
                 )}
+                <VoiceTag p="observe" voice={voice} />
                 {!waitingForMore && typed && <span className="stage-blink text-white/70">▼</span>}
               </>
             }
@@ -263,7 +274,7 @@ export function ObserveStage({
 
         {panel === 'backlog' && (
           <Overlay p="observe" title="回想" onClose={() => setPanel(null)} testId="observe-backlog-panel">
-            <Backlog p="observe" timeline={timeline} cursor={shownIdx} colorOf={colorOf} busy={false} />
+            <Backlog p="observe" timeline={timeline} cursor={shownIdx} colorOf={colorOf} busy={false} voice={voice} />
           </Overlay>
         )}
       </div>

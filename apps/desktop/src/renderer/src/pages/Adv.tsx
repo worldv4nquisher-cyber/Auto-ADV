@@ -28,6 +28,7 @@ import {
   useTyping,
 } from '../components/stage.tsx';
 import { useColorOf } from '../components/story.tsx';
+import { useStageVoice, VoiceTag, voiceCps } from '../components/voice.tsx';
 import { Button, ConfirmButton, cx, Input, Select, Spinner, useToast } from '../components/ui.tsx';
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatTime } from '../lib/format.ts';
@@ -138,8 +139,10 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const adv = view.adv;
   const atEnd = cursor >= steps.length - 1;
   const skipping = mode === 'skip' || ctrl;
+  // 配音（18.8）：快进时不念；语音生成好之前文本框先等一会儿，开始放了按语音的长短打字
+  const voice = useStageVoice({ steps, cursor, stepKey, active: !skipping });
   // 打字机效果
-  const typing = useTyping(stepKey, textLen, speed, skipping);
+  const typing = useTyping(stepKey, textLen, voiceCps(speed, textLen, voice), skipping, voice.hold);
   const { shown, typed } = typing;
   /** 跑偏了（16.6）：先问玩家怎么处理，回答之前不弹选项。 */
   const driftOpen = !!adv?.drift.ask && atEnd && typed && !busy;
@@ -304,7 +307,11 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
     if (step?.kind === 'card') delay = skipping ? 60 : 1800;
     else if (step?.kind === 'wait') delay = skipping ? 0 : (step.seconds ?? 1) * 1000;
     else if (skipping) delay = 40;
-    else if (mode === 'auto' && typed) delay = step?.kind === 'text' ? autoDelay * 1000 + textLen * 45 : 1500;
+    else if (mode === 'auto' && typed) {
+      // 有配音：等这句念完再停一下
+      if (voice.status === 'playing') return;
+      delay = voice.status === 'ended' ? autoDelay * 1000 : step?.kind === 'text' ? autoDelay * 1000 + textLen * 45 : 1500;
+    }
     if (delay === null) return;
     const t = setTimeout(advance, delay);
     return () => clearTimeout(t);
@@ -406,6 +413,11 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
       <ToolButton testId="adv-skip" active={skipping} onClick={() => setMode(mode === 'skip' ? 'normal' : 'skip')}>
         快进
       </ToolButton>
+      {voice.available && (
+        <ToolButton testId="adv-voice-toggle" active={!voice.muted} onClick={voice.toggleMute}>
+          配音
+        </ToolButton>
+      )}
       {canRegenerate && (
         <ToolButton testId="adv-regenerate" onClick={() => void regenerate()}>
           重抽
@@ -616,6 +628,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
                     没配模型，这一幕先用占位旁白 · 去设置
                   </button>
                 )}
+                <VoiceTag p="adv" voice={voice} />
                 {mode === 'auto' && <span className="text-accent-strong">自动</span>}
                 {skipping && <span className="text-warn">快进中</span>}
                 {typed && !menuOpen && !driftOpen && !busy && step && <span className="stage-blink text-white/70">▼</span>}
@@ -635,6 +648,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
               colorOf={colorOf}
               busy={busy}
               onRewind={(id) => void rewindTo(id)}
+              voice={voice}
             />
           </Overlay>
         )}
@@ -699,7 +713,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
               </label>
               <p className="col-span-2 text-xs leading-relaxed text-faint">
                 空格 / 回车 / 点击：继续 · 按住 Ctrl：快进（到选项停下） · A：自动 · H 或右键：隐藏文本框 · PageUp 或滚轮向上：回想 ·
-                数字键：选选项 · Esc：关闭面板
+                数字键：选选项 · Esc：关闭面板。配音的音量、谁配音在世界的素材设置里改，工具栏的「配音」只管这台电脑上放不放。
               </p>
             </div>
           </Overlay>

@@ -1,7 +1,7 @@
 /**
  * 素材设置的表单（18.11），全局设置页和世界的素材页共用。
  * 世界里只保存和全局不一样的项：每一项旁边能"恢复全局"；全局设置里是"恢复默认"。
- * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分，第 3 步 BGM。
+ * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分，第 3 步 BGM，第 4 步语音。
  */
 import {
   type AssetSettings,
@@ -47,12 +47,23 @@ type Key =
   | 'bgm.gapSeconds'
   | 'bgm.volume'
   | 'bgm.template'
-  | 'musicConcurrency';
+  | 'musicConcurrency'
+  | 'enabled.voice'
+  | 'voice.protagonist'
+  | 'voice.narrator'
+  | 'voice.narratorVoice'
+  | 'voice.extraVoice'
+  | 'voice.speed'
+  | 'voice.volume'
+  | 'voice.prefetch'
+  | 'voice.emotion'
+  | 'voice.emotions'
+  | 'voiceConcurrency';
 
-type Value = string | number | boolean | string[] | ExpressionDef[] | MoodDef[];
+type Value = string | number | boolean | string[] | ExpressionDef[] | MoodDef[] | Record<string, string>;
 
 /** 并发和重试是按接入点算的，只在全局设置里。 */
-const GLOBAL_ONLY: Key[] = ['imageConcurrency', 'retries', 'musicConcurrency'];
+const GLOBAL_ONLY: Key[] = ['imageConcurrency', 'retries', 'musicConcurrency', 'voiceConcurrency'];
 
 const SOURCE_HINTS: Record<BgmSource, string> = {
   library: '你自己的音乐文件夹',
@@ -176,13 +187,13 @@ export function AssetSettingsForm({
     />
   );
 
-  /** 可以有小数的数字（秒）。 */
-  const dec = (k: Key, min: number, max: number, testId?: string) => (
+  /** 可以有小数的数字（秒、倍数）。 */
+  const dec = (k: Key, min: number, max: number, testId?: string, step = 0.5) => (
     <Input
       type="number"
       min={min}
       max={max}
-      step={0.5}
+      step={step}
       value={String(shown(k) ?? '')}
       onChange={(e) => {
         const n = Number(e.target.value);
@@ -293,6 +304,56 @@ export function AssetSettingsForm({
               }}
             />
             {e.name}
+          </label>
+        ))}
+      </div>
+    );
+  };
+
+  /** 音色 id：可以直接写，也可以从语音职责的音色表里挑；空着是自动。 */
+  const voices = settings?.media.voice?.voices ?? [];
+  const voicePick = (k: Key, testId: string) => (
+    <>
+      <Input
+        list="asset-voice-ids"
+        value={String(shown(k) ?? '')}
+        placeholder="自动"
+        onChange={(e) => put(k, e.target.value.trim())}
+        className="!w-56 font-mono text-xs"
+        data-testid={testId}
+      />
+      <datalist id="asset-voice-ids">
+        {voices.map((v) => (
+          <option key={v.id} value={v.id}>
+            {v.name || v.id}
+          </option>
+        ))}
+      </datalist>
+    </>
+  );
+
+  /** 表情 → 情绪：表情表里的每个表情一格，空着不传情绪。 */
+  const emotionMap = () => {
+    const map = (shown('voice.emotions') as Record<string, string> | undefined) ?? {};
+    return (
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-1.5" data-testid="asset-voice-emotions">
+        {table.map((e) => (
+          <label key={e.id} className="flex items-center gap-1.5 text-xs">
+            <span className="w-14 shrink-0 truncate text-muted" title={e.id}>
+              {e.name}
+            </span>
+            <Input
+              value={map[e.id] ?? ''}
+              placeholder="不传"
+              onChange={(ev) => {
+                const next = { ...map };
+                const v = ev.target.value.trim();
+                if (v) next[e.id] = v;
+                else delete next[e.id];
+                put('voice.emotions', next);
+              }}
+              className="font-mono text-xs"
+            />
           </label>
         ))}
       </div>
@@ -465,6 +526,25 @@ export function AssetSettingsForm({
           template('bgm.template', defaults?.music.template, 'asset-template-bgm'),
         )}
         {row('musicConcurrency', '同时生成几首', '同一个音乐接入点同时生成几首，所有世界共用。', num('musicConcurrency', 1, 8))}
+      </Section>
+
+      <Section title="语音">
+        {row(
+          'enabled.voice',
+          '语音',
+          '用「职责路由」里的「语音」给台词配音，每个角色固定一个音色（世界的素材页能看到、能换）。念过的句子存起来，回想、读档时不用再生成。',
+          toggle('enabled.voice', '给台词配音', 'asset-toggle-voice'),
+        )}
+        {row('voice.protagonist', '主角', '剧情 ADV 里主角是你自己，默认不配。单个角色可以在世界的素材页上开关。', toggle('voice.protagonist', '主角也配音', 'asset-voice-protagonist'))}
+        {row('voice.narrator', '旁白', '旁白和没写是谁的心声也念出来。句子多，会多花不少额度。', toggle('voice.narrator', '旁白也配音', 'asset-voice-narrator'))}
+        {row('voice.narratorVoice', '旁白的音色', '音色 id。空着自动挑一个：描述里有「旁白」「中性」的优先，其次是没分给角色的。', voicePick('voice.narratorVoice', 'asset-voice-narrator-voice'))}
+        {row('voice.extraVoice', '临时人物的音色', '世界里没有的人物（AI 演出时临时出场的路人）用的音色 id。空着自动挑一个没分给主要角色的。', voicePick('voice.extraVoice', 'asset-voice-extra'))}
+        {row('voice.speed', '语速', '0.5～2，1 是正常。改了以后念过的句子会重新生成。', dec('voice.speed', 0.5, 2, 'asset-voice-speed', 0.1))}
+        {row('voice.volume', '音量', '0～100。舞台工具栏上的「配音」可以在这台电脑上关掉配音。', num('voice.volume', 0, 100))}
+        {row('voice.prefetch', '提前生成', '播到一句时提前生成后面几句，点得快也不用等。0 是不提前。', num('voice.prefetch', 0, 5))}
+        {row('voice.emotion', '情绪', '按说话人这句的表情传情绪（MiniMax 的 emotion，自定义接口里是 {{emotion}}）。服务不认情绪时自动不传。', toggle('voice.emotion', '按表情传情绪', 'asset-voice-emotion'))}
+        {row('voice.emotions', '表情对应的情绪', '空着的表情不传情绪，让服务自己判断。MiniMax 常用的有 happy、sad、angry、fearful、disgusted、surprised、calm。', emotionMap())}
+        {row('voiceConcurrency', '同时生成几句', '所有世界共用。', num('voiceConcurrency', 1, 8))}
       </Section>
 
       <div className="flex items-center gap-3">

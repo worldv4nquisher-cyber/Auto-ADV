@@ -38,6 +38,7 @@ import type {
   SettingsView,
 } from './api.ts';
 import { AssetService } from './assets/service.ts';
+import { VoiceService } from './voice/service.ts';
 import {
   BUILTIN_MUSIC_TEMPLATE,
   BUILTIN_TEMPLATES,
@@ -88,6 +89,7 @@ export class Engine {
   readonly genesis: GenesisRunner;
   readonly play: PlayService;
   readonly assets: AssetService;
+  readonly voice: VoiceService;
 
   constructor(opts: EngineOptions) {
     this.dataDir = opts.dataDir;
@@ -111,6 +113,8 @@ export class Engine {
       dataDir: opts.dataDir,
       builtinBgmDir: opts.builtinBgmDir,
     });
+    this.voice = new VoiceService(this.worlds, this.gateway, this.assets);
+    this.assets.onRefresh = (worldId) => this.voice.invalidate(worldId);
     this.play.onView = (worldId, v) => {
       void this.assets
         .focus(worldId, { locationId: v.scene.locationId, characterIds: v.scene.presentCharacterIds, sceneId: v.plot.scene })
@@ -226,7 +230,12 @@ export class Engine {
     // 抠图服务的模型可以不填（用服务自己的默认模型）；自定义接口模板里不用 {{model}} 时也可以不填
     const api = MEDIA_ROLE_APIS[role].includes(route.api) ? route.api : (MEDIA_ROLE_APIS[role][0] ?? route.api);
     if (strict && api !== 'custom' && role !== 'cutout' && !route.model.trim()) {
-      throw new Error(role === 'image' ? '请填写图像模型' : '请填写音乐模型');
+      throw new Error(role === 'image' ? '请填写图像模型' : role === 'music' ? '请填写音乐模型' : '请填写语音模型');
+    }
+    if (route.voices) {
+      const ids = route.voices.map((v) => v.id.trim());
+      if (ids.some((id) => !id)) throw new Error('音色表里有没写 id 的音色');
+      if (new Set(ids).size !== ids.length) throw new Error('音色表里有重复的音色 id');
     }
     if (api !== 'custom') {
       // 自定义模板留着，切回自定义时不用重写
@@ -244,6 +253,8 @@ export class Engine {
     MediaRoleId.parse(role);
     if (route) route = await this.checkMediaRoute(role, route, true);
     await this.settings.update((s) => ({ ...s, media: { ...s.media, [role]: route ?? undefined } }));
+    // 换了语音服务：音色表重新拉，配音表下次用的时候核对
+    if (role === 'voice') this.voice.invalidate();
     // 配好了图像模型，已经打开的世界马上开始画
     await this.assets.refreshAll();
   }
@@ -280,6 +291,23 @@ export class Engine {
       durationMs: r.durationMs,
       latencyMs: r.latencyMs,
     };
+  }
+
+  /** 念一句试试语音职责。 */
+  async testVoice(p: { route?: MediaRoute; voice?: string; text?: string }, ctx: CallContext) {
+    const route = p.route ? await this.checkMediaRoute('voice', p.route, false) : await this.gateway.voiceRoute();
+    if (!route) throw new Error('还没有给「语音」职责指定模型，请到 设置 → 职责路由 配置');
+    const h = await this.gateway.forVoice('voice.test', route);
+    const voice = p.voice?.trim() || (await this.voice.catalog(route))[0]?.id;
+    if (!voice) throw new Error('音色表是空的，请先写音色表（或从服务拉取）');
+    const r = await h.client.speak({ model: h.model, text: p.text?.trim() || '你好，这是一句语音测试。今天的风有点大呢。', voice }, ctx.signal);
+    return { dataUrl: `data:${r.mime};base64,${Buffer.from(r.data).toString('base64')}`, durationMs: r.durationMs, latencyMs: r.latencyMs };
+  }
+
+  /** 语音服务上的音色。 */
+  async fetchVoices(route: MediaRoute, ctx: CallContext) {
+    const r = await this.checkMediaRoute('voice', route, false);
+    return (await this.gateway.listVoices(r, ctx.signal)).map((v) => ({ id: v.id, name: v.name, description: v.description }));
   }
 
   /** 抠一张示例图试试抠图职责（白底上一个彩色圆）。 */
@@ -457,6 +485,12 @@ export class Engine {
       testImage: (p, ctx) => this.testImage(p.route, ctx),
       testMusic: (p, ctx) => this.testMusic(p.route, ctx),
       testCutout: (p, ctx) => this.testCutout(p.route, ctx),
+      testVoice: (p, ctx) => this.testVoice(p, ctx),
+      fetchVoices: (p, ctx) => this.fetchVoices(p.route, ctx),
+      voiceCast: (p) => this.voice.view(p.worldId),
+      setCharacterVoice: (p) => this.voice.setVoice(p.worldId, p.characterId, p.voiceId),
+      recastVoices: (p) => this.voice.view(p.worldId, true),
+      voiceLine: (p) => this.voice.line(p.worldId, p.line),
       builtinBgm: () => this.assets.builtinTracks(),
       chat: (p, ctx) => this.chat(p, ctx),
       listCalls: (p) => this.calls.list(Math.min(p.limit ?? 100, 500), p.offset ?? 0),

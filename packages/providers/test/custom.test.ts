@@ -6,6 +6,7 @@ import {
   CustomMusicClient,
   type ImageExchangeRecord,
   type MusicExchangeRecord,
+  type VoiceExchangeRecord,
   pick,
   ProviderError,
   renderJson,
@@ -83,7 +84,7 @@ describe('模板', () => {
 describe('和内置接口一样写法的模板（对着模拟服务）', () => {
   it('OpenAI 风格：文生图拿 b64_json，改图用表单上传参考图；密钥放进请求头，日志里看不到', async () => {
     const s = await mock({ apiKey: 'secret-key' });
-    const log: (ImageExchangeRecord | MusicExchangeRecord)[] = [];
+    const log: (ImageExchangeRecord | MusicExchangeRecord | VoiceExchangeRecord)[] = [];
     const c = new CustomImageClient(preset('image', 'openai'), { baseURL: s.baseURL, apiKey: 'secret-key', onExchange: (r) => log.push(r) });
     const r = await c.generate({ model: 'mock-image', prompt: '黄昏的图书馆', size: '1536x1024' });
     expect(r.mime).toBe('image/png');
@@ -217,7 +218,7 @@ describe('其他写法', () => {
         errorPath: 'err.msg',
       }),
     };
-    const log: (ImageExchangeRecord | MusicExchangeRecord)[] = [];
+    const log: (ImageExchangeRecord | MusicExchangeRecord | VoiceExchangeRecord)[] = [];
     const c = new CustomImageClient(api, { baseURL: 'http://unused', apiKey: 'k&1', fetch: fetchImpl, onExchange: (r) => log.push(r) });
     const r = await c.generate({ model: '', prompt: '猫 & 狗', size: '512x768' });
     expect(r.data).toEqual(new Uint8Array(png));

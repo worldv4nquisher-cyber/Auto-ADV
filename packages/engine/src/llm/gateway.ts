@@ -5,6 +5,7 @@ import {
   CustomCutoutClient,
   CustomImageClient,
   CustomMusicClient,
+  CustomSpeechClient,
   type ExchangeRecord,
   type FetchLike,
   type ImageEditRequest,
@@ -12,16 +13,22 @@ import {
   type ImageRequest,
   type ImageResult,
   MiniMaxMusicClient,
+  MiniMaxSpeechClient,
   type MusicExchangeRecord,
   type MusicRequest,
   type MusicResult,
   OpenAICompatibleClient,
   OpenAIImageClient,
+  OpenAISpeechClient,
+  OPENAI_VOICES,
   type ParamFix,
   RembgCutoutClient,
   type RequestOptions,
   requestOptionsFor,
+  type SpeechRequest,
+  type SpeechResult,
   type Usage,
+  type VoiceExchangeRecord,
 } from '@auto-adv/providers';
 import { type Capabilities, type Endpoint, type MediaRoute, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
 import type { ChatTarget } from '../api.ts';
@@ -53,6 +60,14 @@ export interface CutoutClient {
   remove(image: { data: Uint8Array; mime: string }, model: string, signal?: AbortSignal): Promise<ImageResult>;
 }
 
+/** 语音接口：OpenAI 风格、MiniMax 或自定义接口。 */
+export interface SpeechClient {
+  speak(req: SpeechRequest, signal?: AbortSignal): Promise<SpeechResult>;
+}
+
+/** 媒体调用的日志记录。 */
+type MediaRecord = ImageExchangeRecord | MusicExchangeRecord | VoiceExchangeRecord;
+
 /** 音乐接口：MiniMax 风格（MiniMaxMusicClient）或自定义接口（CustomMusicClient）。 */
 export interface MusicClient {
   generate(req: MusicRequest, signal?: AbortSignal): Promise<MusicResult>;
@@ -80,6 +95,16 @@ export interface MusicHandle {
   model: string;
   client: MusicClient;
   lastCallId(): string | null;
+}
+
+/** 语音职责的句柄。 */
+export interface VoiceHandle {
+  endpoint: Endpoint;
+  model: string;
+  api: MediaRoute['api'];
+  client: SpeechClient;
+  /** 音色表（设置里的；没写时 OpenAI 用它的固定音色）。 */
+  route: MediaRoute;
 }
 
 /** 自定义接口选了却没写模板。 */
@@ -157,7 +182,7 @@ export class ModelGateway {
       apiKey,
       headers: endpoint.headers,
       fetch: this.o.fetch,
-      onExchange: (rec: ImageExchangeRecord | MusicExchangeRecord) => {
+      onExchange: (rec: MediaRecord) => {
         const id = this.logImage(rec, endpoint, r.model, tag);
         if (id) lastCallId = id;
       },
@@ -186,7 +211,7 @@ export class ModelGateway {
       apiKey,
       headers: endpoint.headers,
       fetch: this.o.fetch,
-      onExchange: (rec: ImageExchangeRecord | MusicExchangeRecord) => this.logImage(rec, endpoint, r.model, tag, 'cutout'),
+      onExchange: (rec: MediaRecord) => this.logImage(rec, endpoint, r.model, tag, 'cutout'),
     };
     const client: CutoutClient = r.api === 'custom' ? new CustomCutoutClient(customOf(r, '抠图'), cfg) : new RembgCutoutClient(cfg);
     return { endpoint, model: r.model, client };
@@ -214,7 +239,7 @@ export class ModelGateway {
       apiKey,
       headers: endpoint.headers,
       fetch: this.o.fetch,
-      onExchange: (rec: ImageExchangeRecord | MusicExchangeRecord) => {
+      onExchange: (rec: MediaRecord) => {
         const id = this.logImage(rec, endpoint, r.model, tag, 'music');
         if (id) lastCallId = id;
       },
@@ -223,17 +248,62 @@ export class ModelGateway {
     return { endpoint, model: r.model, client, lastCallId: () => lastCallId };
   }
 
+  /** 语音职责配了没有。 */
+  async voiceRoute(): Promise<MediaRoute | null> {
+    const s = await this.o.settings.get();
+    const route = s.media.voice;
+    return route && s.endpoints.some((e) => e.id === route.endpointId) ? route : null;
+  }
+
+  /** 按语音职责取接入点和模型；给了 route 就用它（设置页里测试还没保存的选择）。 */
+  async forVoice(tag: string | null, route?: MediaRoute): Promise<VoiceHandle> {
+    const s = await this.o.settings.get();
+    const r = route ?? s.media.voice;
+    if (!r) throw new Error('还没有给「语音」职责指定模型，请到 设置 → 职责路由 配置');
+    const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
+    if (!endpoint) throw new Error('语音职责指向的接入点已被删除，请重新配置');
+    if (r.api !== 'custom' && !r.model.trim()) throw new Error('没有指定语音模型');
+    const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
+    const cfg = {
+      baseURL: endpoint.baseURL,
+      apiKey,
+      headers: endpoint.headers,
+      fetch: this.o.fetch,
+      onExchange: (rec: MediaRecord) => {
+        this.logImage(rec, endpoint, r.model, tag, 'voice');
+      },
+    };
+    const client: SpeechClient =
+      r.api === 'custom'
+        ? new CustomSpeechClient(customOf(r, '语音'), cfg)
+        : r.api === 'minimax'
+          ? new MiniMaxSpeechClient(cfg)
+          : new OpenAISpeechClient(cfg);
+    return { endpoint, model: r.model, api: r.api, client, route: r };
+  }
+
+  /** 语音服务上的音色（MiniMax 从服务拉取，OpenAI 是固定的一套；自定义接口没有，自己写）。 */
+  async listVoices(route: MediaRoute, signal?: AbortSignal) {
+    const s = await this.o.settings.get();
+    const endpoint = s.endpoints.find((e) => e.id === route.endpointId);
+    if (!endpoint) throw new Error('接入点已被删除');
+    if (route.api === 'openai') return OPENAI_VOICES;
+    if (route.api !== 'minimax') throw new Error('自定义接口没法从服务拉取音色，请自己写音色表');
+    const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
+    return new MiniMaxSpeechClient({ baseURL: endpoint.baseURL, apiKey, headers: endpoint.headers, fetch: this.o.fetch }).voices(signal);
+  }
+
   private logImage(
-    rec: ImageExchangeRecord | MusicExchangeRecord,
+    rec: MediaRecord,
     endpoint: Endpoint,
     model: string,
     tag: string | null,
     role = 'image',
   ): string | null {
     const ok =
-      rec.kind === 'music'
-        ? `音乐 ${Math.round(rec.bytes / 1024)} KB${rec.durationMs ? `，${Math.round(rec.durationMs / 1000)} 秒` : ''}`
-        : (rec.revisedPrompt ?? `图片 ${Math.round(rec.bytes / 1024)} KB`);
+      rec.kind === 'image'
+        ? (rec.revisedPrompt ?? `图片 ${Math.round(rec.bytes / 1024)} KB`)
+        : `${rec.kind === 'music' ? '音乐' : '语音'} ${Math.round(rec.bytes / 1024)} KB${rec.durationMs ? `，${(rec.durationMs / 1000).toFixed(1)} 秒` : ''}`;
     try {
       return this.o.calls.insert({
         ts: rec.startedAt,
