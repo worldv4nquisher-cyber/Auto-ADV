@@ -59,9 +59,10 @@ export interface MockServerOptions {
   spriteJpeg?: Uint8Array;
   /** 音乐接口（/v1/music_generation）每首的延迟，默认 0。 */
   musicDelayMs?: number;
-  /** 音乐接口总是在 base_resp 里返回这个错误（模拟套餐不含音乐之类）。 */
-  /** 音乐接口返回这个错误（http 不给就是 HTTP 200 加 base_resp）。 */
+  /** 音乐接口返回这个错误（模拟套餐不含音乐之类；http 不给就是 HTTP 200 加 base_resp）。 */
   musicError?: { code: number; message: string; http?: number };
+  /** 异步任务接口（/v1/jobs，测自定义接口的轮询）：查询几次之后才完成，默认 2。 */
+  jobPolls?: number;
   /** 绑定的主机，默认 127.0.0.1。 */
   host?: string;
   port?: number;
@@ -78,6 +79,9 @@ export interface MockServer {
   cutoutRequests: { model: string; bytes: number }[];
   /** 收到的音乐请求体。 */
   musicRequests: Record<string, unknown>[];
+  /** 异步任务接口收到的提交（请求体）和查询次数。 */
+  jobRequests: Record<string, unknown>[];
+  jobQueries: number;
   close(): Promise<void>;
 }
 
@@ -158,6 +162,9 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
   const imageRequests: Record<string, unknown>[] = [];
   const cutoutRequests: { model: string; bytes: number }[] = [];
   const musicRequests: Record<string, unknown>[] = [];
+  const jobRequests: Record<string, unknown>[] = [];
+  const jobs = new Map<string, { body: Record<string, unknown>; polls: number }>();
+  let jobQueries = 0;
   const files = new Map<string, Buffer>();
   let chatCount = 0;
   let imageCount = 0;
@@ -189,6 +196,39 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         }
         res.writeHead(200, { 'Content-Type': 'image/png' });
         return res.end(encodeRgbaPng(img));
+      }
+      // 异步任务（通用的「提交 → 轮询 → 下载链接」，测自定义接口）：
+      // 有 instrumental 字段的按音乐处理，否则按图像；提示词里有「任务失败」就失败
+      if (req.method === 'POST' && path === '/v1/jobs') {
+        let raw = '';
+        for await (const part of req) raw += part;
+        const body = JSON.parse(raw || '{}') as Record<string, unknown>;
+        jobRequests.push(body);
+        if (!body.prompt) return sendJson(res, 400, { error: { message: 'prompt is required' } });
+        const id = `job-${jobRequests.length}`;
+        jobs.set(id, { body, polls: 0 });
+        return sendJson(res, 202, { id, status: 'queued' });
+      }
+      if (req.method === 'GET' && path.startsWith('/v1/jobs/')) {
+        jobQueries++;
+        const id = decodeURIComponent(path.slice('/v1/jobs/'.length));
+        const job = jobs.get(id);
+        if (!job) return sendJson(res, 404, { error: { message: `no such job: ${id}` } });
+        job.polls++;
+        if (job.polls < (opts.jobPolls ?? 2)) return sendJson(res, 200, { id, status: 'running' });
+        const prompt = String(job.body.prompt);
+        if (prompt.includes('任务失败')) return sendJson(res, 200, { id, status: 'failed', error: { message: 'content policy' } });
+        const name = `${id}.bin`;
+        if ('instrumental' in job.body) {
+          files.set(name, Buffer.from(mockMusic(prompt)));
+        } else {
+          const w = Number(job.body.width) || 1024;
+          const h = Number(job.body.height) || 1024;
+          const scale = 96 / Math.max(w, h);
+          files.set(name, mockImage(prompt, Math.max(8, Math.round(w * scale)), Math.max(8, Math.round(h * scale))));
+        }
+        const url = `http://${opts.host ?? '127.0.0.1'}:${(server.address() as AddressInfo).port}/files/${name}`;
+        return sendJson(res, 200, { id, status: 'succeeded', output: { url } });
       }
       if (req.method === 'POST' && path === '/v1/music_generation') {
         let raw = '';
@@ -413,6 +453,10 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
     imageRequests,
     cutoutRequests,
     musicRequests,
+    jobRequests,
+    get jobQueries() {
+      return jobQueries;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

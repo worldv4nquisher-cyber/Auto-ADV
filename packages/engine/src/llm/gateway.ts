@@ -2,11 +2,19 @@ import {
   type ChatRequest,
   type ChatResult,
   computeCost,
+  CustomCutoutClient,
+  CustomImageClient,
+  CustomMusicClient,
   type ExchangeRecord,
   type FetchLike,
+  type ImageEditRequest,
   type ImageExchangeRecord,
+  type ImageRequest,
+  type ImageResult,
   MiniMaxMusicClient,
   type MusicExchangeRecord,
+  type MusicRequest,
+  type MusicResult,
   OpenAICompatibleClient,
   OpenAIImageClient,
   type ParamFix,
@@ -34,12 +42,28 @@ export interface ModelHandle {
   lastCallId(): string | null;
 }
 
+/** 图像接口：内置的 OpenAI 风格（OpenAIImageClient）或自定义接口（CustomImageClient）。 */
+export interface ImageClient {
+  generate(req: ImageRequest, signal?: AbortSignal): Promise<ImageResult>;
+  edit(req: ImageEditRequest, signal?: AbortSignal): Promise<ImageResult>;
+}
+
+/** 抠图接口：rembg 风格（RembgCutoutClient）或自定义接口（CustomCutoutClient）。 */
+export interface CutoutClient {
+  remove(image: { data: Uint8Array; mime: string }, model: string, signal?: AbortSignal): Promise<ImageResult>;
+}
+
+/** 音乐接口：MiniMax 风格（MiniMaxMusicClient）或自定义接口（CustomMusicClient）。 */
+export interface MusicClient {
+  generate(req: MusicRequest, signal?: AbortSignal): Promise<MusicResult>;
+}
+
 /** 图像职责的句柄。 */
 export interface ImageHandle {
   endpoint: Endpoint;
   model: string;
   api: MediaRoute['api'];
-  client: OpenAIImageClient;
+  client: ImageClient;
   lastCallId(): string | null;
 }
 
@@ -47,15 +71,21 @@ export interface ImageHandle {
 export interface CutoutHandle {
   endpoint: Endpoint;
   model: string;
-  client: RembgCutoutClient;
+  client: CutoutClient;
 }
 
 /** 音乐职责的句柄。 */
 export interface MusicHandle {
   endpoint: Endpoint;
   model: string;
-  client: MiniMaxMusicClient;
+  client: MusicClient;
   lastCallId(): string | null;
+}
+
+/** 自定义接口选了却没写模板。 */
+function customOf(r: MediaRoute, label: string) {
+  if (!r.custom) throw new Error(`「${label}」选了自定义接口，但还没有写请求模板，请到 设置 → 职责路由 填写`);
+  return r.custom;
 }
 
 /** 计量回调：每次 HTTP 调用拿到用量后调用一次（重试、校验失败重来的每一次都算）。 */
@@ -119,19 +149,20 @@ export class ModelGateway {
     if (!r) throw new Error('还没有给「图像」职责指定模型，请到 设置 → 职责路由 配置');
     const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
     if (!endpoint) throw new Error('图像职责指向的接入点已被删除，请重新配置');
-    if (!r.model.trim()) throw new Error('没有指定图像模型');
+    if (r.api !== 'custom' && !r.model.trim()) throw new Error('没有指定图像模型');
     const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
     let lastCallId: string | null = null;
-    const client = new OpenAIImageClient({
+    const cfg = {
       baseURL: endpoint.baseURL,
       apiKey,
       headers: endpoint.headers,
       fetch: this.o.fetch,
-      onExchange: (rec) => {
+      onExchange: (rec: ImageExchangeRecord | MusicExchangeRecord) => {
         const id = this.logImage(rec, endpoint, r.model, tag);
         if (id) lastCallId = id;
       },
-    });
+    };
+    const client: ImageClient = r.api === 'custom' ? new CustomImageClient(customOf(r, '图像'), cfg) : new OpenAIImageClient(cfg);
     return { endpoint, model: r.model, api: r.api, client, lastCallId: () => lastCallId };
   }
 
@@ -142,7 +173,7 @@ export class ModelGateway {
     return route && s.endpoints.some((e) => e.id === route.endpointId) ? route : null;
   }
 
-  /** 按抠图职责取接入点（rembg 一类的服务）。 */
+  /** 按抠图职责取接入点（rembg 一类的服务，或自定义接口）。 */
   async forCutout(tag: string | null, route?: MediaRoute): Promise<CutoutHandle> {
     const s = await this.o.settings.get();
     const r = route ?? s.media.cutout;
@@ -150,13 +181,14 @@ export class ModelGateway {
     const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
     if (!endpoint) throw new Error('抠图职责指向的接入点已被删除，请重新配置');
     const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
-    const client = new RembgCutoutClient({
+    const cfg = {
       baseURL: endpoint.baseURL,
       apiKey,
       headers: endpoint.headers,
       fetch: this.o.fetch,
-      onExchange: (rec) => this.logImage(rec, endpoint, r.model, tag, 'cutout'),
-    });
+      onExchange: (rec: ImageExchangeRecord | MusicExchangeRecord) => this.logImage(rec, endpoint, r.model, tag, 'cutout'),
+    };
+    const client: CutoutClient = r.api === 'custom' ? new CustomCutoutClient(customOf(r, '抠图'), cfg) : new RembgCutoutClient(cfg);
     return { endpoint, model: r.model, client };
   }
 
@@ -167,26 +199,27 @@ export class ModelGateway {
     return route && s.endpoints.some((e) => e.id === route.endpointId) ? route : null;
   }
 
-  /** 按音乐职责取接入点和模型（MiniMax 的音乐接口）；给了 route 就用它（设置页里测试还没保存的选择）。 */
+  /** 按音乐职责取接入点和模型（MiniMax 风格的音乐接口，或自定义接口）；给了 route 就用它（设置页里测试还没保存的选择）。 */
   async forMusic(tag: string | null, route?: MediaRoute): Promise<MusicHandle> {
     const s = await this.o.settings.get();
     const r = route ?? s.media.music;
     if (!r) throw new Error('还没有给「音乐」职责指定模型，请到 设置 → 职责路由 配置');
     const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
     if (!endpoint) throw new Error('音乐职责指向的接入点已被删除，请重新配置');
-    if (!r.model.trim()) throw new Error('没有指定音乐模型');
+    if (r.api !== 'custom' && !r.model.trim()) throw new Error('没有指定音乐模型');
     const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
     let lastCallId: string | null = null;
-    const client = new MiniMaxMusicClient({
+    const cfg = {
       baseURL: endpoint.baseURL,
       apiKey,
       headers: endpoint.headers,
       fetch: this.o.fetch,
-      onExchange: (rec) => {
+      onExchange: (rec: ImageExchangeRecord | MusicExchangeRecord) => {
         const id = this.logImage(rec, endpoint, r.model, tag, 'music');
         if (id) lastCallId = id;
       },
-    });
+    };
+    const client: MusicClient = r.api === 'custom' ? new CustomMusicClient(customOf(r, '音乐'), cfg) : new MiniMaxMusicClient(cfg);
     return { endpoint, model: r.model, client, lastCallId: () => lastCallId };
   }
 

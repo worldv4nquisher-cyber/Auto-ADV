@@ -627,6 +627,45 @@ try {
   await shot(page, '28-adv-real-bg');
   step('剧情 ADV 的舞台上换成了画好的背景和立绘，放着 BGM');
 
+  // ── 自定义接口（通用 HTTP 适配器）：图像职责改成自定义，从「异步任务」模板开始，测试画一张
+  await page.click('[data-nav="settings"]');
+  await page.click('button:has-text("职责路由")');
+  await page.selectOption('[data-testid="role-api-image"]', 'custom');
+  await page.waitForSelector('[data-testid="custom-api-image"]');
+  // 起点是 OpenAI 风格的模板（和内置接口一样的写法）
+  assert.equal(await page.inputValue('[data-testid="custom-image-request-url"]'), '/images/generations');
+  await page.click('[data-testid="custom-preset-image-async"]');
+  assert.equal(await page.inputValue('[data-testid="custom-image-request-poll-url"]'), '/jobs/{{id}}');
+  await page.fill('[data-testid="custom-image-request-url"]', '/jobs?x={{oops}}');
+  await page.waitForSelector('[data-testid="custom-problem-image"] >> text={{oops}}');
+  await page.fill('[data-testid="custom-image-request-url"]', '/jobs');
+  await page.waitForSelector('[data-testid="custom-problem-image"]', { state: 'detached' });
+  await page.fill('[data-testid="custom-image-request-poll-interval"]', '0.2');
+  const jobsBefore = server.jobRequests.length;
+  await page.click('[data-testid="role-test-image"]');
+  await page.waitForFunction(() => {
+    const img = document.querySelector('[data-testid="role-test-image-image"]') as HTMLImageElement | null;
+    return !!img && img.complete && img.naturalWidth > 0;
+  }, null, { timeout: 20_000 });
+  assert.equal(server.jobRequests.length, jobsBefore + 1);
+  assert.equal(server.jobRequests.at(-1)?.model, 'mock-image');
+  await page.locator('[data-testid="role-image"]').scrollIntoViewIfNeeded();
+  await shot(page, '29-custom-api');
+  await page.click('[data-testid="role-save-image"]');
+  // 存好以后「保存」按钮消失（前面的「已保存」提示可能还在，不能拿它判断）
+  await page.waitForSelector('[data-testid="role-save-image"]', { state: 'detached' });
+  const saved = JSON.parse(await readFile(path.join(dataDir, 'settings.json'), 'utf8')) as {
+    media: { image?: { api: string; custom?: { request: { url: string; poll?: { intervalSeconds: number } } } } };
+  };
+  assert.equal(saved.media.image?.api, 'custom');
+  assert.equal(saved.media.image?.custom?.request.url, '/jobs');
+  assert.equal(saved.media.image?.custom?.request.poll?.intervalSeconds, 0.2);
+  // 自定义接口的调用日志里看不到密钥
+  for (const f of (await readdir(dataDir)).filter((n) => n.startsWith('logs.db'))) {
+    assert.ok(!(await readFile(path.join(dataDir, f))).includes(API_KEY), `调用日志（${f}）里不能有密钥`);
+  }
+  step('图像职责改成自定义接口：从模板开始改，写错的占位符马上提示，测试画一张，保存');
+
   console.log('✓ 端到端冒烟测试通过');
 } finally {
   await app.close();

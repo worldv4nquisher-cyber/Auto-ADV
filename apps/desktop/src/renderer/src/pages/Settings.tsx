@@ -3,6 +3,7 @@ import { ENDPOINT_PRESETS, PROBE_STEP_LABELS, type ProbeStep } from '@auto-adv/p
 import {
   type AssetSettings,
   type Capabilities,
+  type CustomApi,
   DEFAULT_MOODS,
   MEDIA_ROLE_APIS,
   MEDIA_ROLE_LABELS,
@@ -18,6 +19,7 @@ import { Badge, Button, Card, cx, Empty, Field, Input, PageHeader, Select, Spinn
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { useSettings } from '../lib/settings.tsx';
 import { AssetSettingsForm } from './AssetSettingsForm.tsx';
+import { CustomApiEditor, defaultCustomApi } from './CustomApiEditor.tsx';
 
 type Tab = 'endpoints' | 'roles' | 'assets' | 'about';
 
@@ -577,6 +579,7 @@ const MEDIA_API_LABELS: Record<MediaRoute['api'], string> = {
   openai: 'OpenAI 风格',
   rembg: 'rembg（/api/remove）',
   minimax: 'MiniMax（/music_generation）',
+  custom: '自定义',
 };
 
 const MODEL_PLACEHOLDER: Record<MediaRoleId, string> = {
@@ -592,21 +595,42 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
   const current = settings?.media[role];
   const isImage = role === 'image';
   const isMusic = role === 'music';
-  const needsModel = isImage || isMusic;
-  const api = MEDIA_ROLE_APIS[role][0] ?? 'openai';
+  const apis = MEDIA_ROLE_APIS[role];
+  const savedApi = current && apis.includes(current.api) ? current.api : (apis[0] ?? 'openai');
   const [endpointId, setEndpointId] = useState(current?.endpointId ?? '');
   const [model, setModel] = useState(current?.model ?? '');
+  const [api, setApi] = useState<MediaRoute['api']>(savedApi);
+  const [custom, setCustom] = useState<CustomApi | null>(current?.custom ?? null);
+  const [showTemplate, setShowTemplate] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState<{ dataUrl: string; latencyMs: number; revisedPrompt: string | null; durationMs?: number | null } | null>(
     null,
   );
+  const savedCustom = JSON.stringify(current?.custom ?? null);
   useEffect(() => {
     setEndpointId(current?.endpointId ?? '');
     setModel(current?.model ?? '');
-  }, [current?.endpointId, current?.model]);
+    setApi(savedApi);
+    setCustom(savedCustom === 'null' ? null : (JSON.parse(savedCustom) as CustomApi));
+  }, [current?.endpointId, current?.model, savedApi, savedCustom]);
   const endpoint = settings?.endpoints.find((e) => e.id === endpointId);
-  const dirty = endpointId !== (current?.endpointId ?? '') || model !== (current?.model ?? '');
+  const isCustom = api === 'custom';
+  // 自定义接口的模板里不用 {{model}} 时模型可以不填
+  const needsModel = (isImage || isMusic) && !isCustom;
+  const dirty =
+    endpointId !== (current?.endpointId ?? '') ||
+    model !== (current?.model ?? '') ||
+    api !== savedApi ||
+    (isCustom && JSON.stringify(custom) !== savedCustom);
+  const route = (): MediaRoute => ({ endpointId, model: model.trim(), api, ...(custom ? { custom } : {}) });
+  const pickApi = (next: MediaRoute['api']) => {
+    setApi(next);
+    if (next === 'custom') {
+      if (!custom) setCustom(defaultCustomApi(role));
+      setShowTemplate(true);
+    }
+  };
 
   const label = MEDIA_ROLE_LABELS[role];
   const save = async (clear = false) => {
@@ -616,7 +640,7 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
     }
     setSaving(true);
     try {
-      await engine.call('setMediaRole', { role, route: clear ? null : { endpointId, model: model.trim(), api } });
+      await engine.call('setMediaRole', { role, route: clear ? null : route() });
       await refresh();
       toast(
         'ok',
@@ -635,15 +659,18 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
     }
   };
   const runTest = async () => {
-    if (!endpointId || !model.trim()) return;
+    if (!endpointId || (needsModel && !model.trim())) return;
     setTesting(true);
     setTest(null);
     try {
       if (isMusic) {
-        const r = await engine.call('testMusic', { route: { endpointId, model: model.trim(), api: 'minimax' } });
+        const r = await engine.call('testMusic', { route: route() });
         setTest({ ...r, revisedPrompt: null });
+      } else if (isImage) {
+        setTest(await engine.call('testImage', { route: route() }));
       } else {
-        setTest(await engine.call('testImage', { route: { endpointId, model: model.trim(), api: 'openai' } }));
+        const r = await engine.call('testCutout', { route: route() });
+        setTest({ ...r, revisedPrompt: null });
       }
     } catch (err) {
       toast('err', errorMessage(err));
@@ -691,27 +718,36 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
             <option key={m} value={m} />
           ))}
         </datalist>
-        <Select value={api} onChange={() => {}} className="w-36" title="接口类型">
-          {MEDIA_ROLE_APIS[role].map((a) => (
+        <Select
+          value={api}
+          onChange={(e) => pickApi(e.target.value as MediaRoute['api'])}
+          className="w-36"
+          title="接口类型"
+          data-testid={`role-api-${role}`}
+        >
+          {apis.map((a) => (
             <option key={a} value={a}>
               {MEDIA_API_LABELS[a]}
             </option>
           ))}
         </Select>
-        <div className="flex w-40 justify-end gap-1">
-          {needsModel && (
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={!endpointId || !model.trim()}
-              loading={testing}
-              onClick={() => void runTest()}
-              title={isMusic ? '生成一首试试，会花一首曲子的额度' : '画一张小图试试，会花一张图的额度'}
-              data-testid={`role-test-${role}`}
-            >
-              测试
+        <div className="flex w-44 shrink-0 justify-end gap-1">
+          {isCustom && (
+            <Button size="sm" variant="ghost" onClick={() => setShowTemplate((v) => !v)} data-testid={`role-template-${role}`}>
+              {showTemplate ? '收起' : '模板'}
             </Button>
           )}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!endpointId || (needsModel && !model.trim())}
+            loading={testing}
+            onClick={() => void runTest()}
+            title={isMusic ? '生成一首试试，会花一首曲子的额度' : isImage ? '画一张小图试试，会花一张图的额度' : '抠一张示例图试试'}
+            data-testid={`role-test-${role}`}
+          >
+            测试
+          </Button>
           {dirty ? (
             <Button size="sm" variant="primary" onClick={() => void save()} loading={saving} data-testid={`role-save-${role}`}>
               保存
@@ -723,16 +759,22 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
           ) : null}
         </div>
       </div>
+      {isCustom && showTemplate && custom && <CustomApiEditor role={role} value={custom} onChange={setCustom} />}
       {test && (
         <div className="mt-3 flex items-start gap-3 border-t border-line pt-3 text-xs text-muted">
           {isMusic ? (
             <audio src={test.dataUrl} controls className="h-9" data-testid="role-test-audio" />
           ) : (
-            <img src={test.dataUrl} alt="测试图" className="size-24 rounded object-cover" />
+            <img
+              src={test.dataUrl}
+              alt="测试图"
+              className={cx('size-24 rounded object-cover', !isImage && 'bg-[repeating-conic-gradient(#8884_0_25%,transparent_0_50%)] bg-[length:16px_16px]')}
+              data-testid={`role-test-image-${role}`}
+            />
           )}
           <div className="space-y-1">
             <div>
-              {isMusic ? '生成好了' : '画好了'}，用了 {formatMsShort(test.latencyMs)}
+              {isMusic ? '生成好了' : isImage ? '画好了' : '抠好了'}，用了 {formatMsShort(test.latencyMs)}
               {test.durationMs ? `，曲子长 ${Math.round(test.durationMs / 1000)} 秒` : ''}。
             </div>
             {test.revisedPrompt && <div className="text-faint">服务端改写后的提示词：{test.revisedPrompt}</div>}

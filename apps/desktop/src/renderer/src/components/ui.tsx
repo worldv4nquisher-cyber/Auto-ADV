@@ -54,19 +54,28 @@ export function Button({
 }
 
 const fieldBase =
-  'w-full rounded-lg border border-line bg-bg px-3 text-sm text-fg placeholder:text-faint outline-none transition-colors focus:border-accent disabled:opacity-60';
+  'rounded-lg border border-line bg-bg px-3 text-sm text-fg placeholder:text-faint outline-none transition-colors focus:border-accent disabled:opacity-60';
+
+/**
+ * 输入框的默认宽度（占满）和高度。传进来的 className 自己写了宽（w-…）或高（h-…）时用它的，
+ * 不然两个 width 类同时在，生效的是样式表里排在后面的那个，w-44 这类写了也不管用。
+ */
+function field(className: string | undefined, height: string | null, extra: string): string {
+  const has = (prefix: string) => new RegExp(`(^|\\s)${prefix}-`).test(className ?? '');
+  return cx(fieldBase, !has('w') && 'w-full', height && !has('h') && height, extra, className);
+}
 
 export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={cx(fieldBase, 'h-9', className)} {...rest} />;
+  return <input className={field(className, 'h-9', '')} {...rest} />;
 }
 
 export function Textarea({ className, ...rest }: ComponentProps<'textarea'>) {
-  return <textarea className={cx(fieldBase, 'py-2 leading-relaxed', className)} {...rest} />;
+  return <textarea className={field(className, null, 'py-2 leading-relaxed')} {...rest} />;
 }
 
 export function Select({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
   return (
-    <select className={cx(fieldBase, 'h-9 cursor-pointer pr-8', className)} {...rest}>
+    <select className={field(className, 'h-9', 'cursor-pointer pr-8')} {...rest}>
       {children}
     </select>
   );

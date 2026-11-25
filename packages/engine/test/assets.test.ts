@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { decodePng, type RgbaImage } from '@auto-adv/providers';
 import { encodePng, type MockServer, type MockServerOptions, mockMusic, mockSprite, startMockServer } from '@auto-adv/providers/testing';
-import { AssetIndex, AssetSettings, BgmSettings } from '@auto-adv/schema';
+import { AssetIndex, AssetSettings, BgmSettings, CUSTOM_API_PRESETS, type CustomApi } from '@auto-adv/schema';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type AssetsView, createPortPair, Engine, type EngineContract, MemorySecretStore, RpcClient, serveRpc } from '../src/index.ts';
 import { checkAlpha, hasTransparentBackdrop, keyOut } from '../src/assets/cutout.ts';
@@ -865,5 +865,74 @@ describe('BGM', () => {
     const r = await client.call('testMusic', { route: { endpointId, model: 'mock-music', api: 'minimax' } });
     expect(r.dataUrl).toMatch(/^data:audio\/wav;base64,/);
     expect(r.durationMs).toBe(2000);
+  });
+});
+
+describe('自定义接口（通用 HTTP 适配器）', () => {
+  const preset = (role: 'image' | 'cutout' | 'music', id: string): CustomApi => {
+    const p = CUSTOM_API_PRESETS[role].find((x) => x.id === id);
+    if (!p) throw new Error(id);
+    return JSON.parse(JSON.stringify(p.api)) as CustomApi;
+  };
+
+  it('保存时检查模板：没写模板、JSON 写错、占位符不认识都不让存；存好的模板切回内置接口后还留着', async () => {
+    await setup({ image: false });
+    const route = { endpointId, model: 'mock-image', api: 'custom' as const };
+    await expect(client.call('setMediaRole', { role: 'image', route })).rejects.toThrow('请填写请求模板');
+    const bad = preset('image', 'openai');
+    bad.request.body = '{"prompt": "{{prompt}}",}';
+    await expect(client.call('setMediaRole', { role: 'image', route: { ...route, custom: bad } })).rejects.toThrow(/文生图请求的请求体不是合法的 JSON/);
+    bad.request.body = '{"prompt": "{{lyrics}}"}';
+    await expect(client.call('setMediaRole', { role: 'image', route: { ...route, custom: bad } })).rejects.toThrow(/\{\{lyrics\}\} 不认识/);
+
+    await client.call('setMediaRole', { role: 'image', route: { ...route, model: '', custom: preset('image', 'async') } });
+    let s = await client.call('getSettings');
+    expect(s.media.image).toMatchObject({ api: 'custom', model: '', custom: { request: { url: '/jobs' } } });
+    // 抠图职责不认识 MiniMax 的接口类型，退回第一个（rembg）
+    await client.call('setMediaRole', { role: 'cutout', route: { endpointId, model: '', api: 'minimax' } });
+    s = await client.call('getSettings');
+    expect(s.media.cutout?.api).toBe('rembg');
+    await client.call('setMediaRole', { role: 'image', route: { endpointId, model: 'mock-image', api: 'openai', custom: preset('image', 'async') } });
+    s = await client.call('getSettings');
+    expect(s.media.image).toMatchObject({ api: 'openai', custom: { request: { url: '/jobs' } } });
+  });
+
+  it('图像选自定义（异步任务）：背景照常画好，调用记在图像职责下', async () => {
+    const id = await setup({ image: false, mock: { jobPolls: 1 } });
+    const api = preset('image', 'async');
+    if (api.request.poll) api.request.poll.intervalSeconds = 0.2;
+    await client.call('setMediaRole', { role: 'image', route: { endpointId, model: 'mock-image', api: 'custom', custom: api } });
+    const v = await idle(id, 15000);
+    expect(slot(v, 'bg/loc_archive')).toMatchObject({ status: 'done' });
+    expect(server.jobRequests).toHaveLength(3);
+    expect(server.jobRequests[0]).toMatchObject({ model: 'mock-image', width: 1536, height: 1024 });
+    expect(server.imageRequests).toHaveLength(0);
+    const calls = await client.call('listCalls', { limit: 50 });
+    expect(calls.items.filter((c) => c.role === 'image' && c.status === 'ok')).toHaveLength(3);
+  });
+
+  it('设置页：用自定义接口测试抠图和音乐', async () => {
+    await setup({ image: false });
+    const rembg = await client.call('saveEndpoint', {
+      name: 'rembg',
+      baseURL: server.baseURL.replace(/\/v1$/, ''),
+      models: [],
+      currency: 'CNY',
+      pricing: {},
+    });
+    const cut = await client.call('testCutout', { route: { endpointId: rembg.id, model: '', api: 'custom', custom: preset('cutout', 'rembg') } });
+    const png = rgba(new Uint8Array(Buffer.from(cut.dataUrl.replace(/^data:image\/png;base64,/, ''), 'base64')));
+    expect(alphaAt(png, 0, 0)).toBe(0);
+    expect(alphaAt(png, 128, 128)).toBe(255);
+    expect(server.cutoutRequests).toHaveLength(1);
+    // 内置的 rembg 接口也能测
+    await client.call('testCutout', { route: { endpointId: rembg.id, model: 'isnet-anime', api: 'rembg' } });
+    expect(server.cutoutRequests[1]?.model).toBe('isnet-anime');
+
+    const music = await client.call('testMusic', { route: { endpointId, model: 'mock-music', api: 'custom', custom: preset('music', 'minimax') } });
+    expect(music.dataUrl).toMatch(/^data:audio\/wav;base64,/);
+    await expect(
+      client.call('testMusic', { route: { endpointId, model: 'mock-music', api: 'custom', custom: { request: { ...preset('music', 'minimax').request, resultPath: '' } } } }),
+    ).rejects.toThrow(/音乐请求要填结果在响应里的位置/);
   });
 });

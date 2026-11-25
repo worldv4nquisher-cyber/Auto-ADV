@@ -1,5 +1,6 @@
 import path from 'node:path';
 import {
+  encodeRgbaPng,
   type FetchLike,
   normalizeBaseURL,
   OpenAICompatibleClient,
@@ -12,6 +13,8 @@ import {
   type Capabilities,
   type Endpoint,
   type GenesisStepId,
+  checkCustomApi,
+  CustomApi,
   MEDIA_ROLE_APIS,
   MEDIA_ROLE_IDS,
   MediaRoleId,
@@ -217,16 +220,29 @@ export class Engine {
     });
   }
 
+  /** 检查一个媒体职责的路由：接入点在不在、模型填没填、接口类型对不对，自定义接口的模板写得对不对。 */
+  private async checkMediaRoute(role: MediaRoleId, route: MediaRoute, strict: boolean): Promise<MediaRoute> {
+    await this.getEndpoint(route.endpointId);
+    // 抠图服务的模型可以不填（用服务自己的默认模型）；自定义接口模板里不用 {{model}} 时也可以不填
+    const api = MEDIA_ROLE_APIS[role].includes(route.api) ? route.api : (MEDIA_ROLE_APIS[role][0] ?? route.api);
+    if (strict && api !== 'custom' && role !== 'cutout' && !route.model.trim()) {
+      throw new Error(role === 'image' ? '请填写图像模型' : '请填写音乐模型');
+    }
+    if (api !== 'custom') {
+      // 自定义模板留着，切回自定义时不用重写
+      return { ...route, model: route.model.trim(), api };
+    }
+    if (!route.custom) throw new Error('选了自定义接口，请填写请求模板');
+    const parsed = CustomApi.safeParse(route.custom);
+    if (!parsed.success) throw new Error(`自定义接口的模板不对：${parsed.error.issues[0]?.message ?? parsed.error.message}`);
+    const problem = checkCustomApi(parsed.data, role);
+    if (problem) throw new Error(problem);
+    return { ...route, model: route.model.trim(), api, custom: parsed.data };
+  }
+
   async setMediaRole(role: MediaRoleId, route: MediaRoute | null): Promise<void> {
     MediaRoleId.parse(role);
-    if (route) {
-      await this.getEndpoint(route.endpointId);
-      // 抠图服务的模型可以不填（用服务自己的默认模型）
-      if (role === 'image' && !route.model.trim()) throw new Error('请填写图像模型');
-      if (role === 'music' && !route.model.trim()) throw new Error('请填写音乐模型');
-      const apis = MEDIA_ROLE_APIS[role];
-      route = { ...route, model: route.model.trim(), api: apis.includes(route.api) ? route.api : (apis[0] ?? route.api) };
-    }
+    if (route) route = await this.checkMediaRoute(role, route, true);
     await this.settings.update((s) => ({ ...s, media: { ...s.media, [role]: route ?? undefined } }));
     // 配好了图像模型，已经打开的世界马上开始画
     await this.assets.refreshAll();
@@ -240,7 +256,7 @@ export class Engine {
 
   /** 画一张小图试试图像职责。 */
   async testImage(route: MediaRoute | undefined, ctx: CallContext) {
-    const h = await this.gateway.forImage('assets.test', route);
+    const h = await this.gateway.forImage('assets.test', route && (await this.checkMediaRoute('image', route, false)));
     const r = await h.client.generate(
       { model: h.model, prompt: '一只坐在窗台上的橘猫，水彩插画，柔和的晨光', size: '1024x1024' },
       ctx.signal,
@@ -254,7 +270,7 @@ export class Engine {
 
   /** 生成一首试试音乐职责（会花一首曲子的额度）。 */
   async testMusic(route: MediaRoute | undefined, ctx: CallContext) {
-    const h = await this.gateway.forMusic('assets.test', route);
+    const h = await this.gateway.forMusic('assets.test', route && (await this.checkMediaRoute('music', route, false)));
     const r = await h.client.generate(
       { model: h.model, prompt: '温暖的钢琴小品，轻柔的弦乐伴奏，视觉小说的日常场景，纯音乐', instrumental: true },
       ctx.signal,
@@ -264,6 +280,13 @@ export class Engine {
       durationMs: r.durationMs,
       latencyMs: r.latencyMs,
     };
+  }
+
+  /** 抠一张示例图试试抠图职责（白底上一个彩色圆）。 */
+  async testCutout(route: MediaRoute | undefined, ctx: CallContext) {
+    const c = await this.gateway.forCutout('assets.test', route && (await this.checkMediaRoute('cutout', route, false)));
+    const r = await c.client.remove({ data: cutoutSample(), mime: 'image/png' }, c.model, ctx.signal);
+    return { dataUrl: `data:${r.mime};base64,${Buffer.from(r.data).toString('base64')}`, latencyMs: r.latencyMs };
   }
 
   // ───────────── 模型调用 ─────────────
@@ -433,6 +456,7 @@ export class Engine {
       saveAssetSettings: (p) => this.saveAssetSettings(p.settings),
       testImage: (p, ctx) => this.testImage(p.route, ctx),
       testMusic: (p, ctx) => this.testMusic(p.route, ctx),
+      testCutout: (p, ctx) => this.testCutout(p.route, ctx),
       builtinBgm: () => this.assets.builtinTracks(),
       chat: (p, ctx) => this.chat(p, ctx),
       listCalls: (p) => this.calls.list(Math.min(p.limit ?? 100, 500), p.offset ?? 0),
@@ -488,4 +512,21 @@ export class Engine {
       takeover: (p) => this.play.takeover(p, p.characterId),
     };
   }
+}
+
+/** 抠图测试用的示例图：256×256 白底，中间一个橙色的圆。 */
+function cutoutSample(): Uint8Array {
+  const size = 256;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const o = (y * size + x) * 4;
+      const inside = (x - 128) ** 2 + (y - 128) ** 2 < 80 ** 2;
+      data[o] = inside ? 240 : 255;
+      data[o + 1] = inside ? 140 : 255;
+      data[o + 2] = inside ? 60 : 255;
+      data[o + 3] = 255;
+    }
+  }
+  return new Uint8Array(encodeRgbaPng({ width: size, height: size, data }));
 }
