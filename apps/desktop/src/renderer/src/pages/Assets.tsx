@@ -6,7 +6,7 @@
 import type { AssetAction, AssetSlotView, AssetsControl, AssetsView, MoodPlaylist, VoiceCastView, VoiceLineParams } from '@auto-adv/engine/api';
 import { type AssetSettings, type AssetSettingsPatch, BGM_SOURCE_LABELS, BGM_SOURCES, type BgmSource } from '@auto-adv/schema';
 import { type ReactNode, useEffect, useRef, useState } from 'react';
-import { hueOf, PlaceholderBg, PlaceholderSprite } from '../components/placeholder.tsx';
+import { hueOf, PlaceholderBg, PlaceholderCg, PlaceholderSprite } from '../components/placeholder.tsx';
 import { Badge, Button, Card, ConfirmButton, cx, Empty, Spinner, Textarea, useToast } from '../components/ui.tsx';
 import { assetUrl, bgmUrl, useAssetsContext } from '../lib/assets.tsx';
 import { engine, errorMessage } from '../lib/engine.ts';
@@ -364,8 +364,10 @@ function SlotCard({
           <span className="absolute inset-0 flex justify-center pt-[8%] opacity-60">
             <PlaceholderSprite name={slot.title.split(' · ')[0] ?? ''} expr={slot.expression ?? 'neutral'} color={`hsl(${hueOf(slot.characterId ?? slot.id)} 45% 60%)`} />
           </span>
+        ) : slot.kind === 'cg' ? (
+          <PlaceholderCg id={slot.id.replace(/^cg\//, '')} />
         ) : (
-          <PlaceholderBg id={slot.id.replace(/^bg\//, '')} label={false} />
+          <PlaceholderBg id={slot.id.replace(/^bg\//, '').split('@')[0] ?? ''} label={false} />
         )}
         {slot.status === 'running' && (
           <span className="absolute inset-0 flex items-center justify-center bg-black/40">

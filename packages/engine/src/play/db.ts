@@ -14,6 +14,8 @@ export interface PlaythroughData {
   usage?: PlayUsage;
   /** 生成中途收到、还没写进事件树的导演指令和悄悄话。 */
   pending?: { kind: 'directive' | 'whisper'; text: string; characterId?: string; createdAt: number }[];
+  /** 升级过的临时人物（18.5）：名字 → done 升级好了 / failed 失败了（不再自动重试）。 */
+  extras?: Record<string, 'done' | 'failed'>;
 }
 
 export interface PlaythroughRow {

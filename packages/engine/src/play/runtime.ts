@@ -23,11 +23,13 @@ import { generateJson, stripThinking } from '../llm/structured.ts';
 import type { AdvAction } from '../plot/runner.ts';
 import { AdvSession, advView, loadAdvWorld, recordCgShown, worldProgress } from '../plot/session.ts';
 import { buildTimeline, DRIFT_LABELS, findStep, stageFromSegments, stepText } from '../plot/stage.ts';
-import { shortId } from '../util.ts';
+import { SerialQueue, shortId } from '../util.ts';
 import { matchByName } from '../world/render.ts';
 import type { WorldData, WorldStore } from '../world/store.ts';
 import { buildMessages, eventText, protagonistOf, sceneAt, summaryPrompt } from './context.ts';
 import { runAdvBeat, runAdvDetour } from './adv.ts';
+import type { CgRules, PlannedBeat } from './cg.ts';
+import { extraCharacter, extraPrompt, extrasOf, extraSpec } from './extras.ts';
 import { PlayDb, type PlaythroughRow } from './db.ts';
 import { runBeat } from './observer/beat.ts';
 import { memoryPrompt, memorySpec } from './observer/prompts.ts';
@@ -121,6 +123,17 @@ export class PlayService {
   expressionTable: (worldId: string) => Promise<readonly ExpressionDef[]> = async () => DEFAULT_EXPRESSIONS;
   /** 这个世界的情绪表（导演报告 mood 用）；BGM 关掉了就是 undefined，导演不报。 */
   moodTable: (worldId: string) => Promise<readonly MoodDef[] | undefined> = async () => undefined;
+  /** AI 演出时导演能不能标 CG、每幕每章最多几张（18.6）；CG 关掉了、没配图像模型就是 null。 */
+  cgRules: (worldId: string) => Promise<CgRules | null> = async () => null;
+  /** 导演安排好一拍（还没演出）时调用：素材管线马上开始画这一拍的 CG 和时段背景。 */
+  onBeatPlanned: ((worldId: string, b: PlannedBeat) => void) | null = null;
+  /** 临时人物的规则（18.5）：上不上台（剪影）、开口满几拍升级成正式角色（0 不升级）。 */
+  extrasRules: (worldId: string) => Promise<{ silhouette: boolean; upgradeAfter: number }> = async () => ({ silhouette: false, upgradeAfter: 0 });
+  /** 世界的内容被游玩改了（临时人物升级成了正式角色）：素材管线重算清单。 */
+  onWorldChanged: ((worldId: string) => void) | null = null;
+  private readonly extraJobs = new Map<string, Promise<void>>();
+  /** 改世界内容串行（不同周目可能同时升级同一个临时人物）。 */
+  private readonly worldWrites = new Map<string, SerialQueue>();
 
   constructor(store: WorldStore, gateway: ModelGateway) {
     this.store = store;
@@ -168,9 +181,10 @@ export class PlayService {
     this.dbs.clear();
   }
 
-  /** 等待后台的记忆整理完成（测试用）。 */
+  /** 等待后台的记忆整理和临时人物升级完成（测试用）。 */
   async flush(ref: PlayRef): Promise<void> {
     await this.memoryJobs.get(this.key(ref));
+    await this.extraJobs.get(this.key(ref));
   }
 
   // ───────────── 周目 ─────────────
@@ -339,6 +353,9 @@ export class PlayService {
         world,
         expressions: await this.expressionTable(ref.worldId),
         moods: await this.moodTable(ref.worldId),
+        cg: await this.cgRules(ref.worldId),
+        onPlanned: (b) => this.onBeatPlanned?.(ref.worldId, b),
+        extras: (await this.extrasRules(ref.worldId)).silhouette,
         playthroughId: pt.id,
         path: events,
         request: r.ai,
@@ -354,6 +371,7 @@ export class PlayService {
       signal.throwIfAborted();
       session.commit(pt.id, out.draft, out.unlocks);
       this.scheduleMemory(ref);
+      this.scheduleExtras(ref);
     }
     return this.view(ref);
   }
@@ -607,6 +625,8 @@ export class PlayService {
         world,
         expressions: await this.expressionTable(ref.worldId),
         moods: await this.moodTable(ref.worldId),
+        cg: await this.cgRules(ref.worldId),
+        onPlanned: (b) => this.onBeatPlanned?.(ref.worldId, b),
         playthroughId: pt.id,
         path: events,
         summary,
@@ -623,6 +643,7 @@ export class PlayService {
     db.setHead(pt.id, ev.id);
     emit({ type: 'event', event: this.pathEvent(db, pt.id, ev) });
     this.scheduleMemory(ref);
+    this.scheduleExtras(ref);
     return ev;
   }
 
@@ -785,6 +806,52 @@ export class PlayService {
       .catch((err) => console.error('[engine] 整理前情提要失败：', err))
       .finally(() => this.memoryJobs.delete(key));
     this.memoryJobs.set(key, job);
+  }
+
+  private scheduleExtras(ref: PlayRef): void {
+    const key = this.key(ref);
+    if (this.extraJobs.has(key)) return;
+    const job = this.upgradeExtras(ref)
+      .catch((err) => console.error('[engine] 临时人物升级失败：', err))
+      .finally(() => this.extraJobs.delete(key));
+    this.extraJobs.set(key, job);
+  }
+
+  /**
+   * 临时人物升级成正式角色（18.5）：这个周目里开口满几拍的，让书记补一张角色卡写进世界（或者认出是已有角色的别称），
+   * 素材管线随后给他画立绘、配音时分配音色。每个名字在一个周目里只试一次。
+   */
+  private async upgradeExtras(ref: PlayRef): Promise<void> {
+    const { upgradeAfter } = await this.extrasRules(ref.worldId);
+    if (!upgradeAfter || this.disposed) return;
+    const db = this.db(ref.worldId);
+    const pt = db.getPlaythrough(ref.playthroughId);
+    const tried = pt.data.extras ?? {};
+    const world = await this.store.load(ref.worldId);
+    const due = extrasOf(db.path(pt.id, pt.headId), world.characters).filter((x) => x.beats >= upgradeAfter && !tried[x.name]);
+    for (const x of due) {
+      if (this.disposed) return;
+      // 先记成失败：中途出错不会每一拍都重试
+      db.updateData(pt.id, (d) => ({ ...d, extras: { ...d.extras, [x.name]: 'failed' } }));
+      const h = await this.gateway.forRole('archivist', 'play.extra', this.meter(ref));
+      const { value } = await generateJson(this.gateway, h, {
+        system: '你是一部互动故事的书记，负责维护世界设定：角色、地点和设定集。',
+        user: extraPrompt(await this.store.load(ref.worldId), x),
+        spec: extraSpec,
+      });
+      let queue = this.worldWrites.get(ref.worldId);
+      if (!queue) {
+        queue = new SerialQueue();
+        this.worldWrites.set(ref.worldId, queue);
+      }
+      await queue.run(async () => {
+        const now = await this.store.load(ref.worldId);
+        if (matchByName(x.name, now.characters)) return; // 别的周目已经升级过了
+        await this.store.writeCharacter(ref.worldId, extraCharacter(now, x, value).character);
+      });
+      db.updateData(pt.id, (d) => ({ ...d, extras: { ...d.extras, [x.name]: 'done' } }));
+      this.onWorldChanged?.(ref.worldId);
+    }
   }
 
   /** 摘要之后的原文太长时，把较旧的部分并入前情提要（观察模式还会整理每个角色各自的记忆）。 */

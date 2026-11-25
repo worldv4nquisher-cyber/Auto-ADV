@@ -424,12 +424,13 @@ describe('素材管线', () => {
 });
 
 describe('手写剧本的背景', () => {
-  it('带剧本导入：地点和剧本里的背景都画，舞台上剧本用的 id 有图', async () => {
+  it('带剧本导入：地点和剧本里的背景都画，舞台上剧本用的 id 有图；剧本里的 CG 也画', async () => {
     const id = await setup({ scripts: true });
     const v = await idle(id);
-    expect(v.counts).toMatchObject({ total: 8, done: 8 });
+    expect(v.counts).toMatchObject({ total: 10, done: 10 });
     expect(slot(v, 'bg/reading_evening').file).toMatch(/^assets\/bg\/reading_evening-[0-9a-f]{12}\.png$/);
-    expect(server.imageRequests).toHaveLength(8);
+    expect(slot(v, 'cg/cg_reunion').file).toMatch(/^assets\/cg\/cg_reunion-[0-9a-f]{12}\.png$/);
+    expect(server.imageRequests).toHaveLength(10);
   });
 });
 

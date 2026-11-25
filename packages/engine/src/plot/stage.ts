@@ -77,6 +77,32 @@ export function moodOf(token: string, moods: readonly MoodLike[]): string | null
   return null;
 }
 
+/** 时段表里认时段用到的部分（和 @auto-adv/schema 的 TimeVariantDef 一样）。 */
+export interface TimeVariantLike {
+  id: string;
+  words: readonly string[];
+}
+
+/**
+ * 故事时间（导演报告的 time，例如"当晚十点""傍晚"）对应哪个时段（18.4）：时段表里的词出现在时间里就算，长的词先比
+ * （"入夜前"是黄昏，不是夜晚）。对不上就是 null，用地点本来的背景。
+ */
+export function variantOfTime(time: string | null | undefined, variants: readonly TimeVariantLike[]): string | null {
+  const t = time?.trim().toLowerCase();
+  if (!t) return null;
+  const words = variants
+    .flatMap((v) => v.words.map((w) => ({ w: w.trim().toLowerCase(), id: v.id })))
+    .filter((x) => x.w)
+    .sort((a, b) => b.w.length - a.w.length);
+  return words.find((x) => t.includes(x.w))?.id ?? null;
+}
+
+/** 时段背景的 id：<地点 id>@<时段 id>；没有时段就是地点 id 本身。 */
+export const bgVariantId = (locationId: string, variant: string | null | undefined) => (variant ? `${locationId}@${variant}` : locationId);
+
+/** 背景 id 去掉时段：舞台上的 bg id 可能带着 @时段，比较地点时用它。 */
+export const baseBgId = (id: string | null | undefined) => (id ? (id.split('@')[0] ?? id) : null);
+
 /** 立绘站位：舞台宽度的百分比（立绘中心）。 */
 export const SPRITE_POSITIONS: Record<string, number> = {
   farleft: 14,
@@ -167,6 +193,8 @@ export type BacklogEntry =
     }
   | { kind: 'check'; step: number; check: CheckResult }
   | { kind: 'scene'; step: number; title: string; chapter: string | null }
+  /** AI 演出时导演标的 CG（18.6）：画好了回想里点开能看。 */
+  | { kind: 'cg'; step: number; id: string; title: string }
   /** 不上舞台、只进回想的东西：观察模式里观众的导演指令和悄悄话，剧情 ADV 里跑偏时的选择。 */
   | { kind: 'note'; step: number; label: string; text: string };
 
@@ -187,15 +215,21 @@ export interface TimelineOptions {
    * 不给时这些事件只按文本段落播放（剧情 ADV 的事件都带着舞台指令）。
    * protagonistId：不出立绘的角色（剧情 ADV 里玩家扮演的主角）；观察模式里观众不是主角，为 null。
    */
-  auto?: { protagonistId: string | null; expressions?: readonly ExpressionLike[] };
+  auto?: { protagonistId: string | null; expressions?: readonly ExpressionLike[]; extras?: boolean };
   /**
    * 按导演每一拍报告的情绪换曲（18.7）：情绪变了、而且连着 switchBeats 拍都是这个情绪才换，免得来回跳；
    * 换幕（或者换地点）、还没有曲子的时候马上换。手写剧本里的 bgm 指令照旧。不给就只认 bgm 指令。
    */
   bgm?: { moods: readonly MoodLike[]; switchBeats: number };
+  /**
+   * 时段背景（18.4）：AI 演出的拍（和观察模式里自动排舞台的事件）按导演报告的故事时间用背景变体（bg <地点>@<时段>），
+   * 时间变了、地点没变时只换背景，不清场。手写剧本的背景照写的来。不给就不换。
+   */
+  timeOfDay?: { variants: readonly TimeVariantLike[] };
 }
 
 const emptyView = (): StageView => ({ bg: null, sprites: [], cg: null, bgm: null });
+const isTextCommand = (c: StageCommand) => c.op === 'say' || c.op === 'narrate' || c.op === 'think';
 const snapshot = (v: StageView): StageView => ({ ...v, sprites: v.sprites.map((s) => ({ ...s })) });
 
 function segmentText(seg: Segment): StageText {
@@ -306,6 +340,20 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
     }
   };
 
+  /** 导演报告的故事时间（时段背景用）。 */
+  let time: string | null = null;
+  /** AI 演出的舞台指令换成时段背景：换到地点的背景用变体；没换地点、时段变了，只换背景不清场。 */
+  const withTimeOfDay = (stage: StageCommand[], variants: readonly TimeVariantLike[]): StageCommand[] => {
+    const loc = place.locationId;
+    if (!loc) return stage;
+    const id = bgVariantId(loc, variantOfTime(time, variants));
+    const out = stage.map((c) => (c.op === 'bg' && c.id === loc ? { ...c, id } : c));
+    if (!out.some((c) => c.op === 'bg') && view.bg && baseBgId(view.bg.id) === loc && view.bg.id !== id) {
+      view.bg = { id, transition: 'fade' };
+    }
+    return out;
+  };
+
   /** 导演报告了、但还没持续够拍数的新情绪；上一个报告情绪的拍在哪个地点。 */
   let pendingMood: { mood: string; beats: number } | null = null;
   let moodPlace: string | null | undefined;
@@ -386,13 +434,26 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
       backlog.push({ kind: 'check', step: steps.length - 1, check: ev.check });
     }
     if (ev.plot?.vars) vars.push(...ev.plot.vars);
-    const stage =
-      ev.stage ??
-      (opts.auto && ev.segments
-        ? stageFromSegments(ev.segments, { characters: opts.characters, before: view, scene: place, ...opts.auto })
-        : undefined);
+    if (ev.kind === 'ai' && ev.beat?.time) time = ev.beat.time;
+    const auto = !ev.stage && opts.auto && ev.segments ? opts.auto : null;
+    let stage = ev.stage ?? (auto && ev.segments ? stageFromSegments(ev.segments, { characters: opts.characters, before: view, scene: place, ...auto }) : undefined);
+    if (stage && opts.timeOfDay && (ev.kind === 'ai' || !!auto)) stage = withTimeOfDay(stage, opts.timeOfDay.variants);
     if (stage) {
-      for (const c of stage) run(ev, c);
+      // 导演标的 CG：放在这一拍中间那句话上，这一拍演完撤下（画好之前界面上不显示，18.6）
+      const aiCg = ev.kind === 'ai' ? ev.beat?.cg : undefined;
+      const lines = aiCg ? stage.filter(isTextCommand).length : 0;
+      let line = 0;
+      for (const c of stage) {
+        if (aiCg && isTextCommand(c)) {
+          if (line === Math.floor(lines / 2)) {
+            view.cg = aiCg.id;
+            backlog.push({ kind: 'cg', step: steps.length, id: aiCg.id, title: aiCg.title });
+          }
+          line += 1;
+        }
+        run(ev, c);
+      }
+      if (aiCg && view.cg === aiCg.id) view.cg = null;
       // 只放了 CG、后面没有文字：停一下让玩家看到
       if (cgShown) push(ev, { kind: 'pause' });
     } else {
@@ -440,7 +501,18 @@ export interface SegmentsToStageOptions {
   protagonistId: string | null;
   /** 表情表：台词前括号里的第一个词是表情时换上对应的表情差分。不给就不换表情。 */
   expressions?: readonly ExpressionLike[];
+  /** 临时人物（世界里没有的路人、守卫……）开口时上台（界面上是剪影，18.5），这一拍不开口就下台。不给就不上台。 */
+  extras?: boolean;
 }
+
+/** 不是一个具体的人的"说话人"：一群人、画外音一类，不上台。 */
+const NOT_A_PERSON = /^(众人|大家|所有人|一群人|人群|众|两人|二人|三人|几人|旁白|画外音|声音|广播|电话|系统|[？?…]+)$/;
+
+/** 临时人物的名字能不能上台、能不能升级成正式角色：一个具体的人，名字不太长。 */
+export const isExtraName = (name: string) => {
+  const n = name.trim();
+  return !!n && [...n].length <= 8 && !NOT_A_PERSON.test(n);
+};
 
 /** 同时在台上的立绘最多几个。 */
 const MAX_SPRITES = 4;
@@ -454,16 +526,21 @@ export function stageFromSegments(segments: readonly Segment[], o: SegmentsToSta
   const loc = o.scene.locationId;
   let shown: string[] = o.before.sprites.map((s) => s.characterId ?? s.key);
   const face = new Map(o.before.sprites.map((s) => [s.characterId ?? s.key, s.expr]));
-  if (loc && o.before.bg?.id !== loc) {
+  if (loc && baseBgId(o.before.bg?.id) !== loc) {
     out.push({ op: 'bg', id: loc });
     shown = [];
     face.clear();
   }
   const present = o.scene.presentCharacterIds.filter((id) => id !== o.protagonistId);
-  for (const id of shown) {
-    if (!present.includes(id) && o.characters.some((c) => c.id === id)) out.push({ op: 'hide', char: id });
-  }
-  shown = shown.filter((id) => present.includes(id) || !o.characters.some((c) => c.id === id));
+  // 这一拍开口的临时人物
+  const extras = new Set(
+    o.extras ? segments.flatMap((s) => (s.kind === 'line' && !s.characterId && isExtraName(s.name) ? [s.name] : [])) : [],
+  );
+  const known = (id: string) => o.characters.some((c) => c.id === id);
+  // 角色不在场了下台；临时人物这一拍不开口就下台
+  const leaves = (id: string) => (known(id) ? !present.includes(id) : !!o.extras && !extras.has(id));
+  for (const id of shown) if (leaves(id)) out.push({ op: 'hide', char: id });
+  shown = shown.filter((id) => !leaves(id));
   const enter = (id: string, expr?: string) => {
     if (shown.includes(id) || shown.length >= MAX_SPRITES) return;
     out.push({ op: 'show', char: id, ...(expr ? { expr } : {}) });
@@ -476,6 +553,7 @@ export function stageFromSegments(segments: readonly Segment[], o: SegmentsToSta
       out.push({ op: 'narrate', text: s.text });
       continue;
     }
+    if (!s.characterId && extras.has(s.name)) enter(s.name);
     if (s.characterId && s.characterId !== o.protagonistId) {
       const expr = o.expressions ? expressionOfLine(s.text, o.expressions) : null;
       if (!shown.includes(s.characterId)) enter(s.characterId, expr ?? undefined);

@@ -452,7 +452,7 @@ function sizeOf(size: string | undefined): { width: number | null; height: numbe
   return m ? { width: Number(m[1]), height: Number(m[2]) } : { width: null, height: null };
 }
 
-/** 自定义的图像接口：request 文生图，edit 带参考图改图（没写就画不了表情差分）。 */
+/** 自定义的图像接口：request 文生图，edit 带参考图改图（没写就画不了表情差分、带参考图的 CG、改光线的时段背景）。 */
 export class CustomImageClient {
   private readonly http: CustomHttpClient;
   private readonly api: CustomApi;
@@ -483,7 +483,9 @@ export class CustomImageClient {
   }
 
   async edit(req: ImageEditRequest, signal?: AbortSignal): Promise<ImageResult> {
-    if (!this.api.edit) throw new ProviderError('自定义的图像接口没有写「改图」请求，画不了表情差分（可以在素材设置里关掉表情差分）');
+    if (!this.api.edit) throw new ProviderError(
+        '自定义的图像接口没有写「改图」请求，画不了要参考图的素材（可以在素材设置里关掉表情差分、CG 的参考图，时段背景改成「重新画」）',
+      );
     const file = { data: req.image.data, mime: req.image.mime, name: `image.${IMAGE_EXT[req.image.mime] ?? 'png'}` };
     return this.image(await this.http.run(this.api.edit, this.vars(req), { image: file }, signal));
   }

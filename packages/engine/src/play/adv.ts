@@ -25,6 +25,7 @@ import type { SummaryRow } from './db.ts';
 import { validatePlan } from './observer/beat.ts';
 import { CheckProposal, DirectorOut, directorSpec, plotReportExample, plotReportRules } from './observer/prompts.ts';
 import { checkInstruction, openExits, plotSection, sceneBrief } from './plotprompt.ts';
+import { type CgRules, cgLeft, cgOfPlan, cgSection, type PlannedBeat } from './cg.ts';
 import { speechRule } from './expressions.ts';
 import { moodOfPlan, moodSection } from './moods.ts';
 import { parseScript, ScriptStream } from './script.ts';
@@ -79,6 +80,8 @@ interface AdvPromptInput {
   /** 这一拍的检定（玩家选项上的，已经掷过）。 */
   check: CheckResult | null;
   moods?: readonly MoodDef[] | undefined;
+  /** 这一拍还能标几张 CG（18.6）。 */
+  cgLeft?: number;
 }
 
 function actionText(r: AiRequest, pName: string): string {
@@ -103,6 +106,7 @@ function advDirectorPrompt(p: AdvPromptInput): string {
     `# 最近发生的事\n${transcriptOf(world, p.recent, pName) || '（刚刚开场）'}`,
     `# 现在\n地点：${location?.name ?? '未指定'}；在场：${present.join('、') || '无'}${state.time ? `；时间：${state.time}` : ''}`,
     moodSection(p.moods),
+    cgSection(p.cgLeft ?? 0),
   ];
   const act = actionText(p.request, pName);
   if (act) parts.push(`# 玩家这一次的行动\n${act}`);
@@ -177,6 +181,12 @@ export interface AdvBeatInput {
   expressions?: readonly ExpressionDef[];
   /** 情绪表（导演每一拍报告 mood，舞台按它换 BGM，18.7）。 */
   moods?: readonly MoodDef[] | undefined;
+  /** 导演能不能标 CG、每幕每章最多几张（18.6）；null 就不问。 */
+  cg?: CgRules | null;
+  /** 导演安排好这一拍（还没演出）时调用：素材管线马上开始画 CG 和时段背景。 */
+  onPlanned?: (b: PlannedBeat) => void;
+  /** 临时人物开口时上台（剪影，18.5）。 */
+  extras?: boolean;
 }
 
 /** 导演最多看最近这么多条原文（更早的靠前情提要）。 */
@@ -197,10 +207,22 @@ export async function runAdvBeat(p: AdvBeatInput): Promise<{ draft: EventDraft; 
 
   // 1. 导演
   p.emit({ type: 'phase', phase: 'thinking' });
+  const left = p.cg ? cgLeft(p.path, plot.graph.scenes, scene.id, p.cg) : 0;
   const director = await gateway.forRole('director', 'adv.director', p.meter);
   const { value: plan } = await generateJson(gateway, director, {
     system: advDirectorSystem(pName),
-    user: advDirectorPrompt({ world, state, plot, protagonist, memory: p.summary?.text ?? null, recent, request: p.request, check: optionCheck, ...(p.moods ? { moods: p.moods } : {}) }),
+    user: advDirectorPrompt({
+      world,
+      state,
+      plot,
+      protagonist,
+      memory: p.summary?.text ?? null,
+      recent,
+      request: p.request,
+      check: optionCheck,
+      ...(p.moods ? { moods: p.moods } : {}),
+      cgLeft: left,
+    }),
     spec: advDirectorSpec,
     signal: p.signal,
   });
@@ -210,6 +232,9 @@ export async function runAdvBeat(p: AdvBeatInput): Promise<{ draft: EventDraft; 
   const mood = moodOfPlan(plan.mood, p.moods);
   if (mood) meta.mood = mood;
   if (v.reveals.length) meta.reveals = v.reveals;
+  const cg = cgOfPlan(plan.cg, world.characters, left);
+  if (cg) meta.cg = cg;
+  p.onPlanned?.({ playthroughId: p.playthroughId, cg, scene: v.scene, time: meta.time ?? state.time, sceneId: scene.id });
 
   // 2. 引擎核对：导演安排里的检定（这一拍没有选项检定时）先掷骰，再核对要点、数值、出口，最后核对给玩家的选项
   let check: CheckResult | null = null;
@@ -279,6 +304,7 @@ export async function runAdvBeat(p: AdvBeatInput): Promise<{ draft: EventDraft; 
     scene: nextScene,
     protagonistId: protagonist?.id ?? null,
     ...(p.expressions ? { expressions: p.expressions } : {}),
+    ...(p.extras ? { extras: true } : {}),
   });
 
   const prev = state.scene;

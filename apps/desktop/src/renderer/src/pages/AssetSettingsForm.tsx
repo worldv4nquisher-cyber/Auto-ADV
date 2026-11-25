@@ -1,7 +1,7 @@
 /**
  * 素材设置的表单（18.11），全局设置页和世界的素材页共用。
  * 世界里只保存和全局不一样的项：每一项旁边能"恢复全局"；全局设置里是"恢复默认"。
- * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分，第 3 步 BGM，第 4 步语音。
+ * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分，第 3 步 BGM，第 4 步语音，第 5 步 CG、时段背景、临时人物和用量估算。
  */
 import {
   type AssetSettings,
@@ -12,6 +12,7 @@ import {
   type ExpressionDef,
   type MoodDef,
   AssetSettings as SettingsSchema,
+  type TimeVariantDef,
 } from '@auto-adv/schema';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { Button, cx, Input, Select, Textarea } from '../components/ui.tsx';
@@ -19,6 +20,18 @@ import { useSettings } from '../lib/settings.tsx';
 
 type Key =
   | 'enabled.background'
+  | 'enabled.timeOfDay'
+  | 'timeOfDay.mode'
+  | 'timeOfDay.variants'
+  | 'templates.timeOfDay'
+  | 'enabled.cg'
+  | 'cg.perScene'
+  | 'cg.perChapter'
+  | 'cg.reference'
+  | 'sizes.cg'
+  | 'templates.cg'
+  | 'extras.silhouette'
+  | 'extras.upgradeAfter'
   | 'enabled.sprite'
   | 'enabled.expression'
   | 'imageCap'
@@ -58,12 +71,27 @@ type Key =
   | 'voice.prefetch'
   | 'voice.emotion'
   | 'voice.emotions'
-  | 'voiceConcurrency';
+  | 'voiceConcurrency'
+  | 'estimate.enabled'
+  | 'estimate.currency'
+  | 'estimate.image'
+  | 'estimate.music'
+  | 'estimate.voice';
 
-type Value = string | number | boolean | string[] | ExpressionDef[] | MoodDef[] | Record<string, string>;
+type Value = string | number | boolean | string[] | ExpressionDef[] | MoodDef[] | TimeVariantDef[] | Record<string, string>;
 
-/** 并发和重试是按接入点算的，只在全局设置里。 */
-const GLOBAL_ONLY: Key[] = ['imageConcurrency', 'retries', 'musicConcurrency', 'voiceConcurrency'];
+/** 并发和重试是按接入点算的，用量估算在新建世界之前用，都只在全局设置里。 */
+const GLOBAL_ONLY: Key[] = [
+  'imageConcurrency',
+  'retries',
+  'musicConcurrency',
+  'voiceConcurrency',
+  'estimate.enabled',
+  'estimate.currency',
+  'estimate.image',
+  'estimate.music',
+  'estimate.voice',
+];
 
 const SOURCE_HINTS: Record<BgmSource, string> = {
   library: '你自己的音乐文件夹',
@@ -404,6 +432,33 @@ export function AssetSettingsForm({
           size('sizes.background', BG_SIZES, 'asset-size-background'),
         )}
         {row('templates.background', '背景的提示词模板', placeholders, template('templates.background', defaults?.templates.background, 'asset-template-background'))}
+        {row(
+          'enabled.timeOfDay',
+          '时段背景',
+          'AI 演出时，故事时间里出现时段表里的词（深夜、傍晚……），就换成这个地点的黄昏、夜晚版本。第一次用到时才画，画好之前先用白天的那张。',
+          toggle('enabled.timeOfDay', '按故事时间换背景', 'asset-toggle-timeOfDay'),
+        )}
+        {row(
+          'timeOfDay.mode',
+          '怎么画',
+          '改图：拿白天的背景当参考图只改光线和天色，构图和物件不变（服务要支持带参考图改图）。重新画：按地点描述和时段重新画一张。',
+          <Select value={String(shown('timeOfDay.mode'))} onChange={(e) => put('timeOfDay.mode', e.target.value)} className="!w-56" data-testid="asset-tod-mode">
+            <option value="edit">拿白天的背景改</option>
+            <option value="generate">重新画</option>
+          </Select>,
+        )}
+        {row(
+          'timeOfDay.variants',
+          '时段表',
+          '故事时间里有这些词就用这个时段（长的词先比，"入夜前"算黄昏）。描述是画的时候告诉图像模型的光线和天色。白天就是地点本来的背景，不用写。',
+          <TimeVariantTable value={(shown('timeOfDay.variants') as TimeVariantDef[] | undefined) ?? []} onChange={(v) => put('timeOfDay.variants', v)} />,
+        )}
+        {row(
+          'templates.timeOfDay',
+          '时段背景的模板',
+          '「拿白天的背景改」时用，模板里只需要写要改什么；「重新画」用背景的模板。',
+          template('templates.timeOfDay', defaults?.templates.timeOfDay, 'asset-template-timeOfDay'),
+        )}
       </Section>
 
       <Section title="立绘">
@@ -463,6 +518,37 @@ export function AssetSettingsForm({
           '表情差分是带参考图改图，模板里只需要写要改什么。',
           template('templates.expression', defaults?.templates.expression, 'asset-template-expression'),
         )}
+        {row(
+          'extras.silhouette',
+          '临时人物',
+          'AI 演出时世界里没有的路人、守卫、伙计开口时，用一个按名字换颜色的剪影上台。关掉就只出名字。',
+          toggle('extras.silhouette', '用剪影上台', 'asset-extras-silhouette'),
+        )}
+        {row(
+          'extras.upgradeAfter',
+          '升级成正式角色',
+          '同一个临时人物在一个周目里开口满这么多拍，就让模型补一张角色卡（外貌、性格、说话方式）写进世界，之后画立绘、分配音色。认出是已有角色换了个叫法时，只加一个别称。0 就是不升级。',
+          num('extras.upgradeAfter', 0, 20),
+        )}
+      </Section>
+
+      <Section title="CG">
+        {row(
+          'enabled.cg',
+          'CG',
+          '手写剧本里写了的 CG，和 AI 演出时导演标的高光时刻。导演标的画好时这一拍还在播就当场放出来，播完了就进 CG 画廊。',
+          toggle('enabled.cg', '生成 CG', 'asset-toggle-cg'),
+        )}
+        {row('cg.perScene', '每幕最多', 'AI 演出时导演每一幕最多标几张。0 就是不标（手写剧本里的照画）。', num('cg.perScene', 0, 10))}
+        {row('cg.perChapter', '每章最多', '没有剧情图的观察模式不按章算，只按"同一个地点连着演的一段"算一幕。', num('cg.perChapter', 0, 50))}
+        {row(
+          'cg.reference',
+          '参考图',
+          '拿画面里第一个角色的基础立绘当参考图改图，长相和服装和立绘一致（服务要支持带参考图改图）。关掉就只按文字描述画。',
+          toggle('cg.reference', '用立绘当参考图', 'asset-cg-reference'),
+        )}
+        {row('sizes.cg', 'CG 尺寸', '宽x高，横图。', size('sizes.cg', BG_SIZES, 'asset-size-cg'))}
+        {row('templates.cg', 'CG 的模板', placeholders, template('templates.cg', defaults?.templates.cg, 'asset-template-cg'))}
       </Section>
 
       <Section title="BGM">
@@ -547,6 +633,29 @@ export function AssetSettingsForm({
         {row('voiceConcurrency', '同时生成几句', '所有世界共用。', num('voiceConcurrency', 1, 8))}
       </Section>
 
+      {mode === 'global' && (
+        <Section title="用量估算">
+          {row(
+            'estimate.enabled',
+            '用量估算',
+            '新建世界页上显示预计的素材用量：开局画多少张、CG 和时段背景、音乐几首、每拍念多少字。按创世的一般规模估，给的是范围。',
+            toggle('estimate.enabled', '新建世界前估算用量', 'asset-estimate-enabled'),
+          )}
+          {row(
+            'estimate.currency',
+            '货币',
+            null,
+            <Select value={String(shown('estimate.currency'))} onChange={(e) => put('estimate.currency', e.target.value)} className="!w-40" data-testid="asset-estimate-currency">
+              <option value="CNY">人民币（¥）</option>
+              <option value="USD">美元（$）</option>
+            </Select>,
+          )}
+          {row('estimate.image', '每张图', '按你用的图像服务的价目填，重抽的也按张算。0 就是不算钱。', dec('estimate.image', 0, 1_000_000, 'asset-estimate-image', 0.01))}
+          {row('estimate.music', '每首曲子', '音乐模型生成一首的价格。内置曲库、本地曲库不花钱。', dec('estimate.music', 0, 1_000_000, 'asset-estimate-music', 0.01))}
+          {row('estimate.voice', '每一万字语音', '语音服务大多按字数收费。新建世界页上按每 100 拍估算。', dec('estimate.voice', 0, 1_000_000, 'asset-estimate-voice', 0.01))}
+        </Section>
+      )}
+
       <div className="flex items-center gap-3">
         <Button variant="primary" size="sm" disabled={!dirty} loading={saving} onClick={() => void save()} data-testid="asset-settings-save">
           保存
@@ -624,6 +733,57 @@ function ExpressionTable({ value, onChange }: { value: ExpressionDef[]; onChange
         data-testid="asset-expression-add"
       >
         加一个表情
+      </Button>
+    </div>
+  );
+}
+
+/** 时段表的编辑：id、名字、故事时间里的词、画的时候的光线和天色；可以增删。 */
+function TimeVariantTable({ value, onChange }: { value: TimeVariantDef[]; onChange: (v: TimeVariantDef[]) => void }) {
+  const update = (i: number, patch: Partial<TimeVariantDef>) => onChange(value.map((v, j) => (j === i ? { ...v, ...patch } : v)));
+  const cols = 'grid grid-cols-[5.5rem_4.5rem_1.2fr_1.4fr_2rem] gap-1.5';
+  return (
+    <div className="space-y-1.5" data-testid="asset-tod-variants">
+      <div className={cx(cols, 'text-[11px] text-faint')}>
+        <span>id</span>
+        <span>名字</span>
+        <span>故事时间里的词</span>
+        <span>光线和天色</span>
+      </div>
+      {value.map((v, i) => (
+        <div key={i} className={cols} data-testid="asset-tod-row">
+          <Input
+            value={v.id}
+            onChange={(ev) => update(i, { id: ev.target.value.trim().toLowerCase() })}
+            className="font-mono text-xs"
+            title="小写字母开头，字母、数字、下划线"
+          />
+          <Input value={v.name} onChange={(ev) => update(i, { name: ev.target.value })} className="text-xs" />
+          <Input
+            value={v.words.join('，')}
+            onChange={(ev) =>
+              update(i, {
+                words: ev.target.value
+                  .split(/[，,、]/)
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+              })
+            }
+            className="text-xs"
+          />
+          <Input value={v.prompt} onChange={(ev) => update(i, { prompt: ev.target.value })} className="text-xs" />
+          <button type="button" className="text-xs text-faint hover:text-err" title="删掉这个时段" onClick={() => onChange(value.filter((_, j) => j !== i))}>
+            ✕
+          </button>
+        </div>
+      ))}
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => onChange([...value, { id: `time_${value.length + 1}`, name: '新时段', words: [], prompt: '' }])}
+        data-testid="asset-tod-add"
+      >
+        加一个时段
       </Button>
     </div>
   );

@@ -10,9 +10,8 @@ import type { DriftChoice, PlayChunk, PlayView, SaveInfo, WorldDetail } from '@a
 import { foldPlot } from '@auto-adv/engine/progress';
 import { buildTimeline, findStep, type StageStep, type StageView, type Timeline } from '@auto-adv/engine/stage';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { PlaceholderCg } from '../components/placeholder.tsx';
 import { BgmTag, useStageBgm } from '../components/bgm.tsx';
-import { BgImage, useBgmRules } from '../lib/assets.tsx';
+import { BgImage, CgImage, useBgmRules, useTimeOfDayRules } from '../lib/assets.tsx';
 import {
   AssetProgress,
   Backlog,
@@ -106,16 +105,18 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const ref = { worldId: initial.playthrough.worldId, playthroughId: initial.playthrough.id };
   // 导演每一拍报告的情绪：舞台按它换 BGM（18.7）
   const bgmRules = useBgmRules();
+  const timeOfDay = useTimeOfDayRules();
   /** 时间线用这个周目的剧情图（含跑偏时插进来的幕）出标题卡。 */
   const timelineOf = (path: PlayView['path']) =>
     buildTimeline(path, {
       characters: world.characters,
       graph: world.graph ? foldPlot(world.graph, world.variables, path).graph : null,
       ...(bgmRules ? { bgm: bgmRules } : {}),
+      ...(timeOfDay ? { timeOfDay } : {}),
     });
 
   const [view, setView] = useState(initial);
-  const timeline = useMemo(() => timelineOf(view.path), [view.path, world, bgmRules]);
+  const timeline = useMemo(() => timelineOf(view.path), [view.path, world, bgmRules, timeOfDay]);
   const graph = useMemo(() => (world.graph ? foldPlot(world.graph, world.variables, view.path).graph : null), [view.path, world]);
   const [cursor, setCursor] = useState(() => initialCursor(timelineOf(initial.path), initial.playthrough.id));
   const [mode, setMode] = useState<Mode>('normal');
@@ -842,7 +843,7 @@ function Saves({
           <div key={s.id} className="flex gap-3 rounded-xl border border-line bg-panel p-3" data-testid="adv-save-slot">
             <div className="relative aspect-video w-36 shrink-0 overflow-hidden rounded-md bg-black" style={{ containerType: 'inline-size' }}>
               {s.thumb?.bg && <BgImage id={s.thumb.bg} />}
-              {s.thumb?.cg && <PlaceholderCg id={s.thumb.cg} />}
+              {s.thumb?.cg && <CgImage id={s.thumb.cg} />}
               {s.thumb && !s.thumb.cg && s.thumb.chars.length > 0 && (
                 <div className="absolute inset-x-0 bottom-1 flex justify-center gap-1">
                   {s.thumb.chars.map((c) => (

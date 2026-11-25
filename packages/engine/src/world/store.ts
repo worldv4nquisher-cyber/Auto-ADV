@@ -321,6 +321,11 @@ export class WorldStore {
     return this.replaceAll(this.file(id, 'characters'), items, Character, 'character.json');
   }
 
+  /** 新建或改写一个角色（只动这个角色的文件）。 */
+  writeCharacter(id: string, c: Character) {
+    return writeFileAtomic(this.file(id, 'characters', c.id, 'character.json'), json(Character.parse(c)));
+  }
+
   writeLocations(id: string, items: Location[]) {
     return this.replaceAll(this.file(id, 'locations'), items, Location);
   }

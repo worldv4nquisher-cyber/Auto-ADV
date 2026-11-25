@@ -42,7 +42,9 @@ async function advUntil(page: Page, what: 'menu' | 'ending' | 'drift', max = 300
     await page.click('[data-testid="adv-stage"]', { position: { x: 12, y: 12 } });
     await page.waitForTimeout(15);
   }
-  throw new Error(`点了 ${max} 次还没有${what === 'menu' ? '出现选项' : what === 'drift' ? '出现跑偏的提示' : '到结局'}`);
+  await shot(page, 'zz-adv-stuck');
+  const where = await page.textContent('[data-testid="adv-stage"]').catch(() => '');
+  throw new Error(`点了 ${max} 次还没有${what === 'menu' ? '出现选项' : what === 'drift' ? '出现跑偏的提示' : '到结局'}（舞台上：${where?.slice(0, 200)}）`);
 }
 
 async function choose(page: Page, index: number, label: string) {
@@ -481,13 +483,16 @@ try {
 
   // ── 素材（M4 第 1、2 步）：没配图像模型时用占位图；配好以后每个地点画一张背景，
   // 手写剧本里自己起名的背景（不是地点 id 的）也各画一张：3 个地点 + 5 张剧本背景；
-  // 每个角色一张基础立绘加表情差分：沈默、林夕是主要角色各 6 张，老周是其他角色 3 张，一共 8 + 15 张
+  // 每个角色一张基础立绘加表情差分：沈默、林夕是主要角色各 6 张，老周是其他角色 3 张，一共 8 + 15 张；
+  // 剧本里的 2 张 CG（第 5 步）拿林夕的基础立绘当参考图改图
   // 只数这个世界的请求（前面生成的世界打开过，配好图像模型后它也会开始画）
-  const libImages = () => server.imageRequests.filter((r) => /旧书库|阅览室|海堤|书中人/.test(String(r.prompt)));
-  const libSprites = () => server.imageRequests.filter((r) => /志愿者工牌|一本旧书|铜钥匙/.test(String(r.prompt)));
+  const isCg = (r: Record<string, unknown>) => String(r.prompt).includes('事件 CG');
+  const libImages = () => server.imageRequests.filter((r) => /旧书库|阅览室|海堤|书中人/.test(String(r.prompt)) && !isCg(r));
+  const libSprites = () => server.imageRequests.filter((r) => /志愿者工牌|一本旧书|铜钥匙/.test(String(r.prompt)) && !isCg(r));
+  const libCgs = () => server.imageRequests.filter((r) => isCg(r) && /潮水漫过了堤岸|文字组成的海/.test(String(r.prompt)));
   await page.click('[data-testid="tab-assets"]');
   await page.waitForSelector('[data-testid="assets-needs-model"]');
-  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 0 / 23');
+  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 0 / 25');
   await page.click('[data-nav="settings"]');
   await page.click('button:has-text("职责路由")');
   await page.selectOption('[data-testid="role-endpoint-image"]', endpointId);
@@ -503,13 +508,16 @@ try {
   await page.click('[data-nav="home"]');
   await page.click('[data-testid="world-card"] >> text=旧书库的约定');
   await page.click('[data-testid="tab-assets"]');
-  await page.waitForSelector('[data-testid="assets-progress"] >> text=素材 23 / 23', { timeout: 30_000 });
+  await page.waitForSelector('[data-testid="assets-progress"] >> text=素材 25 / 25', { timeout: 30_000 });
   await page.waitForFunction(
-    () => [...document.querySelectorAll('[data-testid="asset-image"]')].filter((i) => (i as HTMLImageElement).naturalWidth > 0).length === 23,
+    () => [...document.querySelectorAll('[data-testid="asset-image"]')].filter((i) => (i as HTMLImageElement).naturalWidth > 0).length === 25,
   );
   assert.equal(libImages().length, 8);
   // 基础立绘是生成的（提示词里有外貌），表情差分拿基础立绘当参考图改图
   assert.equal(libSprites().length, 3);
+  // 剧本里的 CG：拿林夕的基础立绘当参考图
+  assert.equal(libCgs().length, 2);
+  assert.ok(libCgs().every((r) => r.edit === true));
   assert.equal((await page.$$('[data-testid="asset-character"]')).length, 3);
   assert.equal(await page.locator('[data-testid="asset-character"][data-character="char_zhou"] [data-testid="asset-slot"]').count(), 3);
   assert.equal(await page.locator('[data-testid="asset-review"]').count(), 0);
@@ -530,7 +538,7 @@ try {
   assert.equal(libImages().length, 9);
   await page.click('[data-testid="assets-redraw-stale"]');
   await page.waitForSelector('[data-testid="assets-stale"]', { state: 'detached' });
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="asset-slot"][data-status="done"]').length === 23);
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="asset-slot"][data-status="done"]').length === 25);
   assert.deepEqual(
     libImages()
       .slice(9)
@@ -563,7 +571,7 @@ try {
   await zhou.locator('[data-testid="char-expression"][data-expr="sad"]').click();
   await zhou.locator('[data-testid="char-expressions-save"]').click();
   await page.waitForSelector('[data-testid="asset-slot"][data-slot="sprite/char_zhou/sad"][data-status="done"]', { timeout: 20_000 });
-  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 24 / 24');
+  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 26 / 26');
   assert.equal(libSprites().length, 3, '加表情不重画基础立绘');
   assert.ok(server.imageRequests.filter((r) => r.edit === true).length > editsBefore);
   assert.equal(await zhou.locator('text=之前的图').count(), 0, '老周别的立绘不重画');
@@ -603,7 +611,7 @@ try {
   await page.click('[data-testid="world-card"] >> text=旧书库的约定');
   await page.click('[data-testid="tab-assets"]');
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="asset-mood"][data-source="model"]').length === 6, null, { timeout: 20_000 });
-  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 30 / 30');
+  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 32 / 32');
   const generated = await page.getAttribute('[data-testid="asset-mood"][data-mood="daily"] [data-testid="asset-mood-audio"]', 'src');
   assert.ok((await audioDuration(generated ?? '')) > 1, '生成的 BGM 应该能放');
 
@@ -781,6 +789,144 @@ try {
   await page.waitForSelector('[data-testid="adv-voice"][data-status="off"]', { state: 'attached' });
   await page.click('[data-testid="adv-voice-toggle"]');
   step('舞台上念台词（读档后的那一句），回想里能重播，念过的句子存在世界里，工具栏能关掉配音');
+
+  // ── M4 第 5 步：CG、时段背景、临时人物、创世前的用量估算
+  // 带参考图的 CG、改光线的时段背景要「改图」：自定义接口勾上改图请求（从 OpenAI 风格的写法开始）
+  await page.click('[data-nav="settings"]');
+  await page.click('button:has-text("职责路由")');
+  await page.click('[data-testid="role-template-image"]');
+  await page.check('[data-testid="custom-image-edit-toggle"]');
+  assert.equal(await page.inputValue('[data-testid="custom-image-edit-url"]'), '/images/edits');
+  await page.click('[data-testid="role-save-image"]');
+  await page.waitForSelector('[data-testid="role-save-image"]', { state: 'detached' });
+  await page.click('[data-testid="tab-assets"]');
+  const globalForm = page.locator('[data-testid="asset-settings-global"]');
+  await globalForm.locator('[data-testid="asset-tod-variants"]').waitFor();
+  await globalForm.locator('[data-testid="asset-extras-silhouette"]').waitFor();
+  await globalForm.locator('[data-testid="asset-toggle-cg"]').scrollIntoViewIfNeeded();
+  await shot(page, '34-asset-settings-cg');
+  step('素材设置里有 CG（每幕、每章最多几张、参考图）、时段背景（时段表）、临时人物');
+
+  // 用量估算是可选的：默认关着，新建世界页上不显示；打开、填上单价（每张图 0.2 元、每一万字语音 2 元）
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="new-world"]');
+  await page.waitForSelector('[data-testid="create-world"]');
+  await page.waitForTimeout(300);
+  assert.equal(await page.$('[data-testid="usage-estimate"]'), null, '估算没打开时不显示');
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-testid="tab-assets"]');
+  await globalForm.locator('[data-testid="asset-estimate-enabled"]').check();
+  await globalForm.locator('[data-testid="asset-estimate-image"]').fill('0.2');
+  await globalForm.locator('[data-testid="asset-estimate-voice"]').fill('2');
+  await globalForm.locator('[data-testid="asset-estimate-voice"]').scrollIntoViewIfNeeded();
+  await shot(page, '34b-asset-settings-estimate');
+  await globalForm.locator('[data-testid="asset-settings-save"]').click();
+  await page.waitForSelector('text=已保存素材设置');
+
+  // 新建世界页：按素材设置估算用量（4 个角色 × 3～6 张立绘，加 4～6 张背景），按单价折成钱
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="new-world"]');
+  await page.waitForSelector('[data-testid="usage-images"] >> text=开局画 16～30 张');
+  assert.match((await page.textContent('[data-testid="usage-cost"]')) ?? '', /开局约 ¥3\.20～¥6\.00/);
+  assert.match((await page.textContent('[data-testid="usage-voice"]')) ?? '', /每拍约 70～180 字[\s\S]*每 100 拍约 ¥1\.40～¥3\.60/);
+  await shot(page, '35-create-estimate');
+  step('用量估算在设置里打开、填上单价以后，新建世界前估算素材用量和花费：开局画多少张、CG 和时段背景、音乐、每拍念多少字');
+
+  // 生成的世界开一个新的剧情 ADV 周目：导演标的 CG 画好就在舞台上出来，回想里能看大图
+  await page.click('button:has-text("返回")');
+  await page.click('[data-testid="world-card"] >> text=雾港谜灯');
+  let fogWorld = '';
+  for (const d of await readdir(path.join(dataDir, 'worlds'))) {
+    const m = JSON.parse(await readFile(path.join(dataDir, 'worlds', d, 'world.json'), 'utf8')) as { title: string };
+    if (m.title === '雾港谜灯') fogWorld = d;
+  }
+  assert.ok(fogWorld, '找不到雾港谜灯的世界文件夹');
+  await page.click('[data-testid="start-play"]');
+  await page.click('[data-testid="mode-adv"]');
+  await page.click('[data-testid="start-confirm"]');
+  await page.waitForSelector('[data-testid="adv-stage"]');
+  await advUntil(page, 'menu');
+  await page.waitForSelector('[data-testid="adv-cg"][data-ready="true"]', { timeout: 60_000 });
+  await page.waitForFunction(() => {
+    const img = document.querySelector('[data-testid="adv-cg-image"]') as HTMLImageElement | null;
+    return !!img && img.complete && img.naturalWidth > 0;
+  });
+  await shot(page, '36-adv-ai-cg');
+  await page.click('[data-testid="adv-backlog"]');
+  await page.click('[data-testid="adv-backlog-cg-open"]');
+  await page.waitForSelector('[data-testid="adv-cg-view"] >> text=灯塔下的约定');
+  await shot(page, '37-adv-backlog-cg');
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('[data-testid="adv-cg-view"]', { state: 'detached' });
+  await page.click('[data-testid="adv-panel-close"]');
+  step('导演标的 CG 画好就在舞台上放出来，回想里能看大图');
+
+  // 临时人物：码头老板开口时剪影上台；故事时间到了夜里换成夜晚的背景；码头老板开口满 3 拍升级成正式角色
+  // 不选岔路，一直在这一幕里输入行动（选了会一路演到结局）
+  const askOwner = async () => {
+    await page.fill('[data-testid="adv-input"] input', '去问码头老板');
+    await page.press('[data-testid="adv-input"] input', 'Enter');
+    await page.waitForSelector('[data-testid="adv-text"] >> text=你决定：去问码头老板', { timeout: 60_000 });
+    await advUntil(page, 'menu');
+  };
+  await askOwner();
+  await page.waitForSelector('[data-testid="adv-text"] >> text=这几天雾大');
+  await page.waitForSelector('[data-testid="adv-sprite"][data-char="码头老板"] [data-testid="stage-silhouette"]');
+  await shot(page, '38-adv-extra');
+  let night = false;
+  for (let i = 0; i < 4 && !night; i++) {
+    await askOwner();
+    night = ((await page.getAttribute('[data-testid="adv-bg"]', 'data-bg')) ?? '').endsWith('@night');
+  }
+  assert.ok(night, '故事时间到了夜里，背景应该换成夜晚的');
+  await page.waitForFunction(
+    () => ((document.querySelector('[data-testid="adv-bg-image"]') as HTMLImageElement | null)?.src ?? '').includes('%40night'),
+    null,
+    { timeout: 30_000 },
+  );
+  await shot(page, '39-adv-night');
+  step('临时人物用剪影上台；故事时间到了夜里，背景换成拿白天那张改出来的夜晚版本');
+  // 开口满 3 拍：写进世界成了正式角色，舞台上不再是剪影
+  const ownerFile = async () => {
+    const dirs = await readdir(path.join(dataDir, 'worlds', fogWorld, 'characters'));
+    for (const d of dirs) {
+      const c = JSON.parse(await readFile(path.join(dataDir, 'worlds', fogWorld, 'characters', d, 'character.json'), 'utf8')) as { id: string; name: string };
+      if (c.name === '码头老板') return c.id;
+    }
+    return null;
+  };
+  // 升级在后台写角色卡，等一会儿；还没满 3 拍就再问一次
+  const upgraded = async () => {
+    for (let i = 0; i < 60; i++) {
+      const id = await ownerFile();
+      if (id) return id;
+      await page.waitForTimeout(50);
+    }
+    return null;
+  };
+  let ownerId = await upgraded();
+  for (let i = 0; i < 3 && !ownerId; i++) {
+    await askOwner();
+    ownerId = await upgraded();
+  }
+  assert.ok(ownerId, '码头老板应该升级成了正式角色');
+  await askOwner();
+  await page.waitForSelector(`[data-testid="adv-sprite"][data-char="${ownerId}"]`);
+  assert.equal(await page.$('[data-testid="stage-silhouette"]'), null);
+  step('临时人物开口满 3 拍，升级成正式角色（写进世界），舞台上认得出他');
+
+  // 收集里有导演标的 CG；素材页里有这张 CG 和夜晚的背景
+  await page.click('[data-testid="adv-exit"]');
+  await page.click('button:has-text("收集")');
+  await page.waitForSelector('[data-testid="collection-ai-cg"]');
+  await shot(page, '40-collection-ai-cg');
+  await page.click('[data-testid="tab-assets"]');
+  await page.waitForSelector('[data-testid="asset-slot"][data-slot^="cg/ai_"][data-status="done"]');
+  await page.waitForSelector('[data-testid="asset-slot"][data-slot$="@night"][data-status="done"]');
+  await page.waitForSelector(`[data-testid="asset-character"][data-character="${ownerId}"]`);
+  await page.locator('[data-testid="asset-slot"][data-slot^="cg/ai_"]').first().scrollIntoViewIfNeeded();
+  await shot(page, '41-assets-cg');
+  step('收集里有导演标的 CG；素材页里有这张 CG、夜晚的背景和升级后的码头老板的立绘');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

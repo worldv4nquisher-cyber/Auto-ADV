@@ -109,6 +109,10 @@ function directorPlan(user: string, count: number): string {
     reveals: count % 6 === 0 && present.length >= 2 ? [{ owner: present[1], to: [present[0]] }] : [],
     // 有「音乐情绪」一节时报一个情绪：每三拍换一个（测换曲要持续几拍）
     mood: moodOf(user, count),
+    // 有「CG」一节（还能标）时每一拍都标一张，测引擎按每幕、每章的上限驳回
+    cg: user.includes('# CG（可选）')
+      ? { title: `灯塔下的约定 ${count}`, description: `（模拟 CG #${count}）${present[0] ?? '众人'}站在雾里的灯塔下，回头看向镜头，远处的灯光穿过雾气。`, cast: present.slice(0, 2) }
+      : null,
     ...report,
     check: directive?.includes('检定') ? { var: report.attribute ?? '', dc: 12, label: '仔细观察' } : null,
   });
@@ -346,6 +350,19 @@ export function storyReply(info: MockRequestInfo): string | undefined {
       return advBeat(lastUser, info.count);
     case 'adv_detour':
       return advDetour(lastUser);
+    case 'extra_character': {
+      const name = /# 这个人\n名字：(.+)/.exec(lastUser)?.[1] ?? '路人';
+      return JSON.stringify({
+        sameAs: '',
+        gender: '男',
+        age: '50 多岁',
+        summary: `${name}，在港口开了二十年小酒馆，消息灵通。`,
+        appearance: '矮胖，花白的短发，围着一条洗得发白的帆布围裙，袖子挽到手肘。',
+        imagePrompt: '男性，50 多岁，矮胖，花白短发，帆布围裙，挽起的袖子',
+        traits: ['精明', '爱打听'],
+        speech: '说话慢吞吞的，爱用反问句',
+      });
+    }
     case 'story_memory': {
       const names = [...firstUser.slice(0, firstUser.indexOf('# 之前的前情提要')).matchAll(/^- (\S+)/gm)].map((m) => m[1]);
       return JSON.stringify({
@@ -408,6 +425,8 @@ export function storyReply(info: MockRequestInfo): string | undefined {
       act ? `你决定：${act}。` : pick(NARRATION, info.count),
       check ? `（${check[1]}——${check[2]}）` : '',
       `【${a}】（${pick(ACTIONS, info.count)}）${pick(LINES, info.count)}`,
+      // 玩家去找码头老板：世界里没有这个人，演员让他临时出场（测临时人物）
+      act?.includes('码头老板') ? '【码头老板】（擦着杯子）这几天雾大，船都不出港了。' : '',
       ending ? `故事在这里落下帷幕：${ending}。` : '',
     ]
       .filter(Boolean)

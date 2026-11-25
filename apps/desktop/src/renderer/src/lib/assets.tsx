@@ -1,8 +1,8 @@
 import type { AssetsView, BgmTrack } from '@auto-adv/engine/api';
-import { moodOf } from '@auto-adv/engine/stage';
-import type { BgmSettings, ExpressionDef, MoodDef } from '@auto-adv/schema';
+import { baseBgId, moodOf } from '@auto-adv/engine/stage';
+import type { BgmSettings, ExpressionDef, MoodDef, TimeVariantDef } from '@auto-adv/schema';
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
-import { PlaceholderBg } from '../components/placeholder.tsx';
+import { PlaceholderBg, PlaceholderCg } from '../components/placeholder.tsx';
 import { engine, isAborted, onConnectionChange } from './engine.ts';
 
 /** 世界里的素材文件的地址（主进程的 adv-asset 协议，只能读世界的 assets/）。 */
@@ -65,10 +65,17 @@ export function useAssetUrl(slotId: string): string | null {
   return useContext(AssetsContext)?.urls.get(slotId) ?? null;
 }
 
-/** 背景：画好了用真的图，没有就用占位图（18.6）。id 是地点 id。 */
+/** 背景的文件地址：时段背景（<地点 id>@<时段 id>）还没画好时先用白天的那张（18.4）。 */
+export function useBgUrl(id: string | null | undefined): string | null {
+  const urls = useContext(AssetsContext)?.urls;
+  if (!urls || !id) return null;
+  return urls.get(`bg/${id}`) ?? urls.get(`bg/${baseBgId(id)}`) ?? null;
+}
+
+/** 背景：画好了用真的图，没有就用占位图（18.6）。id 是地点 id（可能带着 @时段）。 */
 export function BgImage({ id, testId }: { id: string; testId?: string }) {
-  const url = useAssetUrl(`bg/${id}`);
-  if (!url) return <PlaceholderBg id={id} label={false} />;
+  const url = useBgUrl(id);
+  if (!url) return <PlaceholderBg id={baseBgId(id) ?? id} label={false} />;
   return (
     <img
       src={url}
@@ -78,6 +85,16 @@ export function BgImage({ id, testId }: { id: string; testId?: string }) {
       className="absolute inset-0 h-full w-full object-cover select-none"
     />
   );
+}
+
+/** 导演标的 CG（AI 演出时，18.6）：id 以 ai_ 开头，没画好之前舞台上不显示。 */
+export const isAiCg = (id: string) => id.startsWith('ai_');
+
+/** CG：画好了用真的图；剧本里的 CG 没画好用占位图；导演标的没画好就什么都不显示。 */
+export function CgImage({ id, testId }: { id: string; testId?: string }) {
+  const url = useAssetUrl(`cg/${id}`);
+  if (!url) return isAiCg(id) ? null : <PlaceholderCg id={id} />;
+  return <img src={url} alt="" draggable={false} data-testid={testId} className="absolute inset-0 h-full w-full object-cover select-none" />;
 }
 
 /** 立绘的文件地址：这个表情还没画好时先用基础立绘（平静），都没有就是 null（18.6）。 */
@@ -103,6 +120,18 @@ export function useBgmRules(): { moods: MoodDef[]; switchBeats: number } | null 
     const [moods, switchBeats] = JSON.parse(key) as [MoodDef[], number];
     return { moods, switchBeats };
   }, [key]);
+}
+
+/** 这个世界的时段表（AI 演出时按故事时间换背景变体，18.4）。时段背景或者背景关掉了为 null。内容不变时引用也不变。 */
+export function useTimeOfDayRules(): { variants: TimeVariantDef[] } | null {
+  const eff = useContext(AssetsContext)?.view?.settings.effective;
+  const key = eff?.enabled.timeOfDay && eff.enabled.background ? JSON.stringify(eff.timeOfDay.variants) : '';
+  return useMemo(() => (key ? { variants: JSON.parse(key) as TimeVariantDef[] } : null), [key]);
+}
+
+/** 临时人物开口时上不上台（剪影，18.5）。 */
+export function useExtrasOnStage(): boolean {
+  return !!useContext(AssetsContext)?.view?.settings.effective.extras.silhouette;
 }
 
 export interface BgmChoice {
