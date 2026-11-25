@@ -11,3 +11,4 @@ export * from './audio.ts';
 export * from './music.ts';
 export * from './speech.ts';
 export * from './custom.ts';
+export * from './comfyui.ts';

@@ -38,4 +38,12 @@ export const ENDPOINT_PRESETS: EndpointPreset[] = [
     needsKey: false,
     note: '本地运行免费，价格可以留空',
   },
+  {
+    id: 'comfyui',
+    name: 'ComfyUI（本地生图）',
+    baseURL: 'http://127.0.0.1:8188',
+    currency: 'CNY',
+    needsKey: false,
+    note: '只用在「图像」职责上：职责路由里接口类型选 ComfyUI，模型从 ComfyUI 读取',
+  },
 ];

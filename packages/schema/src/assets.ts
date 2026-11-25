@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ComfySettings } from './comfy.ts';
 import { CustomApi } from './custom-api.ts';
 import { FORMAT_VERSION } from './version.ts';
 
@@ -571,11 +572,14 @@ export const MediaRoute = z.object({
    * rembg：POST <地址>/api/remove，multipart 上传 file，返回抠好的 PNG（抠图，rembg 自带的 HTTP 服务就是这样）；
    * minimax：POST <Base URL>/music_generation（音乐）、POST <Base URL>/t2a_v2（语音），MiniMax 的接口，和文本接口用同一个 Base URL 和密钥；
    * openai 用在语音上是 POST <Base URL>/audio/speech；
-   * custom：自定义接口，按 custom 里写的请求模板发（通用 HTTP 适配器）。
+   * custom：自定义接口，按 custom 里写的请求模板发（通用 HTTP 适配器）；
+   * comfyui：本地的 ComfyUI（图像），接入点的地址填 ComfyUI 的地址，模型是 checkpoint 的文件名，工作流见 comfy。
    */
-  api: z.enum(['openai', 'rembg', 'minimax', 'custom']).default('openai'),
+  api: z.enum(['openai', 'rembg', 'minimax', 'custom', 'comfyui']).default('openai'),
   /** api 为 custom 时的请求模板。 */
   custom: CustomApi.optional(),
+  /** api 为 comfyui 时的工作流和参数（不写就全用内置的）。 */
+  comfy: ComfySettings.optional(),
   /** 语音职责的音色表：分配音色时从这里挑（MiniMax 可以从服务拉取，OpenAI 有固定的一套，自定义接口自己写）。 */
   voices: z.array(VoiceDef).optional(),
 });
@@ -594,7 +598,7 @@ export const MEDIA_ROLE_LABELS: Record<MediaRoleId, { name: string; hint: string
 
 /** 每个媒体职责能用的接口类型。 */
 export const MEDIA_ROLE_APIS: Record<MediaRoleId, MediaRoute['api'][]> = {
-  image: ['openai', 'custom'],
+  image: ['openai', 'comfyui', 'custom'],
   cutout: ['rembg', 'custom'],
   music: ['minimax', 'custom'],
   voice: ['openai', 'minimax', 'custom'],

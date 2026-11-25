@@ -928,6 +928,70 @@ try {
   await shot(page, '41-assets-cg');
   step('收集里有导演标的 CG；素材页里有这张 CG、夜晚的背景和升级后的码头老板的立绘');
 
+  // ── M4 第 6 步：本地生图（ComfyUI）。接入点从预设添加（地址换成假的 ComfyUI），图像职责选 ComfyUI
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-testid="add-endpoint"]');
+  await page.selectOption('[data-testid="preset"]', 'comfyui');
+  assert.equal(await page.inputValue('input[name="baseURL"]'), 'http://127.0.0.1:8188');
+  await page.fill('input[name="baseURL"]', server.comfyURL);
+  await page.click('[data-testid="save-endpoint"]');
+  await page.waitForSelector('text=已保存「ComfyUI（本地生图）」');
+  await page.click('button:has-text("职责路由")');
+  const comfyId = await page.$eval('[data-testid="role-endpoint-image"] option:last-child', (o) => (o as HTMLOptionElement).value);
+  await page.selectOption('[data-testid="role-endpoint-image"]', comfyId);
+  await page.selectOption('[data-testid="role-api-image"]', 'comfyui');
+  await page.fill('[data-testid="role-model-image"]', '');
+  // 读取模型：从 ComfyUI 的 /object_info 读 checkpoint，还没填模型时填第一个
+  await page.click('[data-testid="role-comfy-models"]');
+  await page.waitForFunction(() => (document.querySelector('[data-testid="role-model-image"]') as HTMLInputElement).value === 'mock-sdxl.safetensors');
+  // 工作流：内置的文生图、改图两个；写错的占位符马上提示，恢复内置
+  await page.click('[data-testid="role-comfy-workflows"]');
+  assert.match(await page.inputValue('[data-testid="comfy-edit"]'), /"LoadImage"[\s\S]*\{\{image\}\}/);
+  await page.fill('[data-testid="comfy-generate"]', '{"1": {"class_type": "KSampler", "inputs": {"text": "{{prompt}}", "steps": "{{steps}}"}}}');
+  await page.waitForSelector('[data-testid="comfy-problem"] >> text={{steps}}');
+  await page.click('[data-testid="comfy-generate-reset"]');
+  await page.waitForSelector('[data-testid="comfy-problem"]', { state: 'detached' });
+  await page.fill('[data-testid="comfy-pollSeconds"]', '0.1');
+  const comfyBefore = server.comfyRequests.length;
+  await page.click('[data-testid="role-test-image"]');
+  await page.waitForFunction(() => {
+    const img = document.querySelector('[data-testid="role-test-image-image"]') as HTMLImageElement | null;
+    return !!img && img.complete && img.naturalWidth > 0;
+  }, null, { timeout: 20_000 });
+  assert.equal(server.comfyRequests.length, comfyBefore + 1);
+  assert.equal(server.comfyRequests.at(-1)?.model, 'mock-sdxl.safetensors');
+  await page.locator('[data-testid="role-image"]').scrollIntoViewIfNeeded();
+  await shot(page, '42-comfy-role');
+  await page.click('[data-testid="role-save-image"]');
+  await page.waitForSelector('[data-testid="role-save-image"]', { state: 'detached' });
+  const savedComfy = JSON.parse(await readFile(path.join(dataDir, 'settings.json'), 'utf8')) as {
+    media: { image?: { api: string; model: string; comfy?: { generate: string; pollSeconds: number } } };
+  };
+  assert.deepEqual(
+    { api: savedComfy.media.image?.api, model: savedComfy.media.image?.model, generate: savedComfy.media.image?.comfy?.generate, poll: savedComfy.media.image?.comfy?.pollSeconds },
+    { api: 'comfyui', model: 'mock-sdxl.safetensors', generate: '', poll: 0.1 },
+  );
+  step('图像职责换成本地的 ComfyUI：从预设加接入点、读取模型、看内置的工作流、写错马上提示、测试画一张、保存');
+
+  // 素材页里重抽一张背景、一张表情差分：都走 ComfyUI，表情差分先把基础立绘上传过去再改图
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="world-card"] >> text=旧书库的约定');
+  await page.click('[data-testid="tab-assets"]');
+  for (const slotId of ['bg/loc_seaside', 'sprite/char_lin/smile']) {
+    const n = server.comfyRequests.length;
+    const target = page.locator(`[data-testid="asset-slot"][data-slot="${slotId}"]`);
+    await target.scrollIntoViewIfNeeded();
+    await target.locator('[data-testid="asset-regenerate"]').click();
+    await until(() => server.comfyRequests.length > n, `ComfyUI 收到 ${slotId} 的工作流`);
+    await page.waitForSelector(`[data-testid="asset-slot"][data-slot="${slotId}"][data-status="done"]`, { timeout: 20_000 });
+  }
+  const [bgReq, smileReq] = server.comfyRequests.slice(-2);
+  assert.equal(bgReq?.image, null);
+  assert.ok(smileReq?.image && server.comfyUploads.includes(smileReq.image), '表情差分要先上传基础立绘');
+  await page.locator('[data-testid="asset-slot"][data-slot="sprite/char_lin/smile"]').scrollIntoViewIfNeeded();
+  await shot(page, '43-assets-comfy');
+  step('素材页重抽背景和表情差分都走 ComfyUI：背景用文生图工作流，表情差分上传基础立绘后用改图工作流');
+
   console.log('✓ 端到端冒烟测试通过');
 } finally {
   await app.close();

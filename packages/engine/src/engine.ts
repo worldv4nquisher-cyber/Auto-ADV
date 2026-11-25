@@ -1,5 +1,6 @@
 import path from 'node:path';
 import {
+  ComfyImageClient,
   encodeRgbaPng,
   type FetchLike,
   normalizeBaseURL,
@@ -11,6 +12,9 @@ import {
   type AppSettings,
   AssetSettings,
   type Capabilities,
+  checkComfy,
+  ComfySettings,
+  comfyUsesModel,
   type Endpoint,
   type GenesisStepId,
   checkCustomApi,
@@ -243,11 +247,21 @@ export class Engine {
   /** 检查一个媒体职责的路由：接入点在不在、模型填没填、接口类型对不对，自定义接口的模板写得对不对。 */
   private async checkMediaRoute(role: MediaRoleId, route: MediaRoute, strict: boolean): Promise<MediaRoute> {
     await this.getEndpoint(route.endpointId);
-    // 抠图服务的模型可以不填（用服务自己的默认模型）；自定义接口模板里不用 {{model}} 时也可以不填
+    // 抠图服务的模型可以不填（用服务自己的默认模型）；自定义接口模板、ComfyUI 的工作流里不用 {{model}} 时也可以不填
     const api = MEDIA_ROLE_APIS[role].includes(route.api) ? route.api : (MEDIA_ROLE_APIS[role][0] ?? route.api);
-    if (strict && api !== 'custom' && role !== 'cutout' && !route.model.trim()) {
-      throw new Error(role === 'image' ? '请填写图像模型' : role === 'music' ? '请填写音乐模型' : '请填写语音模型');
+    let comfy: ComfySettings | undefined;
+    if (api === 'comfyui') {
+      const parsed = ComfySettings.safeParse(route.comfy ?? {});
+      if (!parsed.success) throw new Error(`ComfyUI 的设置不对：${parsed.error.issues[0]?.message ?? parsed.error.message}`);
+      const problem = checkComfy(parsed.data);
+      if (problem) throw new Error(problem);
+      comfy = parsed.data;
     }
+    const modelOptional = api === 'custom' || role === 'cutout' || (comfy !== undefined && !comfyUsesModel(comfy));
+    if (strict && !modelOptional && !route.model.trim()) {
+      throw new Error(role === 'image' ? (api === 'comfyui' ? '请填写模型（checkpoint 的文件名，可以从 ComfyUI 读取）' : '请填写图像模型') : role === 'music' ? '请填写音乐模型' : '请填写语音模型');
+    }
+    if (comfy) return { ...route, model: route.model.trim(), api, comfy };
     if (route.voices) {
       const ids = route.voices.map((v) => v.id.trim());
       if (ids.some((id) => !id)) throw new Error('音色表里有没写 id 的音色');
@@ -318,6 +332,14 @@ export class Engine {
     if (!voice) throw new Error('音色表是空的，请先写音色表（或从服务拉取）');
     const r = await h.client.speak({ model: h.model, text: p.text?.trim() || '你好，这是一句语音测试。今天的风有点大呢。', voice }, ctx.signal);
     return { dataUrl: `data:${r.mime};base64,${Buffer.from(r.data).toString('base64')}`, durationMs: r.durationMs, latencyMs: r.latencyMs };
+  }
+
+  /** ComfyUI 上能用的模型（checkpoint 文件名）。 */
+  async comfyModels(route: MediaRoute, ctx: CallContext) {
+    const r = await this.checkMediaRoute('image', { ...route, api: 'comfyui' }, false);
+    const h = await this.gateway.forImage(null, { ...r, model: r.model || '-' });
+    if (!(h.client instanceof ComfyImageClient)) throw new Error('图像职责的接口类型不是 ComfyUI');
+    return h.client.models(ctx.signal);
   }
 
   /** 语音服务上的音色。 */
@@ -503,6 +525,7 @@ export class Engine {
       testCutout: (p, ctx) => this.testCutout(p.route, ctx),
       testVoice: (p, ctx) => this.testVoice(p, ctx),
       fetchVoices: (p, ctx) => this.fetchVoices(p.route, ctx),
+      comfyModels: (p, ctx) => this.comfyModels(p.route, ctx),
       voiceCast: (p) => this.voice.view(p.worldId),
       setCharacterVoice: (p) => this.voice.setVoice(p.worldId, p.characterId, p.voiceId),
       recastVoices: (p) => this.voice.view(p.worldId, true),

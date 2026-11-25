@@ -3,6 +3,8 @@ import { ENDPOINT_PRESETS, PROBE_STEP_LABELS, type ProbeStep } from '@auto-adv/p
 import {
   type AssetSettings,
   type Capabilities,
+  ComfySettings,
+  comfyUsesModel,
   type CustomApi,
   DEFAULT_MOODS,
   MEDIA_ROLE_APIS,
@@ -20,6 +22,7 @@ import { Badge, Button, Card, cx, Empty, Field, Input, PageHeader, Select, Spinn
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { useSettings } from '../lib/settings.tsx';
 import { AssetSettingsForm } from './AssetSettingsForm.tsx';
+import { ComfyEditor } from './ComfyEditor.tsx';
 import { CustomApiEditor, defaultCustomApi } from './CustomApiEditor.tsx';
 
 type Tab = 'endpoints' | 'roles' | 'assets' | 'about';
@@ -581,6 +584,7 @@ function apiLabel(role: MediaRoleId, api: MediaRoute['api']): string {
   if (api === 'custom') return '自定义';
   if (api === 'rembg') return 'rembg（/api/remove）';
   if (api === 'minimax') return role === 'voice' ? 'MiniMax（/t2a_v2）' : 'MiniMax（/music_generation）';
+  if (api === 'comfyui') return 'ComfyUI';
   return role === 'voice' ? 'OpenAI 风格（/audio/speech）' : 'OpenAI 风格';
 }
 
@@ -617,6 +621,8 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
   const [model, setModel] = useState(current?.model ?? '');
   const [api, setApi] = useState<MediaRoute['api']>(savedApi);
   const [custom, setCustom] = useState<CustomApi | null>(current?.custom ?? null);
+  const [comfy, setComfy] = useState<ComfySettings | null>(current?.comfy ?? null);
+  const [comfyModels, setComfyModels] = useState<string[]>([]);
   const [showTemplate, setShowTemplate] = useState(false);
   const savedVoices = voicesToText(current?.voices);
   const [voicesText, setVoicesText] = useState(savedVoices);
@@ -628,22 +634,26 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
     null,
   );
   const savedCustom = JSON.stringify(current?.custom ?? null);
+  const savedComfy = JSON.stringify(current?.comfy ?? null);
   useEffect(() => {
     setEndpointId(current?.endpointId ?? '');
     setModel(current?.model ?? '');
     setApi(savedApi);
     setCustom(savedCustom === 'null' ? null : (JSON.parse(savedCustom) as CustomApi));
+    setComfy(savedComfy === 'null' ? null : (JSON.parse(savedComfy) as ComfySettings));
     setVoicesText(savedVoices);
-  }, [current?.endpointId, current?.model, savedApi, savedCustom, savedVoices]);
+  }, [current?.endpointId, current?.model, savedApi, savedCustom, savedComfy, savedVoices]);
   const endpoint = settings?.endpoints.find((e) => e.id === endpointId);
   const isCustom = api === 'custom';
-  // 自定义接口的模板里不用 {{model}} 时模型可以不填
-  const needsModel = (isImage || isMusic || isVoice) && !isCustom;
+  const isComfy = api === 'comfyui';
+  // 自定义接口的模板、ComfyUI 的工作流里不用 {{model}} 时模型可以不填
+  const needsModel = (isImage || isMusic || isVoice) && !isCustom && !(isComfy && comfy && !comfyUsesModel(comfy));
   const dirty =
     endpointId !== (current?.endpointId ?? '') ||
     model !== (current?.model ?? '') ||
     api !== savedApi ||
     (isCustom && JSON.stringify(custom) !== savedCustom) ||
+    (isComfy && JSON.stringify(comfy) !== savedComfy) ||
     (isVoice && voicesText.trim() !== savedVoices.trim());
   const voices = isVoice ? textToVoices(voicesText) : [];
   const route = (): MediaRoute => ({
@@ -651,8 +661,24 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
     model: model.trim(),
     api,
     ...(custom ? { custom } : {}),
+    ...(comfy ? { comfy } : {}),
     ...(voices.length ? { voices } : {}),
   });
+  /** 从 ComfyUI 读模型列表（checkpoint 文件名），填进模型的下拉提示；还没填模型时填第一个。 */
+  const readComfyModels = async () => {
+    if (!endpointId) return;
+    setFetching(true);
+    try {
+      const list = await engine.call('comfyModels', { route: route() });
+      setComfyModels(list);
+      if (!model.trim() && list[0]) setModel(list[0]);
+      toast('ok', list.length ? `ComfyUI 上有 ${list.length} 个模型` : 'ComfyUI 上没有模型（models/checkpoints 是空的）');
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setFetching(false);
+    }
+  };
   /** 从服务拉取音色表（MiniMax）或者填入 OpenAI 的那一套。 */
   const fetchVoices = async () => {
     if (!endpointId) return;
@@ -674,6 +700,7 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
       if (!custom) setCustom(defaultCustomApi(role));
       setShowTemplate(true);
     }
+    if (next === 'comfyui' && !comfy) setComfy(ComfySettings.parse({}));
   };
 
   const label = MEDIA_ROLE_LABELS[role];
@@ -733,7 +760,8 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
 
   return (
     <Card className="px-5 py-3.5" data-testid={`role-${role}`}>
-      <div className="flex items-center gap-4">
+      {/* 按钮多（ComfyUI）放不下时按钮换到下一行，模型框不至于挤没了 */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <div className="w-44 shrink-0">
           <div className="flex items-center gap-2 text-sm font-medium">
             {label.name}
@@ -761,14 +789,14 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
         <Input
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          placeholder={MODEL_PLACEHOLDER[role]}
+          placeholder={isComfy ? 'checkpoint 的文件名，可以点「读取模型」' : MODEL_PLACEHOLDER[role]}
           list={`${role}-models`}
-          className="min-w-0 flex-1 font-mono text-xs"
+          className="min-w-24 flex-1 font-mono text-xs"
           disabled={!endpointId}
           data-testid={`role-model-${role}`}
         />
         <datalist id={`${role}-models`}>
-          {endpoint?.models.map((m) => (
+          {(isComfy ? comfyModels : (endpoint?.models ?? [])).map((m) => (
             <option key={m} value={m} />
           ))}
         </datalist>
@@ -785,11 +813,21 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
             </option>
           ))}
         </Select>
-        <div className="flex w-44 shrink-0 justify-end gap-1">
+        <div className="ml-auto flex min-w-44 shrink-0 justify-end gap-1">
           {isCustom && (
             <Button size="sm" variant="ghost" onClick={() => setShowTemplate((v) => !v)} data-testid={`role-template-${role}`}>
               {showTemplate ? '收起' : '模板'}
             </Button>
+          )}
+          {isComfy && (
+            <>
+              <Button size="sm" variant="ghost" loading={fetching} disabled={!endpointId} onClick={() => void readComfyModels()} title="从 ComfyUI 读能用的模型" data-testid="role-comfy-models">
+                读取模型
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setShowTemplate((v) => !v)} data-testid="role-comfy-workflows">
+                {showTemplate ? '收起' : '工作流'}
+              </Button>
+            </>
           )}
           {isVoice && (
             <Button size="sm" variant="ghost" onClick={() => setShowVoices((v) => !v)} data-testid="role-voices-toggle">
@@ -821,6 +859,7 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
         </div>
       </div>
       {isCustom && showTemplate && custom && <CustomApiEditor role={role} value={custom} onChange={setCustom} />}
+      {isComfy && showTemplate && comfy && <ComfyEditor value={comfy} onChange={setComfy} />}
       {isVoice && showVoices && (
         <div className="mt-3 space-y-2 border-t border-line pt-3" data-testid="role-voices">
           <div className="flex items-center justify-between gap-3 text-xs text-muted">
