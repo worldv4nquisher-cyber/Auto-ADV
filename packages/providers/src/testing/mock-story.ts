@@ -107,9 +107,17 @@ function directorPlan(user: string, count: number): string {
     time: count % 3 === 0 ? `第 ${Math.ceil(count / 3)} 天夜里` : '',
     speakers,
     reveals: count % 6 === 0 && present.length >= 2 ? [{ owner: present[1], to: [present[0]] }] : [],
+    // 有「音乐情绪」一节时报一个情绪：每三拍换一个（测换曲要持续几拍）
+    mood: moodOf(user, count),
     ...report,
     check: directive?.includes('检定') ? { var: report.attribute ?? '', dc: 12, label: '仔细观察' } : null,
   });
+}
+
+function moodOf(user: string, count: number): string {
+  const block = (user.split('# 音乐情绪')[1] ?? '').split(/\n# /)[0] ?? '';
+  const ids = [...block.matchAll(/^- ([a-z][a-z0-9_]*)（/gm)].map((m) => m[1] as string);
+  return ids.length ? (ids[Math.floor((count - 1) / 3) % ids.length] as string) : '';
 }
 
 /**
@@ -310,6 +318,12 @@ export function storyReply(info: MockRequestInfo): string | undefined {
     case 'plot_graph':
       // 观察模式续写新篇章时，系统提示是导演
       return plotGraph(firstUser, system.includes('导演'), info.count);
+    case 'bgm_moods': {
+      // 本地曲库按文件名挑情绪：第 i 个文件挑情绪表里的第 i 个情绪
+      const ids = [...lastUser.matchAll(/^- ([a-z][a-z0-9_]*)（/gm)].map((m) => m[1] as string);
+      const files = [...lastUser.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+      return JSON.stringify({ files: files.map((index) => ({ index, mood: ids[index % Math.max(1, ids.length)] ?? '' })) });
+    }
     case 'director_plan':
       return directorPlan(lastUser, info.count);
     case 'adv_beat':

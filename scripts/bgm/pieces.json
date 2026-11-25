@@ -1,0 +1,17 @@
+{
+  "comment": "内置曲库的曲目。id 是 Mutopia 的曲目编号；pedal 是没有踏板记号时怎么补（keep 保留乐谱里的、bar 每小节、half 每半小节、beat 每拍、none 不踩）；velocity 是力度中位数；tempo 是速度倍数（乐谱没写速度或写得不合常见演奏时调）；articulate 为 false 时不用 LilyPond 的 articulate（它会把这首的渐慢一直慢下去）。",
+  "pieces": [
+    { "id": "1778", "file": "debussy-clair-de-lune.opus", "title": "月光（贝加莫组曲）", "composer": "德彪西", "mood": "theme", "pedal": "beat", "velocity": 60, "tempo": 1 },
+    { "id": "1777", "file": "debussy-arabesque-1.opus", "title": "第一阿拉伯风格曲", "composer": "德彪西", "mood": "theme", "pedal": "beat", "velocity": 68, "tempo": 0.75, "articulate": false },
+    { "id": "5", "file": "bach-wtc1-prelude-1.opus", "title": "平均律钢琴曲集第一册 C 大调前奏曲", "composer": "巴赫", "mood": "daily", "pedal": "bar", "velocity": 58, "tempo": 1.1 },
+    { "id": "37", "file": "satie-gymnopedie-1.opus", "title": "第一号裸体舞曲", "composer": "萨蒂", "mood": "daily", "pedal": "bar", "velocity": 58, "tempo": 1.15 },
+    { "id": "989", "file": "mendelssohn-op19-5.opus", "title": "无词歌 Op.19 No.5「不安」", "composer": "门德尔松", "mood": "tense", "pedal": "beat", "velocity": 72, "tempo": 2.6 },
+    { "id": "1888", "file": "grieg-mountain-king.opus", "title": "在山魔王的宫殿里（培尔·金特）", "composer": "格里格", "mood": "tense", "pedal": "keep", "velocity": 62, "tempo": 1 },
+    { "id": "468", "file": "chopin-prelude-op28-4.opus", "title": "前奏曲 Op.28 No.4", "composer": "肖邦", "mood": "sad", "pedal": "keep", "velocity": 58, "tempo": 0.86 },
+    { "id": "246", "file": "grieg-ases-tod.opus", "title": "奥丝之死（培尔·金特）", "composer": "格里格", "mood": "sad", "pedal": "beat", "velocity": 60, "tempo": 1 },
+    { "id": "504", "file": "schumann-traumerei.opus", "title": "梦幻曲（童年情景）", "composer": "舒曼", "mood": "warm", "pedal": "beat", "velocity": 60, "tempo": 0.92 },
+    { "id": "295", "file": "beethoven-pathetique-2.opus", "title": "悲怆奏鸣曲 第二乐章", "composer": "贝多芬", "mood": "warm", "pedal": "beat", "velocity": 60, "tempo": 0.82 },
+    { "id": "743", "file": "chopin-etude-op10-12.opus", "title": "革命练习曲 Op.10 No.12", "composer": "肖邦", "mood": "climax", "pedal": "beat", "velocity": 85, "tempo": 0.87 },
+    { "id": "299", "file": "beethoven-pathetique-1.opus", "title": "悲怆奏鸣曲 第一乐章", "composer": "贝多芬", "mood": "climax", "pedal": "none", "velocity": 80, "tempo": 1 }
+  ]
+}

@@ -1,5 +1,5 @@
 import type { ChatMessage } from '@auto-adv/providers';
-import type { Character, ExpressionDef, ObserverSettings } from '@auto-adv/schema';
+import type { Character, ExpressionDef, MoodDef, ObserverSettings } from '@auto-adv/schema';
 import { z } from 'zod';
 import type { PlayEvent } from '../../api.ts';
 import { GRAPH_RULES, renderScenes } from '../../genesis/graph.ts';
@@ -10,6 +10,7 @@ import { clip, renderBrief, renderCharacter, renderLocation, renderRelationships
 import type { WorldData } from '../../world/store.ts';
 import { BUDGET, selectLore, transcriptOf } from '../context.ts';
 import { actorFormat, speechRule } from '../expressions.ts';
+import { moodSection } from '../moods.ts';
 import { plotSection } from '../plotprompt.ts';
 import type { StoryState } from '../state.ts';
 
@@ -75,6 +76,7 @@ export const DirectorOut = z.object({
     .array(z.object({ owner: required, to: list }))
     .catch([])
     .default([]),
+  mood: text.default(''),
   ...plotReportFields,
 });
 export type DirectorOut = z.infer<typeof DirectorOut>;
@@ -89,6 +91,7 @@ export const directorSpec: JsonSpec<DirectorOut> = {
     time: '时间推进了才填，例如：当晚十点；不推进就留空',
     speakers: [{ name: '这一拍开口或行动的角色名，按顺序', intent: '他这一拍想做什么、想说什么' }],
     reveals: [{ owner: '秘密的主人', to: ['这一拍得知这个秘密的角色名'] }],
+    mood: '这一拍的气氛：从「音乐情绪」里选一个 id（没有这一节就留空）',
     ...plotReportExample,
   },
 };
@@ -115,6 +118,8 @@ export interface DirectorInput {
   card: string | null;
   rejected: string[];
   whispers: PlayEvent[];
+  /** 情绪表（BGM，18.7）：导演按它报告 mood。不给就不问。 */
+  moods?: readonly MoodDef[] | undefined;
 }
 
 export function directorPrompt(p: DirectorInput): string {
@@ -135,6 +140,7 @@ export function directorPrompt(p: DirectorInput): string {
     p.memory ? `# 前情提要\n${p.memory}` : '',
     `# 最近发生的事\n${transcriptOf(world, p.recent, pName) || '（刚刚开场）'}`,
     `# 现在\n地点：${location?.name ?? '未指定'}；在场：${present.join('、') || '无'}${state.time ? `；时间：${state.time}` : ''}`,
+    moodSection(p.moods),
   ];
   if (state.directives.length) {
     parts.push(`# 观众的导演指令（尽量满足）\n${state.directives.map((d) => `- ${d.text}`).join('\n')}`);

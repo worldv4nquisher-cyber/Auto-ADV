@@ -1,4 +1,5 @@
-import type { Character, ExpressionDef, ObserverSettings } from '@auto-adv/schema';
+import type { Character, ExpressionDef, MoodDef, ObserverSettings } from '@auto-adv/schema';
+import { moodOfPlan } from '../moods.ts';
 import type { BeatMeta, ObserverChunk, PlayEvent, PlotAppend, PlotMark, SceneState, Segment } from '../../api.ts';
 import { checkGraphOut, graphSpec } from '../../genesis/graph.ts';
 import type { Meter, ModelGateway } from '../../llm/gateway.ts';
@@ -42,6 +43,8 @@ export interface BeatInput {
   emit: (c: ObserverChunk) => void;
   /** 表情表：提示词里让演员在括号里先写表情（舞台在界面里按它换表情差分）。 */
   expressions?: readonly ExpressionDef[];
+  /** 情绪表：导演每一拍报告 mood（舞台在界面里按它换 BGM）。 */
+  moods?: readonly MoodDef[] | undefined;
 }
 
 /** 导演最多看最近这么多条原文（更早的靠前情提要）。 */
@@ -195,6 +198,7 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
       card,
       rejected: lastBeat?.beat?.rejected ?? [],
       whispers,
+      ...(p.moods ? { moods: p.moods } : {}),
     }),
     spec: directorSpec,
     signal: p.signal,
@@ -202,6 +206,8 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
   const v = validatePlan(world, state, plan);
   meta.plan = plan.plan;
   if (plan.time.trim()) meta.time = plan.time.trim();
+  const mood = moodOfPlan(plan.mood, p.moods);
+  if (mood) meta.mood = mood;
   if (v.reveals.length) meta.reveals = v.reveals;
 
   // 剧情图：导演安排里的检定先掷骰，再核对要点、数值和出口

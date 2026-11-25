@@ -1,0 +1,112 @@
+{
+  "tracks": [
+    {
+      "file": "debussy-clair-de-lune.opus",
+      "title": "月光（贝加莫组曲）",
+      "composer": "德彪西",
+      "mood": "theme",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=1778",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 E. Fromont (1905)，编订 Keith OHara）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "debussy-arabesque-1.opus",
+      "title": "第一阿拉伯风格曲",
+      "composer": "德彪西",
+      "mood": "theme",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=1777",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Durand et Fils (1904)，编订 Keith OHara）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "bach-wtc1-prelude-1.opus",
+      "title": "平均律钢琴曲集第一册 C 大调前奏曲",
+      "composer": "巴赫",
+      "mood": "daily",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=5",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（编订 Tobias Erbsland）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "satie-gymnopedie-1.opus",
+      "title": "第一号裸体舞曲",
+      "composer": "萨蒂",
+      "mood": "daily",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=37",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Dover Edition，编订 Evin Robertson）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "mendelssohn-op19-5.opus",
+      "title": "无词歌 Op.19 No.5「不安」",
+      "composer": "门德尔松",
+      "mood": "tense",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=989",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Novello, Ewer & Co., ca 1880，编订 Neil Puttock）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "grieg-mountain-king.opus",
+      "title": "在山魔王的宫殿里（培尔·金特）",
+      "composer": "格里格",
+      "mood": "tense",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=1888",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 The University Society, 1918，编订 Coyau）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "chopin-prelude-op28-4.opus",
+      "title": "前奏曲 Op.28 No.4",
+      "composer": "肖邦",
+      "mood": "sad",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=468",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Peters, 1879，编订 Magnus Lewis-Smith）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "grieg-ases-tod.opus",
+      "title": "奥丝之死（培尔·金特）",
+      "composer": "格里格",
+      "mood": "sad",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=246",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Kunkel Brothers 1891 - Kunkel's Musical Review, May 1893，编订 Deborah Lowrey）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "schumann-traumerei.opus",
+      "title": "梦幻曲（童年情景）",
+      "composer": "舒曼",
+      "mood": "warm",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=504",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Leichte Stucke, 1900，编订 Ying-Chun Liu）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "beethoven-pathetique-2.opus",
+      "title": "悲怆奏鸣曲 第二乐章",
+      "composer": "贝多芬",
+      "mood": "warm",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=295",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Berners, 1908 (edited by A. Winterberger); Peters, 1910，编订 Chris Sawer）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "chopin-etude-op10-12.opus",
+      "title": "革命练习曲 Op.10 No.12",
+      "composer": "肖邦",
+      "mood": "climax",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=743",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 Peters, Herrmann Scholtz, 1900b，编订 Roland Goretzki）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    },
+    {
+      "file": "beethoven-pathetique-1.opus",
+      "title": "悲怆奏鸣曲 第一乐章",
+      "composer": "贝多芬",
+      "mood": "climax",
+      "source": "https://www.mutopiaproject.org/cgibin/piece-info.cgi?id=299",
+      "method": "用 LilyPond 2.24 从 Mutopia 的乐谱导出 MIDI（展开反复，补上力度和踏板），再用 FluidSynth 和 MuseScore General 音色库渲染，响度统一到 -20 LUFS，Opus 64 kbps",
+      "license": "作品：公有领域；乐谱：Mutopia 标为公有领域（底本 G. Schirmer, 1894 and Berners, 1908，编订 Chris Sawer）；音色库：MuseScore General（MIT；钢琴采样为公有领域）"
+    }
+  ]
+}

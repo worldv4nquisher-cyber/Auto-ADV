@@ -2,12 +2,12 @@
  * M4 第 1 步：素材槽、素材清单、队列、缓存、背景（docs/ARCHITECTURE.md 18.2～18.4）。
  */
 import { existsSync } from 'node:fs';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { decodePng, type RgbaImage } from '@auto-adv/providers';
-import { encodePng, type MockServer, type MockServerOptions, mockSprite, startMockServer } from '@auto-adv/providers/testing';
-import { AssetIndex, AssetSettings } from '@auto-adv/schema';
+import { encodePng, type MockServer, type MockServerOptions, mockMusic, mockSprite, startMockServer } from '@auto-adv/providers/testing';
+import { AssetIndex, AssetSettings, BgmSettings } from '@auto-adv/schema';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type AssetsView, createPortPair, Engine, type EngineContract, MemorySecretStore, RpcClient, serveRpc } from '../src/index.ts';
 import { checkAlpha, hasTransparentBackdrop, keyOut } from '../src/assets/cutout.ts';
@@ -41,13 +41,31 @@ afterEach(teardown);
  * image：要不要配好图像职责。
  */
 async function setup(
-  opts: { image?: boolean; mock?: MockServerOptions; assets?: Partial<AssetSettings>; scripts?: boolean; sprites?: boolean } = {},
+  opts: {
+    image?: boolean;
+    mock?: MockServerOptions;
+    assets?: Partial<AssetSettings>;
+    scripts?: boolean;
+    sprites?: boolean;
+    /** 配好音乐职责。 */
+    music?: boolean;
+    /** 内置曲库的文件夹。 */
+    builtin?: string;
+    /** 配好「默认」文本职责（本地曲库按文件名挑情绪用）。 */
+    text?: boolean;
+  } = {},
 ) {
   await teardown();
   open = true;
   dir = await mkdtemp(path.join(os.tmpdir(), 'auto-adv-assets-'));
   server = await startMockServer({ chunkDelayMs: 0, ...opts.mock });
-  engine = new Engine({ dataDir: dir, secrets: new MemorySecretStore(), callLogFile: ':memory:', assetRetryBaseMs: 1 });
+  engine = new Engine({
+    dataDir: dir,
+    secrets: new MemorySecretStore(),
+    callLogFile: ':memory:',
+    assetRetryBaseMs: 1,
+    ...(opts.builtin ? { builtinBgmDir: opts.builtin } : {}),
+  });
   const [a, b] = createPortPair();
   serveRpc(a, engine.handlers());
   client = new RpcClient<EngineContract>(b);
@@ -70,9 +88,13 @@ async function setup(
     await rm(path.join(src, 'plot', 'scenes'), { recursive: true, force: true });
   }
   const w = await client.call('importWorld', { path: src });
+  if (opts.text) await client.call('setRole', { role: 'default', route: { endpointId, model: 'mock-chat' } });
+  if (opts.music) await setMusic();
   if (opts.image !== false) await setImage();
   return w.id;
 }
+
+const setMusic = () => client.call('setMediaRole', { role: 'music', route: { endpointId, model: 'mock-music', api: 'minimax' } });
 
 const setImage = () => client.call('setMediaRole', { role: 'image', route: { endpointId, model: 'mock-image', api: 'openai' } });
 
@@ -729,5 +751,119 @@ describe('立绘管线', () => {
     const after = await idle(id);
     expect(server.imageRequests.filter((r) => r.edit)).toHaveLength(2);
     expect(slot(after, 'sprite/char_zhou/smile').status).toBe('done');
+  });
+});
+
+describe('BGM', () => {
+  const MOODS = ['theme', 'daily', 'tense', 'sad', 'warm', 'climax'];
+  const bgmSlots = (v: AssetsView) => v.slots.filter((s) => s.kind === 'bgm');
+  const playlist = (v: AssetsView, mood: string) => v.bgm.playlists.find((p) => p.mood === mood);
+
+  /** 一个只有两首曲子的内置曲库。 */
+  async function builtinDir() {
+    const d = await mkdtemp(path.join(os.tmpdir(), 'auto-adv-builtin-'));
+    const track = (file: string, mood: string) => ({ file, title: file, composer: '萨蒂', mood, source: '', method: '渲染', license: '公有领域' });
+    await writeFile(path.join(d, 'manifest.json'), JSON.stringify({ tracks: [track('daily-1.wav', 'daily'), track('sad-1.wav', 'sad')] }));
+    await writeFile(path.join(d, 'daily-1.wav'), mockMusic('daily'));
+    await writeFile(path.join(d, 'sad-1.wav'), mockMusic('sad'));
+    return d;
+  }
+
+  it('没配音乐职责：BGM 槽不算进进度，不调接口；内置曲库有的情绪用内置曲库', async () => {
+    const id = await setup({ builtin: await builtinDir() });
+    const v = await idle(id);
+    expect(bgmSlots(v).map((s) => [s.id, s.status])).toEqual(MOODS.map((m) => [`bgm/${m}`, 'disabled']));
+    expect(v.counts.total).toBe(3);
+    expect(v.bgm.needsModel).toBe(true);
+    expect(v.bgm.builtinCount).toBe(2);
+    expect(playlist(v, 'daily')).toMatchObject({ source: 'builtin', wantsModel: false, tracks: [{ ref: { kind: 'builtin', path: 'daily-1.wav' }, loop: false }] });
+    expect(playlist(v, 'tense')).toMatchObject({ source: null, tracks: [] });
+    expect(server.musicRequests).toHaveLength(0);
+    expect((await client.call('builtinBgm')).map((t) => t.file)).toEqual(['daily-1.wav', 'sad-1.wav']);
+  });
+
+  it('配好音乐职责：每种情绪生成一首纯音乐，存进 assets/bgm/，不算图片张数；生成好了就换掉内置曲库', async () => {
+    const id = await setup({ image: false, builtin: await builtinDir() });
+    await idle(id);
+    await setMusic();
+    const v = await idle(id);
+    expect(bgmSlots(v).every((s) => s.status === 'done')).toBe(true);
+    expect(server.musicRequests).toHaveLength(6);
+    expect(server.musicRequests[0]).toMatchObject({ model: 'mock-music', is_instrumental: true, output_format: 'hex' });
+    const tense = server.musicRequests.find((r) => String(r.prompt).includes('紧张、悬疑'));
+    expect(String(tense?.prompt)).toContain('纯音乐，没有人声');
+    const daily = slot(v, 'bgm/daily');
+    expect(daily.file).toMatch(/^assets\/bgm\/daily-[0-9a-f]{12}\.wav$/);
+    expect(existsSync(path.join(dir, 'worlds', id, daily.file ?? ''))).toBe(true);
+    expect(playlist(v, 'daily')).toMatchObject({ source: 'model', tracks: [{ ref: { kind: 'world', path: daily.file }, loop: true }] });
+    const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
+    expect(index).toMatchObject({ music: 6, generated: 0 });
+    const calls = await client.call('listCalls', {});
+    expect(calls.items.filter((c) => c.role === 'music' && c.tag === 'assets.bgm' && c.status === 'ok')).toHaveLength(6);
+    // 背景还在等图像模型
+    expect(v.counts).toMatchObject({ total: 9, done: 6, pending: 3 });
+
+    // 改了世界的音乐风格：BGM 过期，点了才重新生成
+    await client.call('saveWorldAssetSettings', { worldId: id, patch: { bgm: { template: '{情绪}，纯音乐' } } });
+    const stale = await idle(id);
+    expect(bgmSlots(stale).every((s) => s.status === 'stale' && s.staleBy === 'params')).toBe(true);
+    expect(server.musicRequests).toHaveLength(6);
+  });
+
+  it('本地曲库排在前面：曲库里有的情绪不生成；对不上的让文本模型按文件名挑，每个文件只问一次', async () => {
+    const lib = await mkdtemp(path.join(os.tmpdir(), 'auto-adv-lib-'));
+    for (const f of ['紧张/追逐.wav', 'calm_daily.wav', 'track01.wav']) {
+      await mkdir(path.dirname(path.join(lib, f)), { recursive: true });
+      await writeFile(path.join(lib, f), mockMusic(f));
+    }
+    const id = await setup({ image: false, music: true, text: true, assets: { bgm: BgmSettings.parse({ libraryDir: lib }) } });
+    const v = await idle(id);
+    expect(v.bgm.library?.tracks.map((t) => [t.rel, t.mood, t.by])).toEqual([
+      ['calm_daily.wav', 'daily', 'name'],
+      ['track01.wav', 'theme', 'model'],
+      ['紧张/追逐.wav', 'tense', 'folder'],
+    ]);
+    expect(playlist(v, 'tense')).toMatchObject({ source: 'library', tracks: [{ ref: { kind: 'library', path: '紧张/追逐.wav' } }] });
+    expect(playlist(v, 'theme')?.source).toBe('library');
+    // 只有曲库里没有的三种情绪用音乐模型生成
+    expect(server.musicRequests).toHaveLength(3);
+    expect(bgmSlots(v).filter((s) => s.status === 'done').map((s) => s.mood)).toEqual(['sad', 'warm', 'climax']);
+    expect(v.bgm.named.calm_daily).toMatchObject({ ref: { kind: 'library', path: 'calm_daily.wav' } });
+    const asked = () => server.requests.filter((r) => JSON.stringify(r).includes('bgm_moods')).length;
+    expect(asked()).toBe(1);
+    expect(existsSync(path.join(dir, 'bgm-library.json'))).toBe(true);
+
+    // 重新扫描：用记下来的结果，不再问
+    await client.call('assetsControl', { worldId: id, action: 'rescanLibrary' });
+    const again = await idle(id);
+    expect(again.bgm.library?.tracks.find((t) => t.rel === 'track01.wav')).toMatchObject({ mood: 'theme', by: 'model' });
+    expect(asked()).toBe(1);
+
+    // 单个情绪指定来源：日常只用内置曲库（没有就不放），不按顺序找
+    await client.call('saveWorldAssetSettings', { worldId: id, patch: { bgm: { pins: { daily: 'builtin' } } } });
+    expect(playlist(await idle(id), 'daily')).toMatchObject({ source: null, tracks: [] });
+    await rm(lib, { recursive: true, force: true });
+  });
+
+  it('换成自己的音频：复制进世界并锁定，这个情绪改用它；只认音频', async () => {
+    const id = await setup({ image: false });
+    await idle(id);
+    const src = path.join(dir, 'mine.wav');
+    await writeFile(src, mockMusic('mine'));
+    const v = await client.call('assetUpload', { worldId: id, slotId: 'bgm/sad', path: src });
+    const sad = slot(v, 'bgm/sad');
+    expect(sad).toMatchObject({ source: 'uploaded', locked: true, status: 'done' });
+    expect(sad.file).toMatch(/^assets\/uploads\/bgm-sad-[0-9a-f]{12}\.wav$/);
+    expect(playlist(v, 'sad')).toMatchObject({ source: 'uploaded', tracks: [{ ref: { kind: 'world', path: sad.file }, loop: true }] });
+    const png = path.join(dir, 'x.png');
+    await writeFile(png, encodePng(4, 4, () => [1, 2, 3, 255]));
+    await expect(client.call('assetUpload', { worldId: id, slotId: 'bgm/warm', path: png })).rejects.toThrow('只支持 MP3');
+  });
+
+  it('设置页：测试音乐职责，返回一段音频', async () => {
+    await setup({ image: false });
+    const r = await client.call('testMusic', { route: { endpointId, model: 'mock-music', api: 'minimax' } });
+    expect(r.dataUrl).toMatch(/^data:audio\/wav;base64,/);
+    expect(r.durationMs).toBe(2000);
   });
 });

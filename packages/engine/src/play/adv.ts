@@ -5,7 +5,7 @@
  * 选项和检定、岔路由玩家决定、数值上限这些规则都在引擎里（plot/judge.ts、plot/transition.ts），不靠提示词。
  */
 import type { ChatMessage } from '@auto-adv/providers';
-import { type Character, type ExpressionDef, PlotScene } from '@auto-adv/schema';
+import { type Character, type ExpressionDef, type MoodDef, PlotScene } from '@auto-adv/schema';
 import { z } from 'zod';
 import type { BeatMeta, PlayChunk, PlayEvent, PlotMark, SceneState, Segment } from '../api.ts';
 import { list, required, text } from '../genesis/specs.ts';
@@ -26,6 +26,7 @@ import { validatePlan } from './observer/beat.ts';
 import { CheckProposal, DirectorOut, directorSpec, plotReportExample, plotReportRules } from './observer/prompts.ts';
 import { checkInstruction, openExits, plotSection, sceneBrief } from './plotprompt.ts';
 import { speechRule } from './expressions.ts';
+import { moodOfPlan, moodSection } from './moods.ts';
 import { parseScript, ScriptStream } from './script.ts';
 import { foldState, type StoryState } from './state.ts';
 
@@ -77,6 +78,7 @@ interface AdvPromptInput {
   request: AiRequest;
   /** 这一拍的检定（玩家选项上的，已经掷过）。 */
   check: CheckResult | null;
+  moods?: readonly MoodDef[] | undefined;
 }
 
 function actionText(r: AiRequest, pName: string): string {
@@ -100,6 +102,7 @@ function advDirectorPrompt(p: AdvPromptInput): string {
     p.memory ? `# 前情提要\n${p.memory}` : '',
     `# 最近发生的事\n${transcriptOf(world, p.recent, pName) || '（刚刚开场）'}`,
     `# 现在\n地点：${location?.name ?? '未指定'}；在场：${present.join('、') || '无'}${state.time ? `；时间：${state.time}` : ''}`,
+    moodSection(p.moods),
   ];
   const act = actionText(p.request, pName);
   if (act) parts.push(`# 玩家这一次的行动\n${act}`);
@@ -172,6 +175,8 @@ export interface AdvBeatInput {
   emit: (c: PlayChunk) => void;
   /** 表情表（台词前括号里的第一个词换表情，18.6）。 */
   expressions?: readonly ExpressionDef[];
+  /** 情绪表（导演每一拍报告 mood，舞台按它换 BGM，18.7）。 */
+  moods?: readonly MoodDef[] | undefined;
 }
 
 /** 导演最多看最近这么多条原文（更早的靠前情提要）。 */
@@ -195,13 +200,15 @@ export async function runAdvBeat(p: AdvBeatInput): Promise<{ draft: EventDraft; 
   const director = await gateway.forRole('director', 'adv.director', p.meter);
   const { value: plan } = await generateJson(gateway, director, {
     system: advDirectorSystem(pName),
-    user: advDirectorPrompt({ world, state, plot, protagonist, memory: p.summary?.text ?? null, recent, request: p.request, check: optionCheck }),
+    user: advDirectorPrompt({ world, state, plot, protagonist, memory: p.summary?.text ?? null, recent, request: p.request, check: optionCheck, ...(p.moods ? { moods: p.moods } : {}) }),
     spec: advDirectorSpec,
     signal: p.signal,
   });
   const v = validatePlan(world, state, plan);
   const meta: BeatMeta = { plan: plan.plan, strategy: 'merged' };
   if (plan.time.trim()) meta.time = plan.time.trim();
+  const mood = moodOfPlan(plan.mood, p.moods);
+  if (mood) meta.mood = mood;
   if (v.reveals.length) meta.reveals = v.reveals;
 
   // 2. 引擎核对：导演安排里的检定（这一拍没有选项检定时）先掷骰，再核对要点、数值、出口，最后核对给玩家的选项

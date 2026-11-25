@@ -7,3 +7,5 @@ export * from './presets.ts';
 export * from './images.ts';
 export * from './png.ts';
 export * from './jpeg.ts';
+export * from './audio.ts';
+export * from './music.ts';

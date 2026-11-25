@@ -12,3 +12,7 @@ coverage/
 
 # 示例世界运行时生成的周目数据
 examples/**/playthroughs/
+
+# 内置曲库的下载和中间文件（scripts/bgm/build.py）
+.bgm-cache/
+__pycache__/

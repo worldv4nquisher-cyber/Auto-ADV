@@ -95,6 +95,107 @@ export type TransparencyMode = z.infer<typeof TransparencyMode>;
 export const KeyColor = z.enum(['auto', 'white', 'green']);
 export type KeyColor = z.infer<typeof KeyColor>;
 
+/** 情绪 id：和表情 id 一样，小写字母开头，字母、数字、下划线。 */
+export const MoodId = ExpressionId;
+
+/**
+ * 情绪表里的一项（18.7）：id 是 BGM 槽（bgm/<情绪 id>）和舞台上 bgm 指令里用的名字；
+ * name 是给人看的名字；synonyms 是同义词，导演写了这些词、手写剧本的 bgm 指令和本地曲库的文件名里有这些词，都认成这个情绪；
+ * hint 是给导演看的说明（什么样的戏用它）；prompt 是用音乐模型生成时的描述。
+ */
+export const MoodDef = z.object({
+  id: MoodId,
+  name: z.string().trim().min(1, '情绪要有名字'),
+  synonyms: z.array(z.string().trim().min(1)).default([]),
+  hint: z.string().default(''),
+  prompt: z.string().default(''),
+});
+export type MoodDef = z.infer<typeof MoodDef>;
+
+/** 默认的一套情绪（18.7）。第一个是兜底：手写剧本里认不出来的 bgm 指令放它。 */
+export const DEFAULT_MOODS: MoodDef[] = [
+  {
+    id: 'theme',
+    name: '主题',
+    synonyms: ['主题曲', '片头', '开场', '标题', 'main', 'title', 'opening', 'op', 'prologue'],
+    hint: '开场、章节开头、点题的时刻',
+    prompt: '主题曲，旋律优美、令人印象深刻，带一点期待感',
+  },
+  {
+    id: 'daily',
+    name: '日常',
+    synonyms: ['平静', '轻松', '闲聊', '平常', 'calm', 'daily', 'peace', 'peaceful', 'everyday', 'normal', 'relax'],
+    hint: '平静的日常、闲聊、没有冲突的场面',
+    prompt: '轻松、平静的日常氛围，节奏舒缓',
+  },
+  {
+    id: 'tense',
+    name: '紧张',
+    synonyms: ['悬疑', '不安', '危险', '神秘', '调查', '对峙', 'mystery', 'suspense', 'tense', 'tension', 'danger', 'dark', 'investigation'],
+    hint: '悬疑、调查、对峙、危险逼近',
+    prompt: '紧张、悬疑，低音持续，节奏不安',
+  },
+  {
+    id: 'sad',
+    name: '悲伤',
+    synonyms: ['难过', '伤感', '离别', '失落', '回忆', 'sad', 'sorrow', 'melancholy', 'tragic', 'farewell', 'memory'],
+    hint: '离别、失去、伤心的回忆',
+    prompt: '悲伤、伤感，旋律缓慢低沉',
+  },
+  {
+    id: 'warm',
+    name: '温馨',
+    synonyms: ['温暖', '感动', '重逢', '和好', '浪漫', '恋爱', 'warm', 'reunion', 'gentle', 'love', 'romance', 'tender', 'happy'],
+    hint: '温暖、感动、重逢、亲近的时刻',
+    prompt: '温暖、温柔，旋律明亮柔和',
+  },
+  {
+    id: 'climax',
+    name: '高潮',
+    synonyms: ['激烈', '决战', '战斗', '真相', '爆发', 'climax', 'battle', 'fight', 'finale', 'epic', 'boss'],
+    hint: '真相揭开、激烈冲突、决定性的时刻',
+    prompt: '激昂、壮阔，节奏强烈，情绪推到顶点',
+  },
+];
+
+/** BGM 的三种来源（18.7）：本地曲库、音乐模型、内置古典曲库。 */
+export const BGM_SOURCES = ['library', 'model', 'builtin'] as const;
+export const BgmSource = z.enum(BGM_SOURCES);
+export type BgmSource = z.infer<typeof BgmSource>;
+
+export const BGM_SOURCE_LABELS: Record<BgmSource, string> = { library: '本地曲库', model: '音乐模型', builtin: '内置曲库' };
+
+const uniqueSources = (list: readonly string[]) => new Set(list).size === list.length;
+
+/** BGM 的设置（18.7、18.11）。 */
+export const BgmSettings = z.object({
+  /** 按顺序找，列表里没有的来源就是关掉了。 */
+  sources: z.array(BgmSource).refine(uniqueSources, '来源不能重复').default([...BGM_SOURCES]),
+  /** 本地曲库的文件夹（完整路径）。空字符串表示不选。 */
+  libraryDir: z.string().default(''),
+  /** 本地曲库里按文件夹名和文件名对不上情绪的曲子，让文本模型按文件名挑（每个文件夹只问一次，结果记下来）。 */
+  classifyLibrary: z.boolean().default(true),
+  /** 情绪表（18.7）。 */
+  moods: z
+    .array(MoodDef)
+    .min(1, '情绪表至少要有一个情绪')
+    .refine((list) => new Set(list.map((m) => m.id)).size === list.length, '情绪 id 不能重复')
+    .default(DEFAULT_MOODS),
+  /** 单个情绪指定来源（素材页上改，只在世界里有）：不按顺序找，只用这个来源。 */
+  pins: z.record(z.string(), BgmSource).default({}),
+  /** 导演报告的情绪持续几拍才换曲（换幕时马上换）。 */
+  switchBeats: z.number().int().min(1).max(10).default(2),
+  /** 换曲时淡出淡入几秒。 */
+  fadeSeconds: z.number().min(0).max(10).default(2),
+  /** 不循环的曲子（内置曲库、本地曲库）放完以后停几秒再放下一首。 */
+  gapSeconds: z.number().min(0).max(60).default(3),
+  /** 音量，0～100。 */
+  volume: z.number().int().min(0).max(100).default(60),
+  /** 音乐模型的提示词模板。空字符串表示用内置模板。 */
+  template: z.string().default(''),
+});
+export type BgmSettings = z.infer<typeof BgmSettings>;
+
 /** 世界里单个角色的立绘设置（素材页上改）：expressions 这个角色画哪些表情，不写就按角色类型。 */
 export const CharacterAssetSettings = z.object({
   expressions: z.array(ExpressionId).optional(),
@@ -155,8 +256,12 @@ export const AssetSettings = z.object({
   keyColor: KeyColor.default('auto'),
   /** 单个角色的设置（只在世界里有）。 */
   characters: z.record(z.string(), CharacterAssetSettings).default({}),
+  /** BGM（18.7）。 */
+  bgm: BgmSettings.prefault({}),
   /** 同一个图像接入点同时画几张。 */
   imageConcurrency: z.number().int().min(1).max(16).default(2),
+  /** 同一个音乐接入点同时生成几首。 */
+  musicConcurrency: z.number().int().min(1).max(8).default(1),
   /** 一张图失败后重试几次（按指数退避）。 */
   retries: z.number().int().min(0).max(10).default(3),
 });
@@ -176,6 +281,21 @@ export const AssetSettingsPatch = z.object({
   transparency: TransparencyMode.optional(),
   keyColor: KeyColor.optional(),
   characters: z.record(z.string(), CharacterAssetSettings).optional(),
+  bgm: z
+    .object({
+      sources: z.array(BgmSource).refine(uniqueSources, '来源不能重复'),
+      libraryDir: z.string(),
+      classifyLibrary: z.boolean(),
+      moods: z.array(MoodDef).min(1),
+      pins: z.record(z.string(), BgmSource),
+      switchBeats: z.number().int().min(1).max(10),
+      fadeSeconds: z.number().min(0).max(10),
+      gapSeconds: z.number().min(0).max(60),
+      volume: z.number().int().min(0).max(100),
+      template: z.string(),
+    })
+    .partial()
+    .optional(),
 });
 export type AssetSettingsPatch = z.infer<typeof AssetSettingsPatch>;
 
@@ -196,6 +316,7 @@ export function mergeAssetSettings(base: AssetSettings, patch: AssetSettingsPatc
     templates: { ...base.templates, ...patch.templates },
     spriteSets: { ...base.spriteSets, ...patch.spriteSets },
     characters: { ...base.characters, ...patch.characters },
+    bgm: { ...base.bgm, ...patch.bgm },
   });
 }
 
@@ -249,6 +370,8 @@ export const AssetIndex = z.object({
   slots: z.record(z.string(), AssetSlotRecord).default({}),
   /** 这个世界一共生成了多少张图（算上限用，重抽也算）。 */
   generated: z.number().int().min(0).default(0),
+  /** 这个世界用音乐模型生成了多少首（只是记一下，不设上限）。 */
+  music: z.number().int().min(0).default(0),
   /** 到了上限之后你放宽了多少张。 */
   capExtra: z.number().int().min(0).default(0),
   /** 暂停生成。 */
@@ -256,29 +379,32 @@ export const AssetIndex = z.object({
 });
 export type AssetIndex = z.infer<typeof AssetIndex>;
 
-/** 图像职责的路由：用哪个接入点、哪个模型、什么接口。 */
+/** 媒体职责（图像、抠图、音乐）的路由：用哪个接入点、哪个模型、什么接口。 */
 export const MediaRoute = z.object({
   endpointId: z.string(),
   model: z.string(),
   /**
    * 接口类型。openai：/images/generations 和 /images/edits（图像）；
-   * rembg：POST <地址>/api/remove，multipart 上传 file，返回抠好的 PNG（抠图，rembg 自带的 HTTP 服务就是这样）。
+   * rembg：POST <地址>/api/remove，multipart 上传 file，返回抠好的 PNG（抠图，rembg 自带的 HTTP 服务就是这样）；
+   * minimax：POST <Base URL>/music_generation（音乐，MiniMax 的接口，和文本接口用同一个 Base URL 和密钥）。
    */
-  api: z.enum(['openai', 'rembg']).default('openai'),
+  api: z.enum(['openai', 'rembg', 'minimax']).default('openai'),
 });
 export type MediaRoute = z.infer<typeof MediaRoute>;
 
-export const MEDIA_ROLE_IDS = ['image', 'cutout'] as const;
+export const MEDIA_ROLE_IDS = ['image', 'cutout', 'music'] as const;
 export const MediaRoleId = z.enum(MEDIA_ROLE_IDS);
 export type MediaRoleId = z.infer<typeof MediaRoleId>;
 
 export const MEDIA_ROLE_LABELS: Record<MediaRoleId, { name: string; hint: string }> = {
   image: { name: '图像', hint: '背景、立绘、CG。不会用「默认」的文本模型' },
   cutout: { name: '抠图', hint: '立绘的透明背景选「抠图服务」时用，例如本地的 rembg' },
+  music: { name: '音乐', hint: 'BGM 的「音乐模型」来源，每种情绪生成一首纯音乐' },
 };
 
 /** 每个媒体职责能用的接口类型。 */
 export const MEDIA_ROLE_APIS: Record<MediaRoleId, MediaRoute['api'][]> = {
   image: ['openai'],
   cutout: ['rembg'],
+  music: ['minimax'],
 };

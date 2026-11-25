@@ -49,6 +49,34 @@ export function expressionOfLine(text: string, table: readonly ExpressionLike[])
   return words.find((x) => first.includes(x.w))?.id ?? null;
 }
 
+/** 情绪表里认情绪用到的部分（和 @auto-adv/schema 的 MoodDef 一样）。 */
+export interface MoodLike {
+  id: string;
+  name: string;
+  synonyms: readonly string[];
+}
+
+/**
+ * 一个词对应哪个情绪（18.7）：导演报告的 mood、手写剧本里 bgm 指令的 id、本地曲库的文件夹名和文件名都用它认。
+ * 先按 id、名字、同义词完全对上，再看里面有没有这些词：英文按单词比（calm_daily 认成日常，"03 Suspense" 认成紧张），
+ * 中文按包含比（"紧张的追逐" 认成紧张）。长的词先比。对不上为 null。
+ */
+export function moodOf(token: string, moods: readonly MoodLike[]): string | null {
+  const t = token.trim();
+  if (!t) return null;
+  const lower = t.toLowerCase();
+  for (const m of moods) if (m.id === lower || m.name === t || m.synonyms.some((w) => w.toLowerCase() === lower)) return m.id;
+  const words = new Set(lower.split(/[^a-z0-9]+/).filter(Boolean));
+  const candidates = moods
+    .flatMap((m) => [m.id, m.name, ...m.synonyms].map((w) => ({ w: w.trim().toLowerCase(), id: m.id })))
+    .filter((x) => x.w)
+    .sort((a, b) => b.w.length - a.w.length);
+  for (const c of candidates) {
+    if (/^[a-z0-9_]+$/.test(c.w) ? c.w.split('_').every((p) => words.has(p)) : lower.includes(c.w)) return c.id;
+  }
+  return null;
+}
+
 /** 立绘站位：舞台宽度的百分比（立绘中心）。 */
 export const SPRITE_POSITIONS: Record<string, number> = {
   farleft: 14,
@@ -160,6 +188,11 @@ export interface TimelineOptions {
    * protagonistId：不出立绘的角色（剧情 ADV 里玩家扮演的主角）；观察模式里观众不是主角，为 null。
    */
   auto?: { protagonistId: string | null; expressions?: readonly ExpressionLike[] };
+  /**
+   * 按导演每一拍报告的情绪换曲（18.7）：情绪变了、而且连着 switchBeats 拍都是这个情绪才换，免得来回跳；
+   * 换幕（或者换地点）、还没有曲子的时候马上换。手写剧本里的 bgm 指令照旧。不给就只认 bgm 指令。
+   */
+  bgm?: { moods: readonly MoodLike[]; switchBeats: number };
 }
 
 const emptyView = (): StageView => ({ bg: null, sprites: [], cg: null, bgm: null });
@@ -273,6 +306,26 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
     }
   };
 
+  /** 导演报告了、但还没持续够拍数的新情绪；上一个报告情绪的拍在哪个地点。 */
+  let pendingMood: { mood: string; beats: number } | null = null;
+  let moodPlace: string | null | undefined;
+  const followMood = (mood: string, changed: boolean) => {
+    const b = opts.bgm;
+    if (!b || !b.moods.some((m) => m.id === mood)) return;
+    const current = view.bgm ? moodOf(view.bgm, b.moods) : null;
+    if (current === mood) {
+      pendingMood = null;
+      return;
+    }
+    const beats = pendingMood?.mood === mood ? pendingMood.beats + 1 : 1;
+    if (!view.bgm || changed || beats >= b.switchBeats) {
+      view.bgm = mood;
+      pendingMood = null;
+    } else {
+      pendingMood = { mood, beats };
+    }
+  };
+
   for (const ev of path) {
     if (ev.scene) place = ev.scene;
     if (opts.auto && (ev.kind === 'directive' || ev.kind === 'whisper')) {
@@ -309,6 +362,12 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
       push(ev, { kind: 'check', check: ev.check });
       backlog.push({ kind: 'check', step: steps.length - 1, check: ev.check });
       continue;
+    }
+    // 导演报告的情绪：换幕、换地点时马上换曲，否则要持续够拍数
+    if (ev.beat?.mood) {
+      const moved = moodPlace !== undefined && place.locationId !== moodPlace;
+      moodPlace = place.locationId;
+      followMood(ev.beat.mood, moved || (!!ev.plot && ev.plot.scene !== scene));
     }
     if (ev.plot && ev.plot.scene !== scene) {
       scene = ev.plot.scene;

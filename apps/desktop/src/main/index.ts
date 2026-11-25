@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { HostContract } from '@auto-adv/engine/api';
@@ -18,23 +18,62 @@ import {
 } from 'electron';
 
 /**
- * 世界里的素材文件（背景、立绘……）通过 adv-asset://world/<世界 id>/assets/... 给界面读。
- * 只能读世界目录下 assets/ 里的文件。要在 app ready 之前注册。
+ * 素材文件通过 adv-asset 协议给界面读（要在 app ready 之前注册）：
+ * - adv-asset://world/<世界 id>/assets/...：世界目录下 assets/ 里的文件（背景、立绘、生成的 BGM）；
+ * - adv-asset://library/<世界 id>/<相对路径>：这个世界用的本地曲库（世界设置里选的，没选就是全局设置里的）里的音频文件；
+ * - adv-asset://builtin/<文件名>：内置曲库里的音频文件。
  */
 protocol.registerSchemesAsPrivileged([
   { scheme: 'adv-asset', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
 ]);
 
+const AUDIO_FILE = /\.(mp3|ogg|opus|oga|wav|flac|m4a|aac)$/i;
+const notFound = () => new Response('not found', { status: 404 });
+
+/** 读一个 JSON 文件里的字段；文件不在、格式不对都当作没有。 */
+async function readJsonField(file: string, pick: (v: unknown) => unknown): Promise<string> {
+  try {
+    const v = pick(JSON.parse(await fs.readFile(file, 'utf8')));
+    return typeof v === 'string' ? v.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+const libraryDirOf = (v: unknown) => (v as { bgm?: { libraryDir?: unknown } } | undefined)?.bgm?.libraryDir;
+
+/** 这个世界用的本地曲库：世界设置里选了就用它，否则用全局设置里的。 */
+async function libraryRoot(worldId: string): Promise<string> {
+  const own = await readJsonField(path.join(dataDir(), 'worlds', worldId, 'assets', 'settings.json'), libraryDirOf);
+  if (own) return path.resolve(own);
+  const global = await readJsonField(path.join(dataDir(), 'settings.json'), (v) => libraryDirOf((v as { assets?: unknown } | undefined)?.assets));
+  return global ? path.resolve(global) : '';
+}
+
 function serveAssets(): void {
-  protocol.handle('adv-asset', (req) => {
+  protocol.handle('adv-asset', async (req) => {
     const url = new URL(req.url);
-    const [worldId = '', ...rest] = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
-    if (url.host !== 'world' || !/^[a-z0-9_]{1,64}$/.test(worldId) || rest[0] !== 'assets') {
-      return new Response('not found', { status: 404 });
+    const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    if (url.host === 'builtin') {
+      const root = builtinBgmDir();
+      const name = parts.join('/');
+      if (!root || !/^[\w.-]+$/.test(name) || !AUDIO_FILE.test(name)) return notFound();
+      return net.fetch(pathToFileURL(path.join(root, name)).toString());
     }
+    const [worldId = '', ...rest] = parts;
+    if (!/^[a-z0-9_]{1,64}$/.test(worldId)) return notFound();
+    if (url.host === 'library') {
+      // 只能读曲库文件夹里的音频文件
+      const root = await libraryRoot(worldId);
+      if (!root || !rest.length || !AUDIO_FILE.test(rest.at(-1) ?? '')) return notFound();
+      const file = path.resolve(root, ...rest);
+      if (!file.startsWith(root + path.sep)) return notFound();
+      return net.fetch(pathToFileURL(file).toString());
+    }
+    if (url.host !== 'world' || rest[0] !== 'assets') return notFound();
     const root = path.join(dataDir(), 'worlds', worldId, 'assets');
     const file = path.resolve(root, ...rest.slice(1));
-    if (!file.startsWith(root + path.sep)) return new Response('not found', { status: 404 });
+    if (!file.startsWith(root + path.sep)) return notFound();
     return net.fetch(pathToFileURL(file).toString());
   });
 }
@@ -58,7 +97,7 @@ const hostHandlers = {
 function startEngine(): UtilityProcess {
   const child = utilityProcess.fork(path.join(__dirname, 'engine.js'), [], {
     serviceName: 'Auto-ADV Engine',
-    env: { ...process.env, AUTO_ADV_DATA_DIR: dataDir() },
+    env: { ...process.env, AUTO_ADV_DATA_DIR: dataDir(), AUTO_ADV_BUILTIN_BGM: builtinBgmDir() ?? '' },
     stdio: 'inherit',
   });
   const { port1, port2 } = new MessageChannelMain();
@@ -97,12 +136,25 @@ function examplesDir(): string | undefined {
   return candidates.find((d) => existsSync(d));
 }
 
-/** 选一个文件夹（导入世界用），默认打开示例世界所在的文件夹。返回 null 表示取消。 */
-ipcMain.handle('dialog:pickFolder', async (event, title: unknown) => {
+/**
+ * 内置曲库（18.7）：安装包里在 resources/bgm，开发时在仓库的 resources/bgm。
+ * 环境变量 AUTO_ADV_BUILTIN_BGM 可以指定别的文件夹（测试用）。
+ */
+function builtinBgmDir(): string | undefined {
+  const own = process.env.AUTO_ADV_BUILTIN_BGM;
+  if (own) return path.resolve(own);
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, 'bgm')]
+    : [path.resolve(app.getAppPath(), '../../resources/bgm'), path.resolve(process.cwd(), '../../resources/bgm')];
+  return candidates.find((d) => existsSync(d));
+}
+
+/** 选一个文件夹（导入世界、本地曲库用），默认打开示例世界所在的文件夹。返回 null 表示取消。 */
+ipcMain.handle('dialog:pickFolder', async (event, title: unknown, purpose: unknown) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const opts: Electron.OpenDialogOptions = {
     title: typeof title === 'string' ? title : '选择文件夹',
-    defaultPath: examplesDir(),
+    ...(purpose === 'music' ? { defaultPath: app.getPath('music') } : { defaultPath: examplesDir() }),
     properties: ['openDirectory'],
   };
   const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
@@ -116,6 +168,18 @@ ipcMain.handle('dialog:pickImage', async (event, title: unknown) => {
     title: typeof title === 'string' ? title : '选择图片',
     properties: ['openFile'],
     filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+  };
+  const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+  return r.canceled ? null : (r.filePaths[0] ?? null);
+});
+
+/** 选一个音频文件（换成自己的 BGM 用）。返回 null 表示取消。 */
+ipcMain.handle('dialog:pickAudio', async (event, title: unknown) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const opts: Electron.OpenDialogOptions = {
+    title: typeof title === 'string' ? title : '选择音频文件',
+    properties: ['openFile'],
+    filters: [{ name: '音频', extensions: ['mp3', 'ogg', 'opus', 'wav', 'flac', 'm4a'] }],
   };
   const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
   return r.canceled ? null : (r.filePaths[0] ?? null);

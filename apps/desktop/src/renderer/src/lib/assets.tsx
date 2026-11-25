@@ -1,5 +1,6 @@
-import type { AssetsView } from '@auto-adv/engine/api';
-import type { ExpressionDef } from '@auto-adv/schema';
+import type { AssetsView, BgmTrack } from '@auto-adv/engine/api';
+import { moodOf } from '@auto-adv/engine/stage';
+import type { BgmSettings, ExpressionDef, MoodDef } from '@auto-adv/schema';
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import { PlaceholderBg } from '../components/placeholder.tsx';
 import { engine, isAborted, onConnectionChange } from './engine.ts';
@@ -7,6 +8,14 @@ import { engine, isAborted, onConnectionChange } from './engine.ts';
 /** 世界里的素材文件的地址（主进程的 adv-asset 协议，只能读世界的 assets/）。 */
 export function assetUrl(worldId: string, file: string): string {
   return `adv-asset://world/${encodeURIComponent(worldId)}/${file.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/** BGM 曲子的地址：世界里的文件、本地曲库里的文件、内置曲库里的文件（主进程按世界的设置找曲库文件夹）。 */
+export function bgmUrl(worldId: string, t: BgmTrack): string {
+  const rel = t.ref.path.split('/').map(encodeURIComponent).join('/');
+  if (t.ref.kind === 'world') return assetUrl(worldId, t.ref.path);
+  if (t.ref.kind === 'library') return `adv-asset://library/${encodeURIComponent(worldId)}/${rel}`;
+  return `adv-asset://builtin/${rel}`;
 }
 
 /** 订阅一个世界的素材：先拿到当前状态，之后每次变化都会更新。引擎重启后自动重新订阅。 */
@@ -83,4 +92,46 @@ export function useExpressionTable(): ExpressionDef[] | null {
   const table = useContext(AssetsContext)?.view?.settings.effective.expressions;
   const key = table ? JSON.stringify(table) : '';
   return useMemo(() => (key ? (JSON.parse(key) as ExpressionDef[]) : null), [key]);
+}
+
+/** 这个世界的情绪表和换曲规则（舞台按导演报告的情绪换曲，18.7）。内容不变时引用也不变。BGM 关掉了为 null。 */
+export function useBgmRules(): { moods: MoodDef[]; switchBeats: number } | null {
+  const eff = useContext(AssetsContext)?.view?.settings.effective;
+  const key = eff?.enabled.bgm ? JSON.stringify([eff.bgm.moods, eff.bgm.switchBeats]) : '';
+  return useMemo(() => {
+    if (!key) return null;
+    const [moods, switchBeats] = JSON.parse(key) as [MoodDef[], number];
+    return { moods, switchBeats };
+  }, [key]);
+}
+
+export interface BgmChoice {
+  /** 舞台上 bgm 的 id（情绪 id，或者手写剧本里写的 id）。 */
+  id: string;
+  /** 认成了哪个情绪；按文件名直接找到曲子时为 null。 */
+  mood: string | null;
+  name: string;
+  tracks: { url: string; title: string; loop: boolean }[];
+}
+
+/**
+ * 舞台上的 bgm id 放哪些曲子：手写剧本里写的 id 先按文件名找本地曲库和内置曲库，
+ * 再按情绪表认（认不出来用第一个情绪）；情绪 id 就是这个情绪现在的曲子（18.7）。
+ */
+export function useBgmChoice(id: string | null): { choice: BgmChoice | null; settings: BgmSettings | null } {
+  const ctx = useContext(AssetsContext);
+  const view = ctx?.view;
+  const settings = view?.settings.effective.enabled.bgm ? view.settings.effective.bgm : null;
+  const choice = useMemo(() => {
+    if (!id || !view || !ctx || !settings) return null;
+    const named = view.bgm.named[id.toLowerCase()];
+    if (named && !settings.moods.some((m) => m.id === id)) {
+      return { id, mood: null, name: named.title, tracks: [{ url: bgmUrl(ctx.worldId, named), title: named.title, loop: named.loop }] };
+    }
+    const mood = moodOf(id, settings.moods) ?? settings.moods[0]?.id ?? null;
+    const list = view.bgm.playlists.find((p) => p.mood === mood);
+    if (!mood || !list) return null;
+    return { id, mood, name: list.name, tracks: list.tracks.map((t) => ({ url: bgmUrl(ctx.worldId, t), title: t.title, loop: t.loop })) };
+  }, [id, view, ctx, settings]);
+  return { choice, settings };
 }

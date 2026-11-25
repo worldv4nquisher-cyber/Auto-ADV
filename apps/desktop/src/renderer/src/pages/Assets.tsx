@@ -1,13 +1,13 @@
 /**
  * 素材页（18.3）：世界的每个素材槽、生成进度，重抽、锁定、改提示词、换成自己的图；这个世界的素材设置（18.11）。
- * 立绘按角色分组，每个角色可以单独选要画哪些表情（18.5）。
+ * 立绘按角色分组，每个角色可以单独选要画哪些表情（18.5）。BGM 按情绪列出现在放什么、从哪个来源来（18.7）。
  */
-import type { AssetAction, AssetSlotView, AssetsControl, AssetsView } from '@auto-adv/engine/api';
-import type { AssetSettings, AssetSettingsPatch } from '@auto-adv/schema';
+import type { AssetAction, AssetSlotView, AssetsControl, AssetsView, MoodPlaylist } from '@auto-adv/engine/api';
+import { type AssetSettings, type AssetSettingsPatch, BGM_SOURCE_LABELS, BGM_SOURCES, type BgmSource } from '@auto-adv/schema';
 import { type ReactNode, useEffect, useState } from 'react';
 import { hueOf, PlaceholderBg, PlaceholderSprite } from '../components/placeholder.tsx';
 import { Badge, Button, Card, ConfirmButton, cx, Empty, Spinner, Textarea, useToast } from '../components/ui.tsx';
-import { assetUrl, useAssetsContext } from '../lib/assets.tsx';
+import { assetUrl, bgmUrl, useAssetsContext } from '../lib/assets.tsx';
 import { engine, errorMessage } from '../lib/engine.ts';
 import { useRouter } from '../lib/router.tsx';
 import { AssetSettingsForm } from './AssetSettingsForm.tsx';
@@ -59,7 +59,7 @@ export function AssetsTab({ worldId }: { worldId: string }) {
           </span>
           {counts.running > 0 && (
             <span className="flex items-center gap-1.5 text-xs text-accent-strong">
-              <Spinner /> 正在画 {counts.running} 张
+              <Spinner /> 正在生成 {counts.running} 个
             </span>
           )}
           {counts.failed > 0 && <span className="text-xs text-err">{counts.failed} 张失败</span>}
@@ -114,7 +114,9 @@ export function AssetsTab({ worldId }: { worldId: string }) {
 
       {groups.length === 0 && <Empty title="这个世界还没有要画的素材">创世生成地点、角色之后，这里会列出背景和立绘。</Empty>}
       {groups.map((g) =>
-        g.kind === 'sprite' ? (
+        g.kind === 'bgm' ? (
+          <BgmSection key={g.kind} worldId={worldId} slots={g.slots} view={view} onControl={control} busy={busy} />
+        ) : g.kind === 'sprite' ? (
           <section key={g.kind} className="space-y-3">
             <h3 className="text-sm font-medium text-muted">{KIND_TITLE[g.kind]}</h3>
             {byCharacter(g.slots).map(([charId, slots]) => (
@@ -482,6 +484,203 @@ function SlotCard({
           </div>
         )}
       </div>
+    </Card>
+  );
+}
+
+const SOURCE_TEXT: Record<MoodPlaylist['source'] & string, string> = { ...BGM_SOURCE_LABELS, uploaded: '自己的文件' };
+
+/** BGM：每个情绪现在放什么、从哪个来源来；本地曲库的情况。 */
+function BgmSection({
+  worldId,
+  slots,
+  view,
+  onControl,
+  busy,
+}: {
+  worldId: string;
+  slots: AssetSlotView[];
+  view: AssetsView;
+  onControl: (a: AssetsControl) => Promise<void>;
+  busy: string | null;
+}) {
+  const { navigate } = useRouter();
+  const eff = view.settings.effective;
+  const lib = view.bgm.library;
+  const matched = lib?.tracks.filter((t) => t.mood).length ?? 0;
+  const usesModel = eff.bgm.sources.includes('model') || Object.values(eff.bgm.pins).includes('model');
+  return (
+    <section className="space-y-2" data-testid="asset-bgm">
+      <h3 className="text-sm font-medium text-muted">BGM</h3>
+      <Card className="space-y-1.5 p-3 text-xs text-muted">
+        <div>
+          来源顺序：{eff.bgm.sources.map((x) => BGM_SOURCE_LABELS[x]).join(' → ') || '都关掉了'}
+          {!eff.enabled.bgm && <span className="ml-2 text-warn">BGM 在设置里关掉了，舞台上不放音乐。</span>}
+        </div>
+        {lib ? (
+          <div className="flex flex-wrap items-center gap-x-2" data-testid="asset-bgm-library-info">
+            <span>
+              本地曲库 <code className="rounded bg-panel-2 px-1">{lib.dir}</code>：
+              {lib.error ? <span className="text-err">{lib.error}</span> : `${lib.tracks.length} 首，认出情绪的 ${matched} 首`}
+              {lib.truncated && '（文件太多，只读了前 2000 个）'}
+              {lib.classifying && '，正在让模型按文件名挑…'}
+            </span>
+            <Button size="sm" variant="ghost" loading={busy === 'rescanLibrary'} onClick={() => void onControl('rescanLibrary')} data-testid="asset-bgm-rescan">
+              重新扫描
+            </Button>
+          </div>
+        ) : (
+          <div>没有选本地曲库（在下面「这个世界的素材设置」或者全局设置的 BGM 里选）。</div>
+        )}
+        <div>内置曲库：{view.bgm.builtinCount ? `${view.bgm.builtinCount} 首` : '还没有曲子'}</div>
+        {usesModel && view.bgm.needsModel && (
+          <div className="text-warn" data-testid="asset-bgm-needs-model">
+            还没有配音乐模型，「音乐模型」这个来源先跳过。
+            <button type="button" className="ml-1 underline" onClick={() => navigate({ page: 'settings' })}>
+              到设置里配一个
+            </button>
+          </div>
+        )}
+      </Card>
+      <div className="space-y-2">
+        {view.bgm.playlists.map((p) => (
+          <MoodRow key={p.mood} worldId={worldId} playlist={p} slot={slots.find((s) => s.mood === p.mood)} view={view} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** 一个情绪：现在的曲子（可以试听）、指定来源、音乐模型生成的那首的操作。 */
+function MoodRow({ worldId, playlist: p, slot, view }: { worldId: string; playlist: MoodPlaylist; slot: AssetSlotView | undefined; view: AssetsView }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [pick, setPick] = useState(0);
+  const pin = view.settings.effective.bgm.pins[p.mood] ?? '';
+  const run = async (key: string, fn: () => Promise<unknown>) => {
+    setBusy(key);
+    try {
+      await fn();
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const act = (action: AssetAction, file?: string) =>
+    slot && run(action, () => engine.call('assetAction', { worldId, slotId: slot.id, action, ...(file ? { file } : {}) }));
+  const upload = () =>
+    slot &&
+    run('upload', async () => {
+      const file = await window.autoAdv.pickAudio('换成自己的音频文件');
+      if (file) await engine.call('assetUpload', { worldId, slotId: slot.id, path: file });
+    });
+  const setPin = (value: BgmSource | '') =>
+    run('pin', async () => {
+      const world = view.settings.world;
+      const pins = { ...world.bgm?.pins };
+      if (value) pins[p.mood] = value;
+      else delete pins[p.mood];
+      const { pins: _old, ...bgmRest } = world.bgm ?? {};
+      const bgm = Object.keys(pins).length ? { ...bgmRest, pins } : bgmRest;
+      const { bgm: _b, ...rest } = world;
+      await engine.call('saveWorldAssetSettings', { worldId, patch: Object.keys(bgm).length ? { ...rest, bgm } : rest });
+    });
+  const track = p.tracks[Math.min(pick, p.tracks.length - 1)];
+  const st = slot ? STATUS[slot.status] : null;
+  const generating = slot && (slot.status === 'running' || (slot.requested && slot.status !== 'done'));
+  return (
+    <Card className="space-y-2 p-3" data-testid="asset-mood" data-mood={p.mood} data-source={p.source ?? ''}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-medium">{p.name}</span>
+        <code className="text-[11px] text-faint">{p.mood}</code>
+        <Badge tone={p.source ? 'ok' : 'neutral'}>{p.source ? SOURCE_TEXT[p.source] : '没有曲子'}</Badge>
+        {p.wantsModel && (
+          <Badge tone="accent">{generating ? '音乐模型生成中' : '等音乐模型生成'}{p.tracks.length ? '，先用这个' : ''}</Badge>
+        )}
+        {slot?.locked && <Badge tone="accent">锁定</Badge>}
+        {slot && slot.status === 'failed' && <Badge tone="err">生成失败</Badge>}
+        <label className="ml-auto flex items-center gap-1.5 text-xs text-muted">
+          来源
+          <select
+            value={pin}
+            disabled={busy === 'pin'}
+            onChange={(e) => void setPin(e.target.value as BgmSource | '')}
+            className="rounded border border-line bg-panel px-1.5 py-0.5 text-xs"
+            data-testid="asset-mood-pin"
+          >
+            <option value="">按顺序</option>
+            {BGM_SOURCES.map((x) => (
+              <option key={x} value={x}>
+                只用{BGM_SOURCE_LABELS[x]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      {slot?.subtitle && <p className="text-xs text-faint">{slot.subtitle}</p>}
+      {p.tracks.length > 0 && track && (
+        <div className="flex flex-wrap items-center gap-2">
+          {p.tracks.length > 1 ? (
+            <select
+              value={pick}
+              onChange={(e) => setPick(Number(e.target.value))}
+              className="max-w-64 rounded border border-line bg-panel px-1.5 py-0.5 text-xs"
+              data-testid="asset-mood-track"
+            >
+              {p.tracks.map((t, i) => (
+                <option key={`${t.ref.kind}:${t.ref.path}`} value={i}>
+                  {t.title}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="text-xs" data-testid="asset-mood-track">
+              {track.title}
+            </span>
+          )}
+          <audio key={bgmUrl(worldId, track)} src={bgmUrl(worldId, track)} controls preload="none" className="h-8" data-testid="asset-mood-audio" />
+          {track.credit && <span className="text-[11px] text-faint">{track.credit}</span>}
+        </div>
+      )}
+      {slot?.error && slot.status === 'failed' && <p className="text-xs break-all text-err">{slot.error}</p>}
+      {slot && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-faint">音乐模型的这首：{st?.text}</span>
+          {slot.status === 'failed' && (
+            <Button size="sm" variant="primary" disabled={view.bgm.needsModel} loading={busy === 'retry'} onClick={() => void act('retry')}>
+              重试
+            </Button>
+          )}
+          <Button
+            size="sm"
+            disabled={view.bgm.needsModel || slot.locked}
+            title={view.bgm.needsModel ? '先在设置里配音乐模型' : slot.locked ? '先解锁' : '用音乐模型生成一首新的'}
+            loading={busy === 'regenerate'}
+            onClick={() => void act('regenerate')}
+            data-testid="asset-mood-regenerate"
+          >
+            {slot.file ? '重新生成' : '生成'}
+          </Button>
+          {slot.locked ? (
+            <Button size="sm" variant="ghost" loading={busy === 'unlock'} onClick={() => void act('unlock')}>
+              解锁
+            </Button>
+          ) : (
+            <Button size="sm" variant="ghost" disabled={!slot.file} loading={busy === 'lock'} onClick={() => void act('lock')}>
+              锁定
+            </Button>
+          )}
+          <Button size="sm" variant="ghost" loading={busy === 'upload'} onClick={() => void upload()} data-testid="asset-mood-upload">
+            换成自己的文件
+          </Button>
+          {slot.history.map((h, i) => (
+            <Button key={h.file} size="sm" variant="ghost" title={h.file} onClick={() => void act('use', h.file)}>
+              换回之前的{slot.history.length > 1 ? ` ${i + 1}` : ''}
+            </Button>
+          ))}
+        </div>
+      )}
     </Card>
   );
 }

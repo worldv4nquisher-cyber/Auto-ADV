@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { DEFAULT_EXPRESSIONS, type ExpressionDef, ObserverSettings } from '@auto-adv/schema';
+import { DEFAULT_EXPRESSIONS, type ExpressionDef, type MoodDef, ObserverSettings } from '@auto-adv/schema';
 import type {
   ObserverChunk,
   ObserverStatus,
@@ -119,6 +119,8 @@ export class PlayService {
   onView: ((worldId: string, view: PlayView) => void) | null = null;
   /** 这个世界的表情表（素材设置里的，18.5）：AI 演出时按台词前括号里的第一个词换表情。 */
   expressionTable: (worldId: string) => Promise<readonly ExpressionDef[]> = async () => DEFAULT_EXPRESSIONS;
+  /** 这个世界的情绪表（导演报告 mood 用）；BGM 关掉了就是 undefined，导演不报。 */
+  moodTable: (worldId: string) => Promise<readonly MoodDef[] | undefined> = async () => undefined;
 
   constructor(store: WorldStore, gateway: ModelGateway) {
     this.store = store;
@@ -336,6 +338,7 @@ export class PlayService {
         gateway: this.gateway,
         world,
         expressions: await this.expressionTable(ref.worldId),
+        moods: await this.moodTable(ref.worldId),
         playthroughId: pt.id,
         path: events,
         request: r.ai,
@@ -603,6 +606,7 @@ export class PlayService {
         gateway: this.gateway,
         world,
         expressions: await this.expressionTable(ref.worldId),
+        moods: await this.moodTable(ref.worldId),
         playthroughId: pt.id,
         path: events,
         summary,

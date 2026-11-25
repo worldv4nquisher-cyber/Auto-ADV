@@ -8,6 +8,7 @@ import type {
   AssetSettings,
   AssetSettingsPatch,
   AssetToggle,
+  BgmSource,
   Capabilities,
   ImageTemplates,
   MediaRoleId,
@@ -82,6 +83,8 @@ export interface AssetDefaults {
   artStyle: string;
   placeholders: { key: string; hint: string }[];
   settings: AssetSettings;
+  /** 音乐模型的内置模板、占位符和世界没写音乐风格时用的风格。 */
+  music: { template: string; style: string; placeholders: { key: string; hint: string }[] };
 }
 
 // ───────────── 素材（M4，18.2～18.3） ─────────────
@@ -121,11 +124,82 @@ export interface AssetSlotView {
   /** 立绘：哪个角色、哪个表情。 */
   characterId: string | null;
   expression: string | null;
+  /** BGM：哪个情绪。 */
+  mood: string | null;
   model: string | null;
   revisedPrompt: string | null;
   /** 之前用过的文件，可以换回去。 */
   history: { file: string; at: string }[];
   updatedAt: string | null;
+}
+
+// ───────────── BGM（18.7） ─────────────
+
+/** 一首可以放的曲子。 */
+export interface BgmTrack {
+  /**
+   * 界面拿它拼地址：world 是世界目录下的文件（assets/…）；library 是本地曲库里的相对路径；
+   * builtin 是内置曲库里的文件名。
+   */
+  ref: { kind: 'world' | 'library' | 'builtin'; path: string };
+  title: string;
+  source: BgmSource | 'uploaded';
+  /** 能循环（音乐模型生成的）。不能循环的放完淡出、停几秒，再放同一情绪的下一首。 */
+  loop: boolean;
+  /** 作曲、演奏或渲染方式、授权（内置曲库）。 */
+  credit?: string;
+}
+
+/** 一个情绪现在放什么。 */
+export interface MoodPlaylist {
+  mood: string;
+  name: string;
+  /** 现在给曲子的来源；一首都没有为 null。 */
+  source: BgmSource | 'uploaded' | null;
+  tracks: BgmTrack[];
+  /** 按顺序轮到了音乐模型、而这首还没生成好：音乐模型要生成它（期间先用后面的来源）。 */
+  wantsModel: boolean;
+}
+
+export interface LibraryTrack {
+  /** 相对曲库文件夹的路径，用 / 分隔。 */
+  rel: string;
+  /** 文件名去掉扩展名。 */
+  name: string;
+  mood: string | null;
+  /** 怎么认出的情绪：子文件夹名、文件名、文本模型按文件名挑的。 */
+  by: 'folder' | 'name' | 'model' | null;
+}
+
+/** 内置曲库的一首（resources/bgm/manifest.json）：每首都写清楚来源和授权。 */
+export interface BuiltinTrackInfo {
+  file: string;
+  title: string;
+  composer: string;
+  mood: string;
+  source: string;
+  method: string;
+  license: string;
+}
+
+export interface BgmView {
+  /** 每个情绪现在放什么（按情绪表的顺序）。 */
+  playlists: MoodPlaylist[];
+  /** 手写剧本的 bgm 指令按文件名找曲子：本地曲库和内置曲库的文件名（小写、去掉扩展名）→ 曲子。 */
+  named: Record<string, BgmTrack>;
+  /** 本地曲库：选了文件夹才有。 */
+  library: {
+    dir: string;
+    tracks: LibraryTrack[];
+    error: string | null;
+    truncated: boolean;
+    /** 正在让文本模型按文件名挑情绪。 */
+    classifying: boolean;
+  } | null;
+  /** 内置曲库有几首。 */
+  builtinCount: number;
+  /** 没配音乐职责。 */
+  needsModel: boolean;
 }
 
 export interface AssetsView {
@@ -144,6 +218,7 @@ export interface AssetsView {
     cap: { used: number; limit: number; reached: boolean; action: AssetSettings['capAction'] };
   };
   settings: { world: AssetSettingsPatch; effective: AssetSettings; global: AssetSettings };
+  bgm: BgmView;
 }
 
 export type AssetsChunk = { type: 'view'; view: AssetsView };
@@ -154,8 +229,11 @@ export type AssetsChunk = { type: 'view'; view: AssetsView };
  */
 export type AssetAction = 'regenerate' | 'redraw' | 'retry' | 'lock' | 'unlock' | 'use';
 
-/** 整个世界的素材：pause / resume 暂停、继续；raiseCap 到了上限之后再放宽 20 张；redrawStale 参数改过的过期槽全部重画；cleanOrphans 清理不再需要的槽。 */
-export type AssetsControl = 'pause' | 'resume' | 'raiseCap' | 'redrawStale' | 'cleanOrphans';
+/**
+ * 整个世界的素材：pause / resume 暂停、继续；raiseCap 到了上限之后再放宽 20 张；redrawStale 参数改过的过期槽全部重画；
+ * cleanOrphans 清理不再需要的槽；rescanLibrary 重新扫一遍本地曲库。
+ */
+export type AssetsControl = 'pause' | 'resume' | 'raiseCap' | 'redrawStale' | 'cleanOrphans' | 'rescanLibrary';
 
 export interface FetchModelsParams {
   /** 已保存的接入点；和下面的字段同时给时，下面的字段优先（用于编辑中尚未保存的表单）。 */
@@ -339,6 +417,8 @@ export interface BeatMeta {
   arc?: LegacyAct;
   /** 与之前内容的最高相似度（0～1），用于检测重复。 */
   similarity?: number;
+  /** 导演报告的这一拍的情绪（情绪表里的 id，18.7），舞台按它换 BGM。 */
+  mood?: string;
 }
 
 /** 走出口的原因：auto 条件成立、剧本 jump、玩家选项、只有一条路、演满 maxBeats 走 default、导演判断、剧情 ADV 跑偏时"就这样走"进入新插进来的一幕。 */
@@ -642,6 +722,9 @@ export type EngineContract = {
   saveAssetSettings: Unary<{ settings: AssetSettings }, void>;
   /** 用图像职责（或给的 route）画一张小图试试。会花一张图的额度。 */
   testImage: Unary<{ route?: MediaRoute }, { dataUrl: string; revisedPrompt: string | null; latencyMs: number }>;
+  testMusic: Unary<{ route?: MediaRoute }, { dataUrl: string; durationMs: number | null; latencyMs: number }>;
+  /** 内置曲库的曲目和授权（「关于」页）。 */
+  builtinBgm: Unary<void, BuiltinTrackInfo[]>;
   chat: Streaming<PlaygroundChatParams, StreamEvent, PlaygroundResult>;
   listCalls: Unary<{ limit?: number; offset?: number }, { items: CallSummary[]; total: number }>;
   getCall: Unary<{ id: string }, CallDetail | null>;

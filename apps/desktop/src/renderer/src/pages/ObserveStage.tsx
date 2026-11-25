@@ -26,7 +26,8 @@ import {
   useTyping,
 } from '../components/stage.tsx';
 import { Spinner } from '../components/ui.tsx';
-import { useExpressionTable } from '../lib/assets.tsx';
+import { BgmTag, useStageBgm } from '../components/bgm.tsx';
+import { useBgmRules, useExpressionTable } from '../lib/assets.tsx';
 
 /** 1 倍速下的节奏（和文本看法一致）：打字速度（字/秒）、每句读完后的停顿（基础 + 每字），换一拍时多停一会儿。 */
 const CPS = 30;
@@ -68,9 +69,17 @@ export function ObserveStage({
   const graph = useMemo(() => (world.graph ? foldPlot(world.graph, world.variables, path).graph : null), [world, path]);
   // 表情表：台词前括号里的第一个词换表情差分（18.6）
   const expressions = useExpressionTable();
+  // 导演每一拍报告的情绪：按它换 BGM（18.7）
+  const bgmRules = useBgmRules();
   const timeline = useMemo(
-    () => buildTimeline(path, { characters: world.characters, graph, auto: { protagonistId: null, ...(expressions ? { expressions } : {}) } }),
-    [path, world.characters, graph, expressions],
+    () =>
+      buildTimeline(path, {
+        characters: world.characters,
+        graph,
+        auto: { protagonistId: null, ...(expressions ? { expressions } : {}) },
+        ...(bgmRules ? { bgm: bgmRules } : {}),
+      }),
+    [path, world.characters, graph, expressions, bgmRules],
   );
   const steps = timeline.steps;
   const eventIndex = useMemo(() => new Map(path.map((e, i) => [e.id, i])), [path]);
@@ -110,6 +119,7 @@ export function ObserveStage({
   const textLen = textLength(step);
   const { shown: typedChars, typed, complete } = useTyping(stepKey, textLen, CPS * speed, speed === 0);
   const stage: StageView = step?.view ?? timeline.end;
+  const bgm = useStageBgm(stage.bgm);
   useShake(stageRef, step, stepKey);
 
   const advance = () => {
@@ -215,6 +225,7 @@ export function ObserveStage({
               <AssetProgress p="observe" />
               <CueTags step={step} stepKey={stepKey} />
             </div>
+            <BgmTag bgm={bgm} className="pointer-events-auto rounded bg-black/40 px-[0.7em] py-[0.25em] text-white/60 hover:text-white/85" />
           </div>
         )}
 

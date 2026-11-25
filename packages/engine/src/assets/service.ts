@@ -1,7 +1,19 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { decodeJpeg, decodePng, encodeRgbaPng, IMAGE_EXT, type ImageResult, ProviderError, type RgbaImage, sniffImage } from '@auto-adv/providers';
+import {
+  AUDIO_EXT,
+  decodeJpeg,
+  decodePng,
+  encodeRgbaPng,
+  IMAGE_EXT,
+  type ImageResult,
+  type MusicResult,
+  ProviderError,
+  type RgbaImage,
+  sniffAudio,
+  sniffImage,
+} from '@auto-adv/providers';
 import {
   type AssetIndex,
   type AssetSettings,
@@ -10,11 +22,24 @@ import {
   AssetSettingsPatch as PatchSchema,
   mergeAssetSettings,
 } from '@auto-adv/schema';
-import type { AssetAction, AssetSlotView, AssetsChunk, AssetsControl, AssetsView } from '../api.ts';
-import type { ImageHandle, ModelGateway } from '../llm/gateway.ts';
+import { z } from 'zod';
+import type { AssetAction, AssetSlotView, AssetsChunk, AssetsControl, AssetsView, BgmView } from '../api.ts';
+import type { ImageHandle, ModelGateway, MusicHandle } from '../llm/gateway.ts';
+import { generateJson } from '../llm/structured.ts';
 import type { SettingsStore } from '../settings-store.ts';
 import { SerialQueue, writeFileAtomic } from '../util.ts';
 import type { WorldData, WorldStore } from '../world/store.ts';
+import {
+  type BuiltinTrackDef,
+  type LibraryScan,
+  LibraryMoodCache,
+  loadBuiltin,
+  type MoodPlaylist,
+  moodTableKey,
+  namedTracks,
+  resolveBgm,
+  scanLibrary,
+} from './bgm.ts';
 import { checkAlpha, hasTransparentBackdrop, keyOut } from './cutout.ts';
 import { type AssetFocus, inputHashOf, type PlannedSlot, planAssets, priorityOf, slotState, wantsWork } from './plan.ts';
 
@@ -23,6 +48,10 @@ export type { AssetFocus } from './plan.ts';
 export interface AssetServiceOptions {
   /** 失败重试的基础等待时间（按指数退避），默认 2 秒。测试里调小。 */
   retryBaseMs?: number;
+  /** 数据目录：本地曲库按文件名挑情绪的结果记在这里（bgm-library.json）。不给就不记。 */
+  dataDir?: string;
+  /** 内置曲库的文件夹（里面有 manifest.json）。不给就没有内置曲库。 */
+  builtinBgmDir?: string;
 }
 
 /** 一个世界在内存里的素材状态。 */
@@ -39,10 +68,29 @@ interface WorldAssets {
   listeners: Set<(c: AssetsChunk) => void>;
   /** 写 index.json 串行。 */
   queue: SerialQueue;
+  /** 本地曲库扫出来的曲子（选了文件夹才有）。moods：扫的时候的情绪表（情绪表改了要重新认）。 */
+  library: (LibraryScan & { moods: string }) | null;
+  /** 正在让文本模型按文件名挑情绪。 */
+  classifying: boolean;
+  /** 每个情绪现在放什么（18.7）。 */
+  bgm: MoodPlaylist[];
 }
 
 const MAX_HISTORY = 10;
 const UPLOAD_LIMIT = 30 * 1024 * 1024;
+const AUDIO_UPLOAD_LIMIT = 200 * 1024 * 1024;
+/** 一次最多让文本模型挑多少个文件名。 */
+const CLASSIFY_BATCH = 200;
+
+const isMusic = (slot: { kind: string }) => slot.kind === 'bgm';
+
+/** 文本模型按文件名挑情绪的回答。 */
+const ClassifyOut = z.object({
+  files: z
+    .array(z.object({ index: z.coerce.number().int(), mood: z.string().default('') }))
+    .catch([])
+    .default([]),
+});
 const RAISE_STEP = 20;
 
 const now = () => new Date().toISOString();
@@ -65,6 +113,13 @@ export class AssetService {
   /** 每个图像接入点正在画几张（并发按接入点算，跨世界共用）。 */
   private readonly active = new Map<string, number>();
   private readonly retryBaseMs: number;
+  private readonly dataDir: string | undefined;
+  private readonly builtinDir: string | undefined;
+  /** 内置曲库（所有世界共用，读一次）。 */
+  private builtin: BuiltinTrackDef[] = [];
+  private builtinLoad: Promise<void> | null = null;
+  /** 配了音乐职责没有（排队时更新）。 */
+  private musicReady = false;
   private disposed = false;
   private readonly store: WorldStore;
   private readonly settings: SettingsStore;
@@ -75,6 +130,17 @@ export class AssetService {
     this.settings = settings;
     this.gateway = gateway;
     this.retryBaseMs = opts.retryBaseMs ?? 2000;
+    this.dataDir = opts.dataDir;
+    this.builtinDir = opts.builtinBgmDir;
+  }
+
+  /** 内置曲库的曲目（「关于」页列授权用）。 */
+  async builtinTracks(): Promise<BuiltinTrackDef[]> {
+    this.builtinLoad ??= loadBuiltin(this.builtinDir).then((t) => {
+      this.builtin = t;
+    });
+    await this.builtinLoad;
+    return this.builtin;
   }
 
   dispose(): void {
@@ -104,7 +170,9 @@ export class AssetService {
           this.store.readAssetIndex(worldId),
           this.store.readAssetSettings(worldId),
           this.settings.get(),
+          this.builtinTracks(),
         ]);
+        this.musicReady = !!(await this.gateway.musicRoute());
         const settings = mergeAssetSettings(s.assets, patch);
         const w: WorldAssets = {
           id: worldId,
@@ -118,7 +186,12 @@ export class AssetService {
           focus: null,
           listeners: new Set(),
           queue: new SerialQueue(),
+          library: null,
+          classifying: false,
+          bgm: [],
         };
+        await this.syncLibrary(w);
+        w.bgm = this.playlists(w);
         this.worlds.set(worldId, w);
         return w;
       })().finally(() => this.loading.delete(worldId));
@@ -135,6 +208,8 @@ export class AssetService {
     w.patch = patch;
     w.global = s.assets;
     w.settings = mergeAssetSettings(s.assets, patch);
+    this.musicReady = !!(await this.gateway.musicRoute());
+    await this.syncLibrary(w);
     this.replan(w);
     void this.pumpAll();
     return this.viewOf(w);
@@ -147,7 +222,127 @@ export class AssetService {
 
   private replan(w: WorldAssets) {
     w.plan = planAssets(w.world, w.settings, w.index);
+    w.bgm = this.playlists(w);
     this.emit(w);
+  }
+
+  private playlists(w: WorldAssets): MoodPlaylist[] {
+    return resolveBgm({
+      settings: w.settings.bgm,
+      index: w.index,
+      library: w.settings.bgm.sources.includes('library') || Object.values(w.settings.bgm.pins).includes('library') ? (w.library?.tracks ?? []) : [],
+      builtin: this.builtin,
+      modelReady: this.musicReady,
+    });
+  }
+
+  // ───────────── 本地曲库 ─────────────
+
+  /** 曲库文件夹换了（或者还没扫过）就扫一遍。force：重新扫。 */
+  private async syncLibrary(w: WorldAssets, force = false): Promise<void> {
+    const dir = w.settings.bgm.libraryDir.trim();
+    if (!dir) {
+      w.library = null;
+      return;
+    }
+    if (!force && w.library && w.library.dir === path.resolve(dir) && w.library.moods === moodTableKey(w.settings.bgm.moods)) return;
+    const scan = await scanLibrary(dir, w.settings.bgm.moods);
+    w.library = { ...scan, moods: moodTableKey(w.settings.bgm.moods) };
+    await this.applyCachedMoods(w);
+    if (w.settings.bgm.classifyLibrary) void this.classify(w);
+  }
+
+  private cacheFile() {
+    return this.dataDir ? path.join(this.dataDir, 'bgm-library.json') : null;
+  }
+
+  private async readMoodCache(): Promise<LibraryMoodCache> {
+    const f = this.cacheFile();
+    if (!f) return {};
+    try {
+      return LibraryMoodCache.parse(JSON.parse(await fs.readFile(f, 'utf8')));
+    } catch {
+      return {};
+    }
+  }
+
+  private cacheKey(w: WorldAssets) {
+    return `${w.library?.dir ?? ''}|${moodTableKey(w.settings.bgm.moods)}`;
+  }
+
+  /** 之前让文本模型挑过的文件，直接用记下来的结果。 */
+  private async applyCachedMoods(w: WorldAssets): Promise<boolean> {
+    const lib = w.library;
+    if (!lib || !w.settings.bgm.classifyLibrary) return false;
+    const cached = (await this.readMoodCache())[this.cacheKey(w)] ?? {};
+    const ids = new Set(w.settings.bgm.moods.map((m) => m.id));
+    let changed = false;
+    for (const t of lib.tracks) {
+      const m = cached[t.rel];
+      if (t.mood === null && m && ids.has(m)) {
+        t.mood = m;
+        t.by = 'model';
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * 文件夹名和文件名都对不上情绪的曲子，让文本模型按文件名挑（18.7）。每个文件只问一次，结果记在数据目录里。
+   * 没配文本模型就不挑；挑不出来的留着不用。
+   */
+  private async classify(w: WorldAssets): Promise<void> {
+    const lib = w.library;
+    if (!lib || w.classifying || !lib.tracks.some((t) => t.mood === null)) return;
+    // 挑完之前先不让音乐模型生成（挑出来的情绪可能就不用生成了）
+    w.classifying = true;
+    try {
+      const key = this.cacheKey(w);
+      const known = (await this.readMoodCache())[key] ?? {};
+      const todo = lib.tracks.filter((t) => t.mood === null && !(t.rel in known)).slice(0, CLASSIFY_BATCH);
+      if (!todo.length || !(await this.gateway.configured('archivist'))) return;
+      this.emit(w);
+      const moods = w.settings.bgm.moods;
+      const h = await this.gateway.forRole('archivist', 'assets.library');
+      const { value } = await generateJson(this.gateway, h, {
+        system: '你在给视觉小说挑背景音乐。下面是一个音乐文件夹里的文件名（包括子文件夹名），请按名字猜每首曲子适合哪种情绪。只按名字判断，猜不出来就留空。',
+        user: [
+          `# 情绪\n${moods.map((m) => `- ${m.id}（${m.name}）${m.hint ? `：${m.hint}` : ''}`).join('\n')}`,
+          `# 文件\n${todo.map((t, i) => `${i}. ${t.rel}`).join('\n')}`,
+        ].join('\n\n'),
+        spec: {
+          name: 'bgm_moods',
+          schema: ClassifyOut,
+          example: { files: [{ index: 0, mood: '情绪 id；猜不出来就留空' }] },
+        },
+      });
+      const ids = new Set(moods.map((m) => m.id));
+      const picked: Record<string, string | null> = {};
+      for (const [i, t] of todo.entries()) {
+        const m = value.files.find((f) => f.index === i)?.mood.trim() ?? '';
+        picked[t.rel] = ids.has(m) ? m : null;
+      }
+      const latest = await this.readMoodCache();
+      latest[key] = { ...latest[key], ...picked };
+      const f = this.cacheFile();
+      if (f) await writeFileAtomic(f, `${JSON.stringify(latest, null, 2)}\n`);
+      if (w.library === lib) {
+        for (const t of lib.tracks) {
+          const m = picked[t.rel];
+          if (t.mood === null && m) {
+            t.mood = m;
+            t.by = 'model';
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[assets] 让文本模型给曲库挑情绪失败：', err);
+    } finally {
+      w.classifying = false;
+      this.replan(w);
+      void this.pumpAll();
+    }
   }
 
   async view(worldId: string): Promise<AssetsView> {
@@ -197,6 +392,12 @@ export class AssetService {
 
   private enabled(w: WorldAssets, slot: PlannedSlot) {
     if (!w.settings.enabled[slot.toggle]) return false;
+    // BGM：按来源顺序轮到了音乐模型（前面的来源没有这个情绪的曲子）才生成；你点了重新生成也生成
+    if (isMusic(slot)) {
+      // 本地曲库正在按文件名挑情绪：等挑完再定哪些情绪要生成
+      if (!this.musicReady || w.classifying) return false;
+      return !!w.index.slots[slot.id]?.requested || !!w.bgm.find((b) => b.mood === slot.mood)?.wantsModel;
+    }
     // 立绘关掉了：表情差分只有基础立绘已经有了才画
     if (slot.toggle === 'expression' && !w.settings.enabled.sprite) return slot.deps.every((d) => !!w.index.slots[d]?.file);
     return true;
@@ -228,6 +429,7 @@ export class AssetService {
         review: rec?.review ?? null,
         characterId: p.characterId ?? null,
         expression: p.expression ?? null,
+        mood: p.mood ?? null,
         model: rec?.model ?? null,
         revisedPrompt: rec?.revisedPrompt ?? null,
         history: (rec?.history ?? []).map((h) => ({ file: h.file, at: h.at })),
@@ -241,6 +443,16 @@ export class AssetService {
     const counted = slots.filter((s) => s.status !== 'disabled');
     const limit = w.settings.imageCap + w.index.capExtra;
     const pending = this.candidates(w);
+    const images = pending.filter((p) => !isMusic(p));
+    const canWork = !w.index.paused && ((!!r && images.length > 0 && w.index.generated < limit) || (this.musicReady && pending.some(isMusic)));
+    const lib = w.library;
+    const bgm: BgmView = {
+      playlists: w.bgm,
+      named: namedTracks(lib?.tracks ?? [], this.builtin),
+      library: lib ? { dir: lib.dir, tracks: lib.tracks, error: lib.error, truncated: lib.truncated, classifying: w.classifying } : null,
+      builtinCount: this.builtin.length,
+      needsModel: !this.musicReady,
+    };
     return {
       worldId: w.id,
       slots,
@@ -256,10 +468,11 @@ export class AssetService {
       state: {
         needsModel: !r,
         paused: w.index.paused,
-        working: w.running.size > 0 || (!!r && !w.index.paused && pending.length > 0 && w.index.generated < limit),
-        cap: { used: w.index.generated, limit, reached: w.index.generated >= limit && pending.length > 0, action: w.settings.capAction },
+        working: w.running.size > 0 || canWork,
+        cap: { used: w.index.generated, limit, reached: w.index.generated >= limit && images.length > 0, action: w.settings.capAction },
       },
       settings: { world: w.patch, effective: w.settings, global: w.global },
+      bgm,
     };
   }
 
@@ -288,17 +501,26 @@ export class AssetService {
       do {
         this.pumpAgain = false;
         if (this.disposed) return;
-        const route = await this.gateway.imageRoute();
-        if (!route) return;
-        const concurrency = (await this.settings.get()).assets.imageConcurrency;
+        const [image, music, s] = await Promise.all([this.gateway.imageRoute(), this.gateway.musicRoute(), this.settings.get()]);
+        if (this.musicReady !== !!music) {
+          // 音乐职责刚配上（或者清掉了）：哪些情绪要音乐模型生成跟着变
+          this.musicReady = !!music;
+          for (const w of this.worlds.values()) this.replan(w);
+        }
         for (const w of this.worlds.values()) {
           if (w.index.paused) continue;
           const limit = w.settings.imageCap + w.index.capExtra;
           for (const slot of this.candidates(w)) {
-            if ((this.active.get(route.endpointId) ?? 0) >= concurrency) return;
-            // 正在画的也算进上限，免得并发时超出
-            if (w.index.generated + w.running.size >= limit) break;
-            this.start(w, slot, route.endpointId);
+            const route = isMusic(slot) ? music : image;
+            if (!route) continue;
+            // 图像和音乐分开排队，并发按接入点算
+            const key = `${isMusic(slot) ? 'music' : 'image'}:${route.endpointId}`;
+            const concurrency = isMusic(slot) ? s.assets.musicConcurrency : s.assets.imageConcurrency;
+            if ((this.active.get(key) ?? 0) >= concurrency) continue;
+            // 正在画的也算进上限，免得并发时超出（音乐不算张数）
+            const drawing = [...w.running.keys()].filter((id) => !id.startsWith('bgm/')).length;
+            if (!isMusic(slot) && w.index.generated + drawing >= limit) continue;
+            this.start(w, slot, key);
           }
         }
       } while (this.pumpAgain);
@@ -327,8 +549,8 @@ export class AssetService {
   }
 
   /** 同样的输入已经画过（比如重画之后又改回原来的参数）：直接用原来的文件，不花钱（18.3）。 */
-  private async cached(w: WorldAssets, base: string): Promise<string | null> {
-    for (const ext of Object.values(IMAGE_EXT)) {
+  private async cached(w: WorldAssets, base: string, exts: readonly string[] = Object.values(IMAGE_EXT)): Promise<string | null> {
+    for (const ext of exts) {
       const rel = `${base}.${ext}`;
       try {
         await fs.access(this.store.assetPath(w.id, rel));
@@ -341,6 +563,7 @@ export class AssetService {
   }
 
   private async produce(w: WorldAssets, slot: PlannedSlot, signal: AbortSignal): Promise<void> {
+    if (isMusic(slot)) return this.produceMusic(w, slot, signal);
     const input = inputHashOf(slot, w.index);
     const base = this.fileBase(slot, input);
     const hit = await this.cached(w, base);
@@ -415,6 +638,34 @@ export class AssetService {
     }
   }
 
+  /** BGM：用音乐模型生成这个情绪的一首纯音乐（18.7）。 */
+  private async produceMusic(w: WorldAssets, slot: PlannedSlot, signal: AbortSignal): Promise<void> {
+    const input = inputHashOf(slot, w.index);
+    const base = this.fileBase(slot, input);
+    const hit = await this.cached(w, base, Object.values(AUDIO_EXT));
+    if (hit) {
+      if (!signal.aborted) await this.commit(w, slot, input, { file: hit });
+      return;
+    }
+    let h: MusicHandle;
+    try {
+      h = await this.gateway.forMusic('assets.bgm');
+    } catch {
+      return; // 职责在排队期间被清掉了
+    }
+    const r = await this.withRetries(w, signal, (sig) =>
+      h.client.generate({ model: h.model, prompt: slot.params.prompt, instrumental: true }, sig),
+    );
+    if (!r) return;
+    if ('error' in r) {
+      await this.fail(w, slot, input, r.error);
+      return;
+    }
+    const rel = `${base}.${AUDIO_EXT[r.mime] ?? 'mp3'}`;
+    await writeFileAtomic(this.store.assetPath(w.id, rel), r.data);
+    if (!signal.aborted) await this.commit(w, slot, input, { file: rel, generated: { model: h.model, revisedPrompt: null, count: 1 } });
+  }
+
   /** 调一次图像接口（失败按设置退避重试）。返回 null 表示中止了。 */
   private async call(
     w: WorldAssets,
@@ -423,14 +674,23 @@ export class AssetService {
     reference: { data: Uint8Array; mime: string } | undefined,
     signal: AbortSignal,
   ): Promise<ImageResult | { error: string } | null> {
-    const retries = w.settings.retries;
     const transparent = slot.params.transparency === 'auto' || slot.params.transparency === 'native';
     const req = { model: h.model, prompt: slot.params.prompt, size: slot.params.size, transparent };
+    return this.withRetries(w, signal, (sig) => (reference ? h.client.edit({ ...req, image: reference }, sig) : h.client.generate(req, sig)));
+  }
+
+  /** 失败按设置退避重试。返回 null 表示中止了。 */
+  private async withRetries<T extends ImageResult | MusicResult>(
+    w: WorldAssets,
+    signal: AbortSignal,
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T | { error: string } | null> {
+    const retries = w.settings.retries;
     let lastErr: unknown;
     for (let attempt = 0; attempt <= retries; attempt++) {
       if (signal.aborted) return null;
       try {
-        return reference ? await h.client.edit({ ...req, image: reference }, signal) : await h.client.generate(req, signal);
+        return await run(signal);
       } catch (err) {
         if (signal.aborted || (err instanceof ProviderError && err.aborted)) return null;
         lastErr = err;
@@ -519,7 +779,8 @@ export class AssetService {
         rec.model = o.generated.model;
         if (o.generated.revisedPrompt) rec.revisedPrompt = o.generated.revisedPrompt;
         else delete rec.revisedPrompt;
-        idx.generated += o.generated.count;
+        if (isMusic(slot)) idx.music += o.generated.count;
+        else idx.generated += o.generated.count;
       }
       rec.updatedAt = now();
     });
@@ -614,15 +875,18 @@ export class AssetService {
   async upload(worldId: string, slotId: string, src: string): Promise<AssetsView> {
     const w = await this.load(worldId);
     const slot = this.slot(w, slotId);
-    if (!path.isAbsolute(src)) throw new Error('请给出图片的完整路径');
+    const music = isMusic(slot);
+    if (!path.isAbsolute(src)) throw new Error(`请给出${music ? '音频文件' : '图片'}的完整路径`);
     const stat = await fs.stat(src);
     if (!stat.isFile()) throw new Error('这不是一个文件');
-    if (stat.size > UPLOAD_LIMIT) throw new Error('图片太大了（超过 30 MB）');
+    if (!music && stat.size > UPLOAD_LIMIT) throw new Error('图片太大了（超过 30 MB）');
+    if (music && stat.size > AUDIO_UPLOAD_LIMIT) throw new Error('音频文件太大了（超过 200 MB）');
     const data = await fs.readFile(src);
-    const mime = sniffImage(data);
-    if (!mime) throw new Error('只支持 PNG、JPEG、WebP 图片');
+    const mime = music ? sniffAudio(data) : sniffImage(data);
+    if (!mime) throw new Error(music ? '只支持 MP3、Ogg、WAV、FLAC、M4A 音频' : '只支持 PNG、JPEG、WebP 图片');
     const sum = createHash('sha256').update(data).digest('hex').slice(0, 12);
-    const rel = `assets/uploads/${slot.dir}-${slot.slug}-${sum}.${IMAGE_EXT[mime]}`;
+    const ext = music ? (/\.opus$/i.test(src) ? 'opus' : AUDIO_EXT[mime]) : IMAGE_EXT[mime];
+    const rel = `assets/uploads/${slot.dir}-${slot.slug}-${sum}.${ext}`;
     await writeFileAtomic(this.store.assetPath(w.id, rel), data);
     w.running.get(slotId)?.abort();
     await this.mutate(w, (idx) => {
@@ -647,6 +911,12 @@ export class AssetService {
 
   async control(worldId: string, action: AssetsControl): Promise<AssetsView> {
     const w = await this.load(worldId);
+    if (action === 'rescanLibrary') {
+      await this.syncLibrary(w, true);
+      this.replan(w);
+      void this.pumpAll();
+      return this.viewOf(w);
+    }
     if (action === 'cleanOrphans') {
       const planned = new Set(w.plan.map((p) => p.id));
       const gone = Object.values(w.index.slots).filter((r) => !planned.has(r.id));
