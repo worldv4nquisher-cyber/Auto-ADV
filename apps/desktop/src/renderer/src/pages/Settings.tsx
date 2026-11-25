@@ -937,7 +937,7 @@ function BuiltinBgmCard() {
   const [tracks, setTracks] = useState<BuiltinTrackInfo[] | null>(null);
   useEffect(() => {
     void engine
-      .call('builtinBgm', undefined)
+      .call('builtinBgm')
       .then(setTracks)
       .catch(() => setTracks([]));
   }, []);
