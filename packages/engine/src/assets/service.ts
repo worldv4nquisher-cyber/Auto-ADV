@@ -124,6 +124,8 @@ export class AssetService {
   private readonly store: WorldStore;
   private readonly settings: SettingsStore;
   private readonly gateway: ModelGateway;
+  /** 世界或设置改了（refresh）时通知别的服务（语音的配音表要重算）。 */
+  onRefresh: ((worldId: string) => void) | null = null;
 
   constructor(store: WorldStore, settings: SettingsStore, gateway: ModelGateway, opts: AssetServiceOptions = {}) {
     this.store = store;
@@ -202,6 +204,7 @@ export class AssetService {
 
   /** 重新读世界和设置、重算素材清单（世界改过、创世写了新的一步、设置改了之后调用），然后接着排队。 */
   async refresh(worldId: string): Promise<AssetsView> {
+    this.onRefresh?.(worldId);
     const w = await this.load(worldId);
     const [world, patch, s] = await Promise.all([this.store.load(worldId), this.store.readAssetSettings(worldId), this.settings.get()]);
     w.world = world;

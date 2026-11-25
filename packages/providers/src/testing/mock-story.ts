@@ -324,6 +324,22 @@ export function storyReply(info: MockRequestInfo): string | undefined {
       const files = [...lastUser.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
       return JSON.stringify({ files: files.map((index) => ({ index, mood: ids[index % Math.max(1, ids.length)] ?? '' })) });
     }
+    case 'voice_cast': {
+      // 分配音色：按性别挑描述里有"女声 / 男声"的，主要角色不重复
+      const section = (title: string) => lastUser.split(/^# /m).find((b) => b.startsWith(title)) ?? '';
+      const rows = (block: string) => [...block.matchAll(/^- ([^｜\n]+)｜([^\n]*)$/gm)].map((m) => [m[1] as string, m[2] as string] as const);
+      const chars = rows(section('要挑音色的角色'));
+      const voices = rows(section('音色表'));
+      const used = new Set<string>();
+      const out = chars.map(([id, rest]) => {
+        const female = /｜女/.test(`｜${rest}`);
+        const want = female ? '女声' : '男声';
+        const v = voices.find(([vid, d]) => d.includes(want) && !used.has(vid)) ?? voices.find(([vid]) => !used.has(vid)) ?? voices[0];
+        if (v) used.add(v[0]);
+        return { characterId: id, voiceId: v?.[0] ?? '' };
+      });
+      return JSON.stringify({ voices: out });
+    }
     case 'director_plan':
       return directorPlan(lastUser, info.count);
     case 'adv_beat':

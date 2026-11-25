@@ -1,15 +1,17 @@
 /**
  * 素材页（18.3）：世界的每个素材槽、生成进度，重抽、锁定、改提示词、换成自己的图；这个世界的素材设置（18.11）。
  * 立绘按角色分组，每个角色可以单独选要画哪些表情（18.5）。BGM 按情绪列出现在放什么、从哪个来源来（18.7）。
+ * 配音表列出每个角色的音色，可以试听、换、单独关掉（18.8）。
  */
-import type { AssetAction, AssetSlotView, AssetsControl, AssetsView, MoodPlaylist } from '@auto-adv/engine/api';
+import type { AssetAction, AssetSlotView, AssetsControl, AssetsView, MoodPlaylist, VoiceCastView, VoiceLineParams } from '@auto-adv/engine/api';
 import { type AssetSettings, type AssetSettingsPatch, BGM_SOURCE_LABELS, BGM_SOURCES, type BgmSource } from '@auto-adv/schema';
-import { type ReactNode, useEffect, useState } from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { hueOf, PlaceholderBg, PlaceholderSprite } from '../components/placeholder.tsx';
 import { Badge, Button, Card, ConfirmButton, cx, Empty, Spinner, Textarea, useToast } from '../components/ui.tsx';
 import { assetUrl, bgmUrl, useAssetsContext } from '../lib/assets.tsx';
 import { engine, errorMessage } from '../lib/engine.ts';
 import { useRouter } from '../lib/router.tsx';
+import { useSettings } from '../lib/settings.tsx';
 import { AssetSettingsForm } from './AssetSettingsForm.tsx';
 
 const STATUS: Record<AssetSlotView['status'], { text: string; tone: 'neutral' | 'ok' | 'warn' | 'err' | 'accent' }> = {
@@ -135,6 +137,8 @@ export function AssetsTab({ worldId }: { worldId: string }) {
         ),
       )}
 
+      <VoiceSection worldId={worldId} view={view} />
+
       <WorldAssetSettings worldId={worldId} view={view} />
 
       {viewing && (
@@ -210,7 +214,9 @@ function CharacterExpressions({ worldId, characterId, current, view }: { worldId
     setBusy(true);
     try {
       const characters = { ...view.settings.world.characters };
-      if (list) characters[characterId] = { ...characters[characterId], expressions: list };
+      const { expressions: _was, ...other } = characters[characterId] ?? {};
+      if (list) characters[characterId] = { ...other, expressions: list };
+      else if (Object.keys(other).length) characters[characterId] = other;
       else delete characters[characterId];
       const { characters: _old, ...rest } = view.settings.world;
       await engine.call('saveWorldAssetSettings', {
@@ -682,6 +688,193 @@ function MoodRow({ worldId, playlist: p, slot, view }: { worldId: string; playli
         </div>
       )}
     </Card>
+  );
+}
+
+/** 配音表（18.8）：每个角色的音色、配不配，旁白和临时人物的音色。换了音色就锁定，不会被重新分配改掉。 */
+function VoiceSection({ worldId, view }: { worldId: string; view: AssetsView }) {
+  const toast = useToast();
+  const { navigate } = useRouter();
+  const { settings } = useSettings();
+  const eff = view.settings.effective;
+  const route = settings?.media.voice ?? null;
+  const key = JSON.stringify([eff.enabled.voice, eff.voice, eff.characters, route]);
+  const [cast, setCast] = useState<VoiceCastView | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<string | null>(null);
+  const audio = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    engine
+      .call('voiceCast', { worldId })
+      .then((v) => alive && setCast(v))
+      .catch((err) => alive && toast('err', errorMessage(err)))
+      .finally(() => alive && setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, [worldId, key]);
+  useEffect(() => () => audio.current?.pause(), []);
+
+  const run = async (id: string, fn: () => Promise<VoiceCastView | void>, ok?: string) => {
+    setBusy(id);
+    try {
+      const v = await fn();
+      if (v) setCast(v);
+      if (ok) toast('ok', ok);
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const patchWorld = (fn: (w: AssetSettingsPatch) => AssetSettingsPatch) =>
+    engine.call('saveWorldAssetSettings', { worldId, patch: fn(view.settings.world) }).then(() => undefined);
+  const setEnabled = (id: string, role: string, on: boolean) =>
+    run(`enable:${id}`, () =>
+      patchWorld((w) => {
+        const characters = { ...w.characters };
+        const { voice: _was, ...entry } = characters[id] ?? {};
+        const def = role === 'protagonist' ? eff.voice.protagonist : true;
+        if (on !== def) characters[id] = { ...entry, voice: on };
+        else if (Object.keys(entry).length) characters[id] = entry;
+        else delete characters[id];
+        const { characters: _old, ...rest } = w;
+        return Object.keys(characters).length ? { ...rest, characters } : rest;
+      }),
+    );
+  const setVoiceSetting = (k: 'narrator' | 'narratorVoice' | 'extraVoice', v: boolean | string) =>
+    run(`set:${k}`, () => patchWorld((w) => ({ ...w, voice: { ...w.voice, [k]: v } })));
+
+  const preview = (id: string, line: VoiceLineParams) =>
+    run(`preview:${id}`, async () => {
+      const r = await engine.call('voiceLine', { worldId, line });
+      if (!r) throw new Error('这句没法念');
+      audio.current?.pause();
+      const el = new Audio(assetUrl(worldId, r.file));
+      el.volume = eff.voice.volume / 100;
+      audio.current = el;
+      setPlaying(id);
+      el.onended = () => setPlaying((p) => (p === id ? null : p));
+      await el.play().catch(() => setPlaying(null));
+    });
+
+  const voices = cast?.voices ?? [];
+  const nameOf = (id: string | null) => (id ? (voices.find((v) => v.id === id)?.name || id) : '—');
+  const descOf = (id: string | null) => (id ? (voices.find((v) => v.id === id)?.description ?? '') : '');
+  const voiceSelect = (value: string, onChange: (v: string) => void, testId: string, auto = '自动') => (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={!cast?.ready || !!busy}
+      className="h-8 w-48 rounded-md border border-line bg-panel-2 px-2 text-xs text-fg disabled:opacity-50"
+      data-testid={testId}
+    >
+      <option value="">{auto}</option>
+      {voices.map((v) => (
+        <option key={v.id} value={v.id} title={v.description}>
+          {v.name || v.id}
+        </option>
+      ))}
+    </select>
+  );
+  const previewButton = (id: string, line: VoiceLineParams, voiceId: string | null) => (
+    <Button
+      size="sm"
+      variant="ghost"
+      disabled={!cast?.ready || !voiceId || (!!busy && busy !== `preview:${id}`)}
+      loading={busy === `preview:${id}`}
+      onClick={() => voiceId && void preview(id, { ...line, voiceId })}
+      data-testid="voice-preview"
+      data-char={id}
+    >
+      {playing === id ? '▶ 在放' : '试听'}
+    </Button>
+  );
+
+  return (
+    <section className="space-y-2" data-testid="asset-voice">
+      <div className="flex items-center gap-2">
+        <h3 className="text-sm font-medium text-muted">配音</h3>
+        {loading && <Spinner />}
+        {cast?.ready && (
+          <div className="ml-auto">
+            <ConfirmButton
+              variant="ghost"
+              disabled={!!busy}
+              confirmText="没锁定的角色全部重新挑？"
+              onConfirm={() => void run('recast', () => engine.call('recastVoices', { worldId }), '重新分配好了')}
+              testId="voice-recast"
+            >
+              重新分配音色
+            </ConfirmButton>
+          </div>
+        )}
+      </div>
+      {cast && !cast.ready && (
+        <Notice tone="neutral" testId="voice-reason">
+          {cast.reason ?? '还不能配音'}
+          {!route && (
+            <button type="button" className="ml-1 underline" onClick={() => navigate({ page: 'settings' })}>
+              到设置里配一个
+            </button>
+          )}
+        </Notice>
+      )}
+      {cast?.note && <p className="text-xs text-warn" data-testid="voice-note">{cast.note}</p>}
+      {cast && (
+        <Card className="divide-y divide-line p-0 text-sm">
+          {cast.characters.map((c) => (
+            <div key={c.id} className="flex items-center gap-3 px-3 py-2" data-testid="voice-row" data-char={c.id} data-voice={c.voiceId ?? ''}>
+              <label className="flex w-36 shrink-0 items-center gap-2" title="这个角色配不配音">
+                <input
+                  type="checkbox"
+                  checked={c.enabled}
+                  disabled={!!busy}
+                  onChange={(e) => void setEnabled(c.id, c.role, e.target.checked)}
+                  data-testid="voice-enabled"
+                />
+                <span className="truncate">{c.name}</span>
+              </label>
+              {voiceSelect(c.locked ? (c.voiceId ?? '') : '', (v) => void run(`voice:${c.id}`, () => engine.call('setCharacterVoice', { worldId, characterId: c.id, voiceId: v || null })), 'voice-select', c.voiceId && !c.locked ? `自动：${nameOf(c.voiceId)}` : '自动')}
+              {c.locked && <span className="text-xs text-faint" title="自己选的，重新分配时不会改">🔒</span>}
+              <span className="min-w-0 flex-1 truncate text-xs text-faint" title={descOf(c.voiceId)}>
+                {descOf(c.voiceId)}
+              </span>
+              {previewButton(c.id, { speaker: { characterId: c.id, name: c.name }, kind: 'say', text: `你好，我是${c.name}。` }, c.voiceId)}
+            </div>
+          ))}
+          <div className="flex items-center gap-3 px-3 py-2" data-testid="voice-row" data-char="narrator" data-voice={cast.narrator.voiceId ?? ''}>
+            <label className="flex w-36 shrink-0 items-center gap-2">
+              <input
+                type="checkbox"
+                checked={cast.narrator.enabled}
+                disabled={!!busy}
+                onChange={(e) => void setVoiceSetting('narrator', e.target.checked)}
+                data-testid="voice-narrator-enabled"
+              />
+              <span className="text-muted">旁白</span>
+            </label>
+            {voiceSelect(eff.voice.narratorVoice, (v) => void setVoiceSetting('narratorVoice', v), 'voice-narrator-select', `自动：${nameOf(cast.narrator.voiceId)}`)}
+            <span className="min-w-0 flex-1 truncate text-xs text-faint">{descOf(cast.narrator.voiceId)}</span>
+            {previewButton('narrator', { speaker: null, kind: 'narrate', text: '夜色渐深，街上的灯一盏一盏亮了起来。' }, cast.narrator.voiceId)}
+          </div>
+          <div className="flex items-center gap-3 px-3 py-2" data-testid="voice-row" data-char="extra" data-voice={cast.extra.voiceId ?? ''}>
+            <span className="w-36 shrink-0 pl-6 text-muted" title="AI 演出时临时出场、世界里没有的人物">临时人物</span>
+            {voiceSelect(eff.voice.extraVoice, (v) => void setVoiceSetting('extraVoice', v), 'voice-extra-select', `自动：${nameOf(cast.extra.voiceId)}`)}
+            <span className="min-w-0 flex-1 truncate text-xs text-faint">{descOf(cast.extra.voiceId)}</span>
+            {previewButton('extra', { speaker: { characterId: null, name: '路人' }, kind: 'say', text: '喂，你也是来这里找人的吗？' }, cast.extra.voiceId)}
+          </div>
+        </Card>
+      )}
+      <p className="text-[11px] text-faint">
+        音色第一次用到时由文本模型按角色的性别、年龄、性格挑，主要角色互不重复；换了的会锁定（🔒），选「自动」解除。念过的句子存在世界里，回想、读档不用再生成。
+        语速、音量、谁配音的默认值在下面「这个世界的素材设置」的语音里。
+      </p>
+    </section>
   );
 }
 

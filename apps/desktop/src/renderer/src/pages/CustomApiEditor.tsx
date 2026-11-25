@@ -5,7 +5,9 @@ import {
   CUSTOM_METHODS,
   type CustomApi,
   type CustomOperation,
+  type CustomRole,
   checkCustomApi,
+  customVarsOf,
 } from '@auto-adv/schema';
 import { useEffect, useState } from 'react';
 import { Button, cx, Input, Select, Textarea } from '../components/ui.tsx';
@@ -15,7 +17,7 @@ import { Button, cx, Input, Select, Textarea } from '../components/ui.tsx';
  * 图像多一个「改图」请求（表情差分用）。写法见 @auto-adv/schema 的 custom-api.ts。
  */
 
-export type CustomRole = 'image' | 'cutout' | 'music';
+export type { CustomRole };
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
@@ -33,7 +35,7 @@ const ENCODING_LABELS: Record<(typeof CUSTOM_ENCODINGS)[number], string> = {
   url: '链接（下载）',
 };
 
-const MAIN_LABEL: Record<CustomRole, string> = { image: '文生图请求', cutout: '抠图请求', music: '音乐请求' };
+const MAIN_LABEL: Record<CustomRole, string> = { image: '文生图请求', cutout: '抠图请求', music: '音乐请求', voice: '语音请求' };
 
 export function CustomApiEditor({
   role,
@@ -45,7 +47,7 @@ export function CustomApiEditor({
   onChange: (v: CustomApi) => void;
 }) {
   const problem = checkCustomApi(value, role);
-  const mainVars = [...CUSTOM_API_VARS.common, ...(role === 'image' ? CUSTOM_API_VARS.image : role === 'cutout' ? CUSTOM_API_VARS.cutout : CUSTOM_API_VARS.music)];
+  const mainVars = customVarsOf(role);
   const editVars = [...CUSTOM_API_VARS.common, ...CUSTOM_API_VARS.image, ...CUSTOM_API_VARS.imageEdit];
   return (
     <div className="mt-3 space-y-3 border-t border-line pt-3" data-testid={`custom-api-${role}`}>

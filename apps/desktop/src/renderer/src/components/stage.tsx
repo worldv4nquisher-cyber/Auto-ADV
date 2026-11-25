@@ -20,12 +20,15 @@ export const textLength = (step: StageStep | undefined) => (step?.kind === 'text
 /**
  * 打字机：stepKey 换了就从头逐字显示，cps 是每秒几个字。instant 或 cps ≤ 0 时直接显示完整；
  * 已经打完的一步回来时不再重打。complete() 跳过打字；forget() 忘掉打完的记录（读档后重新打）。
+ * hold 为 true 时先不打（配音还在生成），放开后才开始；速度在开始打的那一刻定下（打到一半语音到了也不重打）。
  */
-export function useTyping(stepKey: string, len: number, cps: number, instant: boolean) {
+export function useTyping(stepKey: string, len: number, cps: number, instant: boolean, hold = false) {
   // 打到第几个字，连同是哪一步的：换了一步、effect 还没跑的那一次渲染也不会把上一步的"打完了"算到这一步上
   const [st, setSt] = useState({ key: '', n: LONG });
   const doneKey = useRef('');
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rate = useRef(cps);
+  rate.current = cps;
   const skip = instant || cps <= 0;
   useEffect(() => {
     if (!len) return;
@@ -35,6 +38,7 @@ export function useTyping(stepKey: string, len: number, cps: number, instant: bo
       return;
     }
     setSt({ key: stepKey, n: 0 });
+    if (hold) return;
     let i = 0;
     const t = setInterval(() => {
       i += 1;
@@ -43,10 +47,10 @@ export function useTyping(stepKey: string, len: number, cps: number, instant: bo
         clearInterval(t);
         doneKey.current = stepKey;
       }
-    }, 1000 / cps);
+    }, 1000 / rate.current);
     timer.current = t;
     return () => clearInterval(t);
-  }, [stepKey, skip, cps]);
+  }, [stepKey, skip, hold]);
   const shown = st.key === stepKey ? st.n : skip || doneKey.current === stepKey ? LONG : 0;
   return {
     shown,
@@ -164,7 +168,6 @@ function SpriteImage({
   );
 }
 
-/** 音效、语音、视频、特效的提示（素材还没有）。 */
 /** 舞台顶部的素材进度（18.3）："素材 12 / 30"，点开是世界页的素材标签。画完了就不显示。 */
 export function AssetProgress({ p }: { p: string }) {
   const ctx = useAssetsContext();
@@ -191,6 +194,7 @@ export function AssetProgress({ p }: { p: string }) {
   );
 }
 
+/** 剧本里写的音效、语音文件、视频、特效的提示（这些素材还没有）。 */
 export function CueTags({ step, stepKey }: { step: StageStep | undefined; stepKey: string }) {
   return (
     <>
@@ -384,6 +388,7 @@ export function Backlog({
   colorOf,
   busy,
   onRewind,
+  voice,
 }: {
   p: string;
   timeline: Timeline;
@@ -392,6 +397,8 @@ export function Backlog({
   busy: boolean;
   /** 选择旁边的"回到这里重新选"；不给就不显示。 */
   onRewind?: (eventId: string) => void;
+  /** 台词旁边的重播配音（这一步配音才显示）。 */
+  voice?: { voiced: (step: StageStep | undefined) => boolean; replay: (step: StageStep | undefined) => void };
 }) {
   const end = useRef<HTMLDivElement>(null);
   // 新版 Chromium 的 scrollIntoView 返回 Promise，不能直接当作 effect 的返回值（React 会把它当清理函数调用）
@@ -440,6 +447,7 @@ export function Backlog({
           );
         }
         const t = b.text;
+        const at = timeline.steps[b.step];
         return (
           <div key={i}>
             {t.speaker && (
@@ -448,6 +456,17 @@ export function Backlog({
               </div>
             )}
             <p className={cx(t.kind === 'narrate' && 'text-muted', t.kind === 'think' && 'text-[#c7c2ff]/90')}>
+              {voice?.voiced(at) && (
+                <button
+                  type="button"
+                  title="重播语音"
+                  data-testid={`${p}-backlog-voice`}
+                  className="mr-1.5 rounded px-1 text-xs text-faint hover:bg-white/10 hover:text-fg"
+                  onClick={() => voice.replay(at)}
+                >
+                  🔊
+                </button>
+              )}
               {t.kind === 'think' ? `（${t.text}）` : t.kind === 'say' ? `「${t.text}」` : t.text}
             </p>
           </div>

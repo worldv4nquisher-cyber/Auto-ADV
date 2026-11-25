@@ -197,9 +197,52 @@ export const BgmSettings = z.object({
 });
 export type BgmSettings = z.infer<typeof BgmSettings>;
 
-/** 世界里单个角色的立绘设置（素材页上改）：expressions 这个角色画哪些表情，不写就按角色类型。 */
+/** 音色表里的一个音色：id 是语音接口认的音色 id，name 和 description 给人和分配音色的模型看（性别、年龄、声音特点）。 */
+export const VoiceDef = z.object({
+  id: z.string().trim().min(1, '音色要有 id'),
+  name: z.string().default(''),
+  description: z.string().default(''),
+});
+export type VoiceDef = z.infer<typeof VoiceDef>;
+
+/** 表情 → 语音的情绪（MiniMax 的 emotion；自定义接口用 {{emotion}}）。没写的表情不传情绪，让服务自己判断。 */
+export const DEFAULT_VOICE_EMOTIONS: Record<string, string> = {
+  smile: 'happy',
+  angry: 'angry',
+  sad: 'sad',
+  surprised: 'surprised',
+};
+
+/** 语音的设置（18.8、18.11）。总开关是 enabled.voice。 */
+export const VoiceSettings = z.object({
+  /** 主角（role 是 protagonist 的角色）配不配。 */
+  protagonist: z.boolean().default(false),
+  /** 旁白配不配。 */
+  narrator: z.boolean().default(false),
+  /** 旁白的音色 id；空字符串表示自动挑一个没分给角色的。 */
+  narratorVoice: z.string().default(''),
+  /** 世界里没有的临时人物用的音色 id；空字符串表示自动挑一个没分给主要角色的。 */
+  extraVoice: z.string().default(''),
+  /** 语速，1 是正常。 */
+  speed: z.number().min(0.5).max(2).default(1),
+  /** 音量，0～100。 */
+  volume: z.number().int().min(0).max(100).default(80),
+  /** 提前生成接下来几句。 */
+  prefetch: z.number().int().min(0).max(5).default(2),
+  /** 按台词的表情传情绪。 */
+  emotion: z.boolean().default(true),
+  /** 表情 id → 情绪。 */
+  emotions: z.record(z.string(), z.string()).default(DEFAULT_VOICE_EMOTIONS),
+});
+export type VoiceSettings = z.infer<typeof VoiceSettings>;
+
+/**
+ * 世界里单个角色的素材设置（素材页上改）：expressions 这个角色画哪些表情，不写就按角色类型；
+ * voice 这个角色配不配音（不写就按语音设置：主角看 protagonist，其他角色配）。
+ */
 export const CharacterAssetSettings = z.object({
   expressions: z.array(ExpressionId).optional(),
+  voice: z.boolean().optional(),
 });
 export type CharacterAssetSettings = z.infer<typeof CharacterAssetSettings>;
 
@@ -259,10 +302,14 @@ export const AssetSettings = z.object({
   characters: z.record(z.string(), CharacterAssetSettings).default({}),
   /** BGM（18.7）。 */
   bgm: BgmSettings.prefault({}),
+  /** 语音（18.8）。 */
+  voice: VoiceSettings.prefault({}),
   /** 同一个图像接入点同时画几张。 */
   imageConcurrency: z.number().int().min(1).max(16).default(2),
   /** 同一个音乐接入点同时生成几首。 */
   musicConcurrency: z.number().int().min(1).max(8).default(1),
+  /** 同时生成几句语音（所有世界共用）。 */
+  voiceConcurrency: z.number().int().min(1).max(8).default(3),
   /** 一张图失败后重试几次（按指数退避）。 */
   retries: z.number().int().min(0).max(10).default(3),
 });
@@ -297,6 +344,20 @@ export const AssetSettingsPatch = z.object({
     })
     .partial()
     .optional(),
+  voice: z
+    .object({
+      protagonist: z.boolean(),
+      narrator: z.boolean(),
+      narratorVoice: z.string(),
+      extraVoice: z.string(),
+      speed: z.number().min(0.5).max(2),
+      volume: z.number().int().min(0).max(100),
+      prefetch: z.number().int().min(0).max(5),
+      emotion: z.boolean(),
+      emotions: z.record(z.string(), z.string()),
+    })
+    .partial()
+    .optional(),
 });
 export type AssetSettingsPatch = z.infer<typeof AssetSettingsPatch>;
 
@@ -318,6 +379,7 @@ export function mergeAssetSettings(base: AssetSettings, patch: AssetSettingsPatc
     spriteSets: { ...base.spriteSets, ...patch.spriteSets },
     characters: { ...base.characters, ...patch.characters },
     bgm: { ...base.bgm, ...patch.bgm },
+    voice: { ...base.voice, ...patch.voice },
   });
 }
 
@@ -380,23 +442,26 @@ export const AssetIndex = z.object({
 });
 export type AssetIndex = z.infer<typeof AssetIndex>;
 
-/** 媒体职责（图像、抠图、音乐）的路由：用哪个接入点、哪个模型、什么接口。 */
+/** 媒体职责（图像、抠图、音乐、语音）的路由：用哪个接入点、哪个模型、什么接口。 */
 export const MediaRoute = z.object({
   endpointId: z.string(),
   model: z.string(),
   /**
    * 接口类型。openai：/images/generations 和 /images/edits（图像）；
    * rembg：POST <地址>/api/remove，multipart 上传 file，返回抠好的 PNG（抠图，rembg 自带的 HTTP 服务就是这样）；
-   * minimax：POST <Base URL>/music_generation（音乐，MiniMax 的接口，和文本接口用同一个 Base URL 和密钥）；
+   * minimax：POST <Base URL>/music_generation（音乐）、POST <Base URL>/t2a_v2（语音），MiniMax 的接口，和文本接口用同一个 Base URL 和密钥；
+   * openai 用在语音上是 POST <Base URL>/audio/speech；
    * custom：自定义接口，按 custom 里写的请求模板发（通用 HTTP 适配器）。
    */
   api: z.enum(['openai', 'rembg', 'minimax', 'custom']).default('openai'),
   /** api 为 custom 时的请求模板。 */
   custom: CustomApi.optional(),
+  /** 语音职责的音色表：分配音色时从这里挑（MiniMax 可以从服务拉取，OpenAI 有固定的一套，自定义接口自己写）。 */
+  voices: z.array(VoiceDef).optional(),
 });
 export type MediaRoute = z.infer<typeof MediaRoute>;
 
-export const MEDIA_ROLE_IDS = ['image', 'cutout', 'music'] as const;
+export const MEDIA_ROLE_IDS = ['image', 'cutout', 'music', 'voice'] as const;
 export const MediaRoleId = z.enum(MEDIA_ROLE_IDS);
 export type MediaRoleId = z.infer<typeof MediaRoleId>;
 
@@ -404,6 +469,7 @@ export const MEDIA_ROLE_LABELS: Record<MediaRoleId, { name: string; hint: string
   image: { name: '图像', hint: '背景、立绘、CG。不会用「默认」的文本模型' },
   cutout: { name: '抠图', hint: '立绘的透明背景选「抠图服务」时用，例如本地的 rembg' },
   music: { name: '音乐', hint: 'BGM 的「音乐模型」来源，每种情绪生成一首纯音乐' },
+  voice: { name: '语音', hint: '角色台词配音（TTS），每个角色固定一个音色' },
 };
 
 /** 每个媒体职责能用的接口类型。 */
@@ -411,4 +477,17 @@ export const MEDIA_ROLE_APIS: Record<MediaRoleId, MediaRoute['api'][]> = {
   image: ['openai', 'custom'],
   cutout: ['rembg', 'custom'],
   music: ['minimax', 'custom'],
+  voice: ['openai', 'minimax', 'custom'],
 };
+
+/**
+ * 一个世界的配音表（assets/voices.json）：每个角色用哪个音色。
+ * provider 是分配时的语音服务（接入点 + 接口类型）：换了服务，音色 id 对不上，没锁定的重新分配。
+ * locked 是你在素材页里自己选的，不会被自动改掉。
+ */
+export const VoiceCast = z.object({
+  formatVersion: z.number().int().default(FORMAT_VERSION),
+  provider: z.string().default(''),
+  characters: z.record(z.string(), z.object({ voiceId: z.string(), locked: z.boolean().default(false) })).default({}),
+});
+export type VoiceCast = z.infer<typeof VoiceCast>;

@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /**
  * 自定义接口（通用 HTTP 适配器，ARCHITECTURE.md 19.4）：内置的接口类型不认识的服务，
- * 自己写请求模板、再说明结果在响应的哪里。图像、抠图、音乐职责都能选。
+ * 自己写请求模板、再说明结果在响应的哪里。图像、抠图、音乐、语音职责都能选。
  *
  * 模板里用 {{占位符}}：
  * - 地址、请求头、表单字段里的占位符换成文字；
@@ -65,7 +65,7 @@ export const CustomOperation = CustomRequest.extend({
 });
 export type CustomOperation = z.infer<typeof CustomOperation>;
 
-/** 一个媒体职责的自定义接口。request 是主要的操作（文生图、抠图、生成音乐），edit 只有图像用（表情差分的改图）。 */
+/** 一个媒体职责的自定义接口。request 是主要的操作（文生图、抠图、生成音乐、说一句话），edit 只有图像用（表情差分的改图）。 */
 export const CustomApi = z.object({
   request: CustomOperation,
   edit: CustomOperation.optional(),
@@ -79,8 +79,27 @@ export const CUSTOM_API_VARS = {
   imageEdit: ['image', 'image_base64', 'image_data_url', 'image_mime'],
   cutout: ['image', 'image_base64', 'image_data_url', 'image_mime'],
   music: ['prompt', 'instrumental', 'lyrics'],
+  /** text 要说的话；voice 音色 id；speed 语速（1 是正常）；emotion 情绪（没有时是空的）。 */
+  voice: ['text', 'voice', 'speed', 'emotion'],
   poll: ['id'],
 } as const;
+
+/** 能选自定义接口的职责。 */
+export type CustomRole = 'image' | 'cutout' | 'music' | 'voice';
+
+const ROLE_VARS: Record<CustomRole, readonly string[]> = {
+  image: CUSTOM_API_VARS.image,
+  cutout: CUSTOM_API_VARS.cutout,
+  music: CUSTOM_API_VARS.music,
+  voice: CUSTOM_API_VARS.voice,
+};
+
+const ROLE_LABEL: Record<CustomRole, string> = { image: '文生图请求', cutout: '抠图请求', music: '音乐请求', voice: '语音请求' };
+
+/** 这个职责的主要请求能用的占位符（含 baseURL、apiKey、model）。 */
+export function customVarsOf(role: CustomRole): string[] {
+  return [...CUSTOM_API_VARS.common, ...ROLE_VARS[role]];
+}
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z_]\w*)\s*\}\}/g;
 
@@ -93,7 +112,7 @@ export function placeholdersOf(text: string): string[] {
  * 检查一个自定义接口：请求头和请求体是不是合法的 JSON 对象，占位符认不认识。
  * 返回第一个问题（中文），没问题返回 null。
  */
-export function checkCustomApi(api: CustomApi, role: 'image' | 'cutout' | 'music'): string | null {
+export function checkCustomApi(api: CustomApi, role: CustomRole): string | null {
   const check = (op: CustomOperation, label: string, vars: readonly string[]): string | null => {
     for (const [field, text] of [
       ['请求头', op.headers],
@@ -131,10 +150,8 @@ export function checkCustomApi(api: CustomApi, role: 'image' | 'cutout' | 'music
     }
     return null;
   };
-  const main = role === 'image' ? CUSTOM_API_VARS.image : role === 'cutout' ? CUSTOM_API_VARS.cutout : CUSTOM_API_VARS.music;
-  const label = role === 'image' ? '文生图请求' : role === 'cutout' ? '抠图请求' : '音乐请求';
   return (
-    check(api.request, label, main) ??
+    check(api.request, ROLE_LABEL[role], ROLE_VARS[role]) ??
     (role === 'image' && api.edit ? check(api.edit, '改图请求', [...CUSTOM_API_VARS.image, ...CUSTOM_API_VARS.imageEdit]) : null)
   );
 }
@@ -148,7 +165,7 @@ export interface CustomApiPreset {
 
 const op = (o: Partial<CustomOperation> & Pick<CustomOperation, 'url'>): CustomOperation => CustomOperation.parse(o);
 
-export const CUSTOM_API_PRESETS: Record<'image' | 'cutout' | 'music', CustomApiPreset[]> = {
+export const CUSTOM_API_PRESETS: Record<CustomRole, CustomApiPreset[]> = {
   image: [
     {
       id: 'openai',
@@ -258,6 +275,58 @@ export const CUSTOM_API_PRESETS: Record<'image' | 'cutout' | 'music', CustomApiP
           encoding: 'url',
           errorPath: 'error.message',
           poll: { idPath: 'id', method: 'GET', url: '/jobs/{{id}}', body: '', statusPath: 'status', done: ['succeeded'], failed: ['failed'], intervalSeconds: 3, maxMinutes: 10 },
+        }),
+      },
+    },
+  ],
+  voice: [
+    {
+      id: 'openai',
+      label: 'OpenAI 风格（/audio/speech，返回音频文件）',
+      api: {
+        request: op({
+          url: '/audio/speech',
+          body: JSON.stringify({ model: '{{model}}', input: '{{text}}', voice: '{{voice}}', speed: '{{speed}}', response_format: 'mp3' }, null, 2),
+          responseType: 'binary',
+          errorPath: 'error.message',
+        }),
+      },
+    },
+    {
+      id: 'minimax',
+      label: 'MiniMax 风格（/t2a_v2，返回 hex）',
+      api: {
+        request: op({
+          url: '/t2a_v2',
+          body: JSON.stringify(
+            {
+              model: '{{model}}',
+              text: '{{text}}',
+              stream: false,
+              voice_setting: { voice_id: '{{voice}}', speed: '{{speed}}', emotion: '{{emotion}}' },
+              audio_setting: { sample_rate: 32000, bitrate: 128000, format: 'mp3', channel: 1 },
+              output_format: 'hex',
+            },
+            null,
+            2,
+          ),
+          resultPath: 'data.audio',
+          encoding: 'hex',
+          errorPath: 'base_resp.status_msg',
+          errorCodePath: 'base_resp.status_code',
+        }),
+      },
+    },
+    {
+      id: 'get',
+      label: '本地服务（GET，返回音频文件）',
+      api: {
+        request: op({
+          method: 'GET',
+          url: '/tts?text={{text}}&voice={{voice}}&speed={{speed}}',
+          headers: '{}',
+          bodyType: 'none',
+          responseType: 'binary',
         }),
       },
     },

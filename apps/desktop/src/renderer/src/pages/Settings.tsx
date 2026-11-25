@@ -13,9 +13,10 @@ import {
   ROLE_LABELS,
   type RoleId,
   type RoleRoute,
+  type VoiceDef,
 } from '@auto-adv/schema';
 import { useEffect, useMemo, useState } from 'react';
-import { Badge, Button, Card, cx, Empty, Field, Input, PageHeader, Select, Spinner, Tabs, useToast } from '../components/ui.tsx';
+import { Badge, Button, Card, cx, Empty, Field, Input, PageHeader, Select, Spinner, Tabs, Textarea, useToast } from '../components/ui.tsx';
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { useSettings } from '../lib/settings.tsx';
 import { AssetSettingsForm } from './AssetSettingsForm.tsx';
@@ -570,23 +571,37 @@ function RolesTab() {
       <MediaRoleRow role="image" />
       <MediaRoleRow role="cutout" />
       <MediaRoleRow role="music" />
+      <MediaRoleRow role="voice" />
     </div>
   );
 }
 
-/** 图像职责：接入点、模型（不会退回「默认」的文本模型）。可以画一张小图试试，会花一张图的额度。 */
-const MEDIA_API_LABELS: Record<MediaRoute['api'], string> = {
-  openai: 'OpenAI 风格',
-  rembg: 'rembg（/api/remove）',
-  minimax: 'MiniMax（/music_generation）',
-  custom: '自定义',
-};
+/** 接口类型的名字（同一种接口类型在不同职责上是不同的地址）。 */
+function apiLabel(role: MediaRoleId, api: MediaRoute['api']): string {
+  if (api === 'custom') return '自定义';
+  if (api === 'rembg') return 'rembg（/api/remove）';
+  if (api === 'minimax') return role === 'voice' ? 'MiniMax（/t2a_v2）' : 'MiniMax（/music_generation）';
+  return role === 'voice' ? 'OpenAI 风格（/audio/speech）' : 'OpenAI 风格';
+}
 
 const MODEL_PLACEHOLDER: Record<MediaRoleId, string> = {
   image: '图像模型名，例如 MiniMax-H3-Image',
   cutout: '模型（可以不填），例如 isnet-anime',
   music: '音乐模型名，例如 music-2.6',
+  voice: '语音模型名，例如 speech-2.6-hd',
 };
+
+/** 音色表写成文字：一行一个，id｜名字｜描述。 */
+const voicesToText = (voices: VoiceDef[] | undefined) => (voices ?? []).map((v) => [v.id, v.name, v.description].join('｜')).join('\n');
+const textToVoices = (text: string): VoiceDef[] =>
+  text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const [id = '', name = '', ...rest] = l.split(/[｜|]/).map((x) => x.trim());
+      return { id, name, description: rest.join('｜') };
+    });
 
 /** 媒体职责的一行：图像（背景、立绘）、抠图（立绘的透明背景选了「抠图服务」时用）、音乐（BGM 的音乐模型来源）。 */
 function MediaRoleRow({ role }: { role: MediaRoleId }) {
@@ -595,6 +610,7 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
   const current = settings?.media[role];
   const isImage = role === 'image';
   const isMusic = role === 'music';
+  const isVoice = role === 'voice';
   const apis = MEDIA_ROLE_APIS[role];
   const savedApi = current && apis.includes(current.api) ? current.api : (apis[0] ?? 'openai');
   const [endpointId, setEndpointId] = useState(current?.endpointId ?? '');
@@ -602,6 +618,10 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
   const [api, setApi] = useState<MediaRoute['api']>(savedApi);
   const [custom, setCustom] = useState<CustomApi | null>(current?.custom ?? null);
   const [showTemplate, setShowTemplate] = useState(false);
+  const savedVoices = voicesToText(current?.voices);
+  const [voicesText, setVoicesText] = useState(savedVoices);
+  const [showVoices, setShowVoices] = useState(false);
+  const [fetching, setFetching] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [test, setTest] = useState<{ dataUrl: string; latencyMs: number; revisedPrompt: string | null; durationMs?: number | null } | null>(
@@ -613,17 +633,41 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
     setModel(current?.model ?? '');
     setApi(savedApi);
     setCustom(savedCustom === 'null' ? null : (JSON.parse(savedCustom) as CustomApi));
-  }, [current?.endpointId, current?.model, savedApi, savedCustom]);
+    setVoicesText(savedVoices);
+  }, [current?.endpointId, current?.model, savedApi, savedCustom, savedVoices]);
   const endpoint = settings?.endpoints.find((e) => e.id === endpointId);
   const isCustom = api === 'custom';
   // 自定义接口的模板里不用 {{model}} 时模型可以不填
-  const needsModel = (isImage || isMusic) && !isCustom;
+  const needsModel = (isImage || isMusic || isVoice) && !isCustom;
   const dirty =
     endpointId !== (current?.endpointId ?? '') ||
     model !== (current?.model ?? '') ||
     api !== savedApi ||
-    (isCustom && JSON.stringify(custom) !== savedCustom);
-  const route = (): MediaRoute => ({ endpointId, model: model.trim(), api, ...(custom ? { custom } : {}) });
+    (isCustom && JSON.stringify(custom) !== savedCustom) ||
+    (isVoice && voicesText.trim() !== savedVoices.trim());
+  const voices = isVoice ? textToVoices(voicesText) : [];
+  const route = (): MediaRoute => ({
+    endpointId,
+    model: model.trim(),
+    api,
+    ...(custom ? { custom } : {}),
+    ...(voices.length ? { voices } : {}),
+  });
+  /** 从服务拉取音色表（MiniMax）或者填入 OpenAI 的那一套。 */
+  const fetchVoices = async () => {
+    if (!endpointId) return;
+    setFetching(true);
+    try {
+      const list = await engine.call('fetchVoices', { route: route() });
+      setVoicesText(voicesToText(list));
+      setShowVoices(true);
+      toast('ok', `拿到 ${list.length} 个音色，保存后生效`);
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setFetching(false);
+    }
+  };
   const pickApi = (next: MediaRoute['api']) => {
     setApi(next);
     if (next === 'custom') {
@@ -635,7 +679,10 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
   const label = MEDIA_ROLE_LABELS[role];
   const save = async (clear = false) => {
     if (!clear && (!endpointId || (needsModel && !model.trim()))) {
-      toast('err', isImage ? '请选择接入点并填写图像模型' : isMusic ? '请选择接入点并填写音乐模型' : '请选择抠图服务的接入点');
+      toast(
+        'err',
+        isImage ? '请选择接入点并填写图像模型' : isMusic ? '请选择接入点并填写音乐模型' : isVoice ? '请选择接入点并填写语音模型' : '请选择抠图服务的接入点',
+      );
       return;
     }
     setSaving(true);
@@ -650,7 +697,9 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
             ? '已保存「图像」，打开着的世界会开始画背景和立绘'
             : isMusic
               ? '已保存「音乐」，打开着的世界会给还没有曲子的情绪生成 BGM'
-              : `已保存「${label.name}」`,
+              : isVoice
+                ? '已保存「语音」，玩的时候角色的台词会配上声音'
+                : `已保存「${label.name}」`,
       );
     } catch (err) {
       toast('err', errorMessage(err));
@@ -665,6 +714,9 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
     try {
       if (isMusic) {
         const r = await engine.call('testMusic', { route: route() });
+        setTest({ ...r, revisedPrompt: null });
+      } else if (isVoice) {
+        const r = await engine.call('testVoice', { route: route() });
         setTest({ ...r, revisedPrompt: null });
       } else if (isImage) {
         setTest(await engine.call('testImage', { route: route() }));
@@ -686,7 +738,9 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
           <div className="flex items-center gap-2 text-sm font-medium">
             {label.name}
             {!current && (
-              <span className="text-xs font-normal text-faint">{isImage ? '未设置，用占位图' : isMusic ? '未设置，不生成' : '未设置'}</span>
+              <span className="text-xs font-normal text-faint">
+                {isImage ? '未设置，用占位图' : isMusic ? '未设置，不生成' : isVoice ? '未设置，不配音' : '未设置'}
+              </span>
             )}
           </div>
           <div className="mt-0.5 text-xs leading-snug text-muted">{label.hint}</div>
@@ -727,7 +781,7 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
         >
           {apis.map((a) => (
             <option key={a} value={a}>
-              {MEDIA_API_LABELS[a]}
+              {apiLabel(role, a)}
             </option>
           ))}
         </Select>
@@ -737,13 +791,20 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
               {showTemplate ? '收起' : '模板'}
             </Button>
           )}
+          {isVoice && (
+            <Button size="sm" variant="ghost" onClick={() => setShowVoices((v) => !v)} data-testid="role-voices-toggle">
+              音色
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"
             disabled={!endpointId || (needsModel && !model.trim())}
             loading={testing}
             onClick={() => void runTest()}
-            title={isMusic ? '生成一首试试，会花一首曲子的额度' : isImage ? '画一张小图试试，会花一张图的额度' : '抠一张示例图试试'}
+            title={
+              isMusic ? '生成一首试试，会花一首曲子的额度' : isImage ? '画一张小图试试，会花一张图的额度' : isVoice ? '用音色表里的第一个音色念一句' : '抠一张示例图试试'
+            }
             data-testid={`role-test-${role}`}
           >
             测试
@@ -760,9 +821,34 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
         </div>
       </div>
       {isCustom && showTemplate && custom && <CustomApiEditor role={role} value={custom} onChange={setCustom} />}
+      {isVoice && showVoices && (
+        <div className="mt-3 space-y-2 border-t border-line pt-3" data-testid="role-voices">
+          <div className="flex items-center justify-between gap-3 text-xs text-muted">
+            <span>
+              音色表：一行一个，写成「音色 id｜名字｜描述」。描述里写清性别、年龄和声音特点，分配音色时按它挑。空着的话，OpenAI 风格用它固定的一套，MiniMax
+              自动从服务拉取，自定义接口一定要写。
+            </span>
+            {api !== 'custom' && (
+              <Button size="sm" variant="ghost" loading={fetching} disabled={!endpointId} onClick={() => void fetchVoices()} data-testid="role-voices-fetch">
+                {api === 'openai' ? '填入 OpenAI 的音色' : '从服务拉取'}
+              </Button>
+            )}
+          </div>
+          <Textarea
+            rows={8}
+            value={voicesText}
+            onChange={(e) => setVoicesText(e.target.value)}
+            placeholder={'female-shaonv｜少女｜女声，少女，清亮\nmale-qn-jingying｜精英青年｜男声，青年，干练'}
+            className="font-mono text-xs"
+            spellCheck={false}
+            data-testid="role-voices-text"
+          />
+          <div className="text-xs text-faint">{voices.length ? `${voices.length} 个音色` : '空着'}</div>
+        </div>
+      )}
       {test && (
         <div className="mt-3 flex items-start gap-3 border-t border-line pt-3 text-xs text-muted">
-          {isMusic ? (
+          {isMusic || isVoice ? (
             <audio src={test.dataUrl} controls className="h-9" data-testid="role-test-audio" />
           ) : (
             <img
@@ -774,8 +860,8 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
           )}
           <div className="space-y-1">
             <div>
-              {isMusic ? '生成好了' : isImage ? '画好了' : '抠好了'}，用了 {formatMsShort(test.latencyMs)}
-              {test.durationMs ? `，曲子长 ${Math.round(test.durationMs / 1000)} 秒` : ''}。
+              {isMusic || isVoice ? '生成好了' : isImage ? '画好了' : '抠好了'}，用了 {formatMsShort(test.latencyMs)}
+              {test.durationMs ? `，${isVoice ? '长' : '曲子长'} ${(test.durationMs / 1000).toFixed(isVoice ? 1 : 0)} 秒` : ''}。
             </div>
             {test.revisedPrompt && <div className="text-faint">服务端改写后的提示词：{test.revisedPrompt}</div>}
           </div>

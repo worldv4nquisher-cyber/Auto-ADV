@@ -9,4 +9,5 @@ export * from './png.ts';
 export * from './jpeg.ts';
 export * from './audio.ts';
 export * from './music.ts';
+export * from './speech.ts';
 export * from './custom.ts';

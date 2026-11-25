@@ -61,6 +61,12 @@ export interface MockServerOptions {
   musicDelayMs?: number;
   /** 音乐接口返回这个错误（模拟套餐不含音乐之类；http 不给就是 HTTP 200 加 base_resp）。 */
   musicError?: { code: number; message: string; http?: number };
+  /** 语音接口（/v1/audio/speech、/v1/t2a_v2）每句的延迟，默认 0。 */
+  speechDelayMs?: number;
+  /** 模拟不支持情绪的 MiniMax 语音模型：带了 emotion 就报 2013。 */
+  speechNoEmotion?: boolean;
+  /** 文字里有这段的语音请求返回 500。 */
+  speechFailIf?: string;
   /** 异步任务接口（/v1/jobs，测自定义接口的轮询）：查询几次之后才完成，默认 2。 */
   jobPolls?: number;
   /** 绑定的主机，默认 127.0.0.1。 */
@@ -79,6 +85,8 @@ export interface MockServer {
   cutoutRequests: { model: string; bytes: number }[];
   /** 收到的音乐请求体。 */
   musicRequests: Record<string, unknown>[];
+  /** 收到的语音请求体（OpenAI 风格的带 api: 'openai'，MiniMax 的带 api: 'minimax'）。 */
+  speechRequests: Record<string, unknown>[];
   /** 异步任务接口收到的提交（请求体）和查询次数。 */
   jobRequests: Record<string, unknown>[];
   jobQueries: number;
@@ -140,6 +148,32 @@ export function mockMusic(prompt: string, seconds = 2, rate = 8000): Uint8Array 
   return encodeWav(samples, rate);
 }
 
+/** 模拟语音的时长：每个字 60 毫秒，最短 0.4 秒。 */
+export const speechMs = (text: string) => Math.max(400, [...text].length * 60);
+
+/** 模拟的语音：一段按音色换音高的提示音，长短按字数。 */
+export function mockSpeech(text: string, voice: string, rate = 8000): Uint8Array {
+  const [r, g, b] = colorOf(voice);
+  const freq = 300 + ((r * 5 + g * 3 + b) % 500);
+  const n = Math.round((speechMs(text) / 1000) * rate);
+  const samples = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const env = Math.min(1, i / (rate * 0.02), (n - i) / (rate * 0.02));
+    samples[i] = 0.15 * env * Math.sin((2 * Math.PI * freq * i) / rate);
+  }
+  return encodeWav(samples, rate);
+}
+
+/** 模拟服务的系统音色。 */
+export const MOCK_VOICES = [
+  { id: 'mock_girl_bright', name: '明亮少女', description: '女声，少女，明亮活泼' },
+  { id: 'mock_girl_calm', name: '温柔女声', description: '女声，青年，温柔沉静' },
+  { id: 'mock_boy_clear', name: '清爽少年', description: '男声，少年，清爽' },
+  { id: 'mock_man_deep', name: '沉稳男声', description: '男声，青年，低沉稳重' },
+  { id: 'mock_elder', name: '老年男声', description: '男声，老年，沙哑和蔼' },
+  { id: 'mock_narrator', name: '旁白', description: '中性，平稳的叙述' },
+];
+
 function chunk(text: string, size: number): string[] {
   const chars = [...text];
   const out: string[] = [];
@@ -163,6 +197,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
   const cutoutRequests: { model: string; bytes: number }[] = [];
   const musicRequests: Record<string, unknown>[] = [];
   const jobRequests: Record<string, unknown>[] = [];
+  const speechRequests: Record<string, unknown>[] = [];
   const jobs = new Map<string, { body: Record<string, unknown>; polls: number }>();
   let jobQueries = 0;
   const files = new Map<string, Buffer>();
@@ -196,6 +231,41 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         }
         res.writeHead(200, { 'Content-Type': 'image/png' });
         return res.end(encodeRgbaPng(img));
+      }
+      // 语音：OpenAI 风格返回 WAV 文件，MiniMax 返回 hex；音色列表
+      if (req.method === 'POST' && (path === '/v1/audio/speech' || path === '/v1/t2a_v2')) {
+        let raw = '';
+        for await (const part of req) raw += part;
+        const body = JSON.parse(raw || '{}') as Record<string, unknown>;
+        const openai = path === '/v1/audio/speech';
+        speechRequests.push({ api: openai ? 'openai' : 'minimax', ...body });
+        if (opts.speechDelayMs) await sleep(opts.speechDelayMs);
+        const text = String((openai ? body.input : body.text) ?? '');
+        const vs = (body.voice_setting ?? {}) as Record<string, unknown>;
+        const voice = String((openai ? body.voice : vs.voice_id) ?? '');
+        if (opts.speechFailIf && text.includes(opts.speechFailIf)) return sendJson(res, 500, { error: { message: 'speech service busy' } });
+        if (openai) {
+          if (!text || !voice) return sendJson(res, 400, { error: { message: 'input and voice are required' } });
+          res.writeHead(200, { 'Content-Type': 'audio/wav' });
+          return res.end(Buffer.from(mockSpeech(text, voice)));
+        }
+        if (!text || !voice) return sendJson(res, 200, { base_resp: { status_code: 2013, status_msg: 'invalid params, text and voice_id are required' } });
+        if (opts.speechNoEmotion && vs.emotion !== undefined) {
+          return sendJson(res, 200, { base_resp: { status_code: 2013, status_msg: 'invalid params, emotion is not supported by this model' } });
+        }
+        const audio = mockSpeech(text, voice);
+        return sendJson(res, 200, {
+          data: { audio: Buffer.from(audio).toString('hex'), status: 2 },
+          extra_info: { audio_length: speechMs(text), audio_sample_rate: 8000, audio_size: audio.length, usage_characters: [...text].length },
+          trace_id: `mock-speech-${speechRequests.length}`,
+          base_resp: { status_code: 0, status_msg: 'success' },
+        });
+      }
+      if (req.method === 'POST' && path === '/v1/get_voice') {
+        return sendJson(res, 200, {
+          system_voice: MOCK_VOICES.map((v) => ({ voice_id: v.id, voice_name: v.name, description: [v.description] })),
+          base_resp: { status_code: 0, status_msg: 'success' },
+        });
       }
       // 异步任务（通用的「提交 → 轮询 → 下载链接」，测自定义接口）：
       // 有 instrumental 字段的按音乐处理，否则按图像；提示词里有「任务失败」就失败
@@ -454,6 +524,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
     cutoutRequests,
     musicRequests,
     jobRequests,
+    speechRequests,
     get jobQueries() {
       return jobQueries;
     },

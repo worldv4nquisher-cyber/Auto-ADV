@@ -8,7 +8,9 @@
  *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）
  * → 素材：配好图像职责 → 素材页里每个地点和剧本里的背景画好 → 重抽 → 改世界的背景尺寸后全部重画 → 换成自己的图
  *   → 剧情 ADV 舞台上换成真背景（M4 第 1 步）
- *   → 每个角色的基础立绘和表情差分画好、抠成透明 → 给一个角色多加一个表情 → 舞台上换成真立绘（M4 第 2 步）。
+ *   → 每个角色的基础立绘和表情差分画好、抠成透明 → 给一个角色多加一个表情 → 舞台上换成真立绘（M4 第 2 步）
+ *   → BGM：内置曲库、音乐模型、本地曲库（M4 第 3 步）→ 图像职责改成自定义接口
+ *   → 配音：语音职责、拉取音色表 → 素材页的配音表（试听、换音色锁定、重新分配）→ 舞台上念台词、回想里重播、缓存（M4 第 4 步）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
@@ -58,6 +60,15 @@ async function shot(page: Page, name: string) {
 
 function step(msg: string) {
   console.log(`▸ ${msg}`);
+}
+
+/** 等测试进程这边的条件成立（例如模拟服务收到了请求）。 */
+async function until(cond: () => boolean, what: string, timeout = 20_000) {
+  const end = Date.now() + timeout;
+  while (!cond()) {
+    if (Date.now() > end) throw new Error(`等不到：${what}`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), 'auto-adv-e2e-'));
@@ -665,6 +676,111 @@ try {
     assert.ok(!(await readFile(path.join(dataDir, f))).includes(API_KEY), `调用日志（${f}）里不能有密钥`);
   }
   step('图像职责改成自定义接口：从模板开始改，写错的占位符马上提示，测试画一张，保存');
+
+  // ── 配音（M4 第 4 步）：语音职责用 MiniMax 风格的接口，音色表从服务拉取，试念一句
+  const voiceRole = page.locator('[data-testid="role-voice"]');
+  await page.selectOption('[data-testid="role-endpoint-voice"]', endpointId);
+  await page.fill('[data-testid="role-model-voice"]', 'mock-speech');
+  await page.selectOption('[data-testid="role-api-voice"]', 'minimax');
+  await page.click('[data-testid="role-voices-toggle"]');
+  await page.click('[data-testid="role-voices-fetch"]');
+  await page.waitForFunction(() =>
+    (document.querySelector('[data-testid="role-voices-text"]') as HTMLTextAreaElement | null)?.value.includes('mock_girl_bright｜明亮少女'),
+  );
+  const speechBefore = server.speechRequests.length;
+  await page.click('[data-testid="role-test-voice"]');
+  await voiceRole.locator('[data-testid="role-test-audio"]').waitFor();
+  assert.equal(server.speechRequests.length, speechBefore + 1);
+  assert.equal(server.speechRequests.at(-1)?.api, 'minimax');
+  assert.equal(server.speechRequests.at(-1)?.model, 'mock-speech');
+  await voiceRole.scrollIntoViewIfNeeded();
+  await shot(page, '30-voice-role');
+  await page.click('[data-testid="role-save-voice"]');
+  await page.waitForSelector('[data-testid="role-save-voice"]', { state: 'detached' });
+  step('语音职责：MiniMax 风格的接口，从服务拉取音色表，试念一句，保存');
+
+  // 素材页的配音表：第一次打开时由文本模型分配音色（女角色用女声，主要角色不重复），主角默认不配
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="world-card"] >> text=旧书库的约定');
+  await page.click('[data-testid="tab-assets"]');
+  const voiceRow = (id: string) => `[data-testid="voice-row"][data-char="${id}"]`;
+  await page.waitForSelector(`${voiceRow('char_lin')}[data-voice="mock_girl_bright"]`, { timeout: 30_000 });
+  const zhouVoice = await page.getAttribute(voiceRow('char_zhou'), 'data-voice');
+  const shenVoice = await page.getAttribute(voiceRow('char_01'), 'data-voice');
+  assert.ok(zhouVoice && !zhouVoice.startsWith('mock_girl'), `老周应该是男声，分到的是 ${zhouVoice}`);
+  assert.notEqual(shenVoice, 'mock_girl_bright');
+  assert.equal(await page.isChecked(`${voiceRow('char_01')} [data-testid="voice-enabled"]`), false, '主角默认不配音');
+  assert.equal(await page.isChecked(`${voiceRow('char_lin')} [data-testid="voice-enabled"]`), true);
+  // 试听：用这个角色的音色念一句
+  const beforePreview = server.speechRequests.length;
+  await page.click(`${voiceRow('char_lin')} [data-testid="voice-preview"]`);
+  await until(() => server.speechRequests.length === beforePreview + 1, '试听的请求');
+  assert.equal((server.speechRequests.at(-1)?.voice_setting as { voice_id?: string } | undefined)?.voice_id, 'mock_girl_bright');
+  // 换音色：锁定，重新分配时不会被改掉
+  const pick = zhouVoice === 'mock_elder' ? 'mock_man_deep' : 'mock_elder';
+  await page.selectOption(`${voiceRow('char_zhou')} [data-testid="voice-select"]`, pick);
+  await page.waitForSelector(`${voiceRow('char_zhou')}[data-voice="${pick}"] >> text=🔒`);
+  await page.click('[data-testid="voice-recast"]');
+  await page.click('[data-testid="voice-recast"]');
+  await page.waitForSelector('text=重新分配好了');
+  assert.equal(await page.getAttribute(voiceRow('char_zhou'), 'data-voice'), pick);
+  const worldDirs = await readdir(path.join(dataDir, 'worlds'));
+  const castFile = (
+    await Promise.all(
+      worldDirs.map((d) =>
+        readFile(path.join(dataDir, 'worlds', d, 'assets', 'voices.json'), 'utf8').then(
+          (t) => ({ d, t }),
+          () => null,
+        ),
+      ),
+    )
+  ).find((x) => x?.t.includes('char_zhou'));
+  assert.ok(castFile, '配音表应该存在世界的 assets/voices.json 里');
+  const cast = JSON.parse(castFile.t) as { characters: Record<string, { voiceId: string; locked: boolean }> };
+  assert.deepEqual(cast.characters.char_zhou, { voiceId: pick, locked: true });
+  await page.locator('[data-testid="asset-voice"]').scrollIntoViewIfNeeded();
+  await shot(page, '31-assets-voice');
+  step('素材页的配音表：按性别分配音色、主角默认不配、试听、换音色后锁定、重新分配不改锁定的');
+
+  // 舞台上：读档回到门前林夕那一句，念出来（MiniMax 的 voice_setting 用林夕的音色）
+  await page.click('[data-testid="playthrough"] >> button:has-text("继续")');
+  await page.waitForSelector('[data-testid="adv-stage"]');
+  await page.click('[data-testid="adv-load"]');
+  await page.click('[data-testid="adv-load-slot"]');
+  await page.waitForSelector('[data-testid="adv-text"] >> text=试了一个星期都没打开');
+  await page.waitForSelector('[data-testid="adv-voice"][data-status="playing"], [data-testid="adv-voice"][data-status="ended"]', { state: 'attached', timeout: 20_000 });
+  const spoken = server.speechRequests.filter((r) => String(r.text).includes('试了一个星期都没打开'));
+  assert.equal(spoken.length, 1, '这一句应该只生成一次');
+  assert.equal((spoken[0]?.voice_setting as { voice_id?: string } | undefined)?.voice_id, 'mock_girl_bright');
+  await page.waitForSelector('[data-testid="adv-voice-toggle"]');
+  await shot(page, '32-adv-voice');
+  await page.waitForSelector('[data-testid="adv-voice"][data-status="ended"]', { state: 'attached', timeout: 20_000 });
+  // 回想里重播：之前的台词第一次重播时生成，再点一次用缓存
+  await page.click('[data-testid="adv-backlog"]');
+  const replay = page.locator('[data-testid="adv-backlog-voice"]').first();
+  await replay.waitFor();
+  const beforeReplay = server.speechRequests.length;
+  await replay.click();
+  await until(() => server.speechRequests.length === beforeReplay + 1, '回想里重播的请求');
+  await page.waitForTimeout(300);
+  await replay.click();
+  await page.waitForTimeout(500);
+  assert.equal(server.speechRequests.length, beforeReplay + 1, '重播同一句不再生成');
+  await shot(page, '33-adv-backlog-voice');
+  await page.click('[data-testid="adv-panel-close"]');
+  // 退出再进来：念过的句子从世界的缓存里拿，不再请求
+  await page.click('[data-testid="adv-exit"]');
+  await page.click('[data-testid="playthrough"] >> button:has-text("继续")');
+  await page.waitForSelector('[data-testid="adv-text"] >> text=试了一个星期都没打开');
+  await page.waitForSelector('[data-testid="adv-voice"][data-status="playing"], [data-testid="adv-voice"][data-status="ended"]', { state: 'attached', timeout: 20_000 });
+  assert.equal(server.speechRequests.filter((r) => String(r.text).includes('试了一个星期都没打开')).length, 1, '念过的句子用缓存');
+  const voiceFiles = await readdir(path.join(dataDir, 'worlds', castFile.d, 'assets', 'voice'));
+  assert.ok(voiceFiles.length >= 3, `assets/voice 里应该有念过的句子，现在有 ${voiceFiles.length} 个`);
+  // 工具栏的「配音」关掉：这台电脑上不念
+  await page.click('[data-testid="adv-voice-toggle"]');
+  await page.waitForSelector('[data-testid="adv-voice"][data-status="off"]', { state: 'attached' });
+  await page.click('[data-testid="adv-voice-toggle"]');
+  step('舞台上念台词（读档后的那一句），回想里能重播，念过的句子存在世界里，工具栏能关掉配音');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

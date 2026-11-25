@@ -3,12 +3,13 @@ import { sniffAudio } from './audio.ts';
 import type { ImageEditRequest, ImageExchangeRecord, ImageRequest, ImageResult } from './images.ts';
 import { IMAGE_EXT, sniffImage } from './images.ts';
 import type { MusicExchangeRecord, MusicRequest, MusicResult } from './music.ts';
+import type { SpeechRequest, SpeechResult, VoiceExchangeRecord } from './speech.ts';
 import { describeHttpError, isRetryableStatus, normalizeBaseURL, parseRetryAfter, ProviderError } from './openai-compatible.ts';
 import type { FetchLike } from './types.ts';
 
 /**
  * 自定义接口（通用 HTTP 适配器，ARCHITECTURE.md 19.4）：按设置里写的请求模板发请求，按写好的位置从响应里取出文件。
- * 图像、抠图、音乐三种职责各包一层（CustomImageClient、CustomCutoutClient、CustomMusicClient），
+ * 图像、抠图、音乐、语音各包一层（CustomImageClient、CustomCutoutClient、CustomMusicClient、CustomSpeechClient），
  * 和内置的接口类型用法一样。模板的写法见 @auto-adv/schema 的 custom-api.ts。
  */
 
@@ -30,9 +31,9 @@ export interface CustomClientConfig {
   fetch?: FetchLike;
   /** 单次请求最长等多久（轮询时每次查询各算各的），默认 300 秒。 */
   timeoutMs?: number;
-  /** 调用日志用：记成图像还是音乐。 */
-  kind: 'image' | 'music';
-  onExchange?: (record: ImageExchangeRecord | MusicExchangeRecord) => void;
+  /** 调用日志用：记成图像、音乐还是语音。 */
+  kind: 'image' | 'music' | 'voice';
+  onExchange?: (record: ImageExchangeRecord | MusicExchangeRecord | VoiceExchangeRecord) => void;
   /** 测试用：轮询的等待。 */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
@@ -139,7 +140,7 @@ export class CustomHttpClient {
   private readonly headers: Record<string, string>;
   private readonly fetchImpl: FetchLike;
   private readonly timeoutMs: number;
-  private readonly kind: 'image' | 'music';
+  private readonly kind: 'image' | 'music' | 'voice';
   private readonly onExchange: CustomClientConfig['onExchange'];
   private readonly sleep: NonNullable<CustomClientConfig['sleep']>;
 
@@ -181,7 +182,9 @@ export class CustomHttpClient {
           latencyMs: Date.now() - startedAt,
           attempt: 1,
         };
-        this.onExchange?.(this.kind === 'music' ? { kind: 'music', ...base, durationMs: null } : { kind: 'image', ...base, revisedPrompt: null });
+        this.onExchange?.(
+          this.kind === 'image' ? { kind: 'image', ...base, revisedPrompt: null } : { kind: this.kind, ...base, durationMs: null },
+        );
       } catch {
         // 日志出错不影响调用
       }
@@ -515,6 +518,24 @@ export class CustomMusicClient {
 
   async generate(req: MusicRequest, signal?: AbortSignal): Promise<MusicResult> {
     const vars: TemplateVars = { model: req.model, prompt: req.prompt, instrumental: req.instrumental ?? false, lyrics: req.lyrics ?? '' };
+    const r = await this.http.run(this.api.request, vars, {}, signal);
+    const mime = sniffAudio(r.data);
+    if (!mime) throw new ProviderError('自定义接口返回的不是认得出的音频（MP3、WAV、Ogg、FLAC、M4A）');
+    return { data: r.data, mime, durationMs: null, latencyMs: r.latencyMs };
+  }
+}
+
+/** 自定义的语音接口：{{text}} 念成 {{voice}} 的声音。 */
+export class CustomSpeechClient {
+  private readonly http: CustomHttpClient;
+  private readonly api: CustomApi;
+  constructor(api: CustomApi, cfg: Omit<CustomClientConfig, 'kind'>) {
+    this.api = api;
+    this.http = new CustomHttpClient({ timeoutMs: 60_000, ...cfg, kind: 'voice' });
+  }
+
+  async speak(req: SpeechRequest, signal?: AbortSignal): Promise<SpeechResult> {
+    const vars: TemplateVars = { model: req.model, text: req.text, voice: req.voice, speed: req.speed ?? 1, emotion: req.emotion ?? '' };
     const r = await this.http.run(this.api.request, vars, {}, signal);
     const mime = sniffAudio(r.data);
     if (!mime) throw new ProviderError('自定义接口返回的不是认得出的音频（MP3、WAV、Ogg、FLAC、M4A）');

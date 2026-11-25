@@ -13,6 +13,7 @@ import {
   StyleGuide,
   type VariableDef,
   VariablesFile,
+  VoiceCast,
   WorldBrief,
   WorldManifest,
 } from '@auto-adv/schema';
@@ -305,6 +306,15 @@ export class WorldStore {
 
   writeAssetSettings(id: string, patch: AssetSettingsPatch) {
     return writeFileAtomic(this.file(id, 'assets', 'settings.json'), json({ formatVersion: FORMAT_VERSION, ...AssetSettingsPatch.parse(patch) }));
+  }
+
+  /** 这个世界的配音表（18.8）。 */
+  async readVoiceCast(id: string): Promise<VoiceCast> {
+    return (await this.read(this.file(id, 'assets', 'voices.json'), VoiceCast)) ?? VoiceCast.parse({});
+  }
+
+  writeVoiceCast(id: string, cast: VoiceCast) {
+    return writeFileAtomic(this.file(id, 'assets', 'voices.json'), json(VoiceCast.parse(cast)));
   }
 
   writeCharacters(id: string, items: Character[]) {
