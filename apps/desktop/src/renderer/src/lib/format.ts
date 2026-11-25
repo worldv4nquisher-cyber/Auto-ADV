@@ -33,6 +33,7 @@ const EXTRA_ROLE_NAMES: Record<string, string> = {
   playground: '调试台',
   probe: '能力探测',
   image: '图像',
+  cutout: '抠图',
 };
 
 const TAG_NAMES: Record<string, string> = {
@@ -54,6 +55,9 @@ const TAG_NAMES: Record<string, string> = {
   'adv.writer': 'ADV · 演出',
   'adv.detour': 'ADV · 新的一幕',
   'assets.background': '素材 · 背景',
+  'assets.sprite': '素材 · 立绘',
+  'assets.expression': '素材 · 表情差分',
+  'assets.cutout': '素材 · 抠图',
   'assets.test': '素材 · 测试',
 };
 

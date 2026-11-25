@@ -1,4 +1,5 @@
 import type { AssetsView } from '@auto-adv/engine/api';
+import type { ExpressionDef } from '@auto-adv/schema';
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useState } from 'react';
 import { PlaceholderBg } from '../components/placeholder.tsx';
 import { engine, isAborted, onConnectionChange } from './engine.ts';
@@ -68,4 +69,18 @@ export function BgImage({ id, testId }: { id: string; testId?: string }) {
       className="absolute inset-0 h-full w-full object-cover select-none"
     />
   );
+}
+
+/** 立绘的文件地址：这个表情还没画好时先用基础立绘（平静），都没有就是 null（18.6）。 */
+export function useSpriteUrl(characterId: string | null, expr: string): string | null {
+  const urls = useContext(AssetsContext)?.urls;
+  if (!urls || !characterId) return null;
+  return urls.get(`sprite/${characterId}/${expr}`) ?? urls.get(`sprite/${characterId}/neutral`) ?? null;
+}
+
+/** 这个世界的表情表（观察模式的舞台按它从台词前的括号里认表情）。内容不变时引用也不变，免得舞台每次推送都重算。 */
+export function useExpressionTable(): ExpressionDef[] | null {
+  const table = useContext(AssetsContext)?.view?.settings.effective.expressions;
+  const key = table ? JSON.stringify(table) : '';
+  return useMemo(() => (key ? (JSON.parse(key) as ExpressionDef[]) : null), [key]);
 }

@@ -5,7 +5,7 @@
  */
 import type { StageStep, StageText, StageView, Timeline } from '@auto-adv/engine/stage';
 import { type ReactNode, type RefObject, useEffect, useRef, useState } from 'react';
-import { BgImage, useAssetsContext } from '../lib/assets.tsx';
+import { BgImage, useAssetsContext, useSpriteUrl } from '../lib/assets.tsx';
 import { useRouter } from '../lib/router.tsx';
 import { PlaceholderCg, PlaceholderSprite } from './placeholder.tsx';
 import { Button, cx } from './ui.tsx';
@@ -108,7 +108,9 @@ export function StageLayers({
           className="stage-rise absolute bottom-0 h-[86%] transition-[left] duration-500"
           style={{ left: `${s.x}%`, transform: 'translateX(-50%)' }}
         >
-          <PlaceholderSprite
+          <SpriteImage
+            p={p}
+            characterId={s.characterId}
             name={s.name}
             expr={s.expr}
             color={tint(s.characterId, s.name)}
@@ -125,6 +127,40 @@ export function StageLayers({
         <div key={`flash${stepKey}`} className="stage-flash pointer-events-none absolute inset-0 bg-white" />
       )}
     </>
+  );
+}
+
+/** 立绘：画好了用真的图（表情还没画好先用平静的），没有就用占位的剪影（18.6）。 */
+function SpriteImage({
+  p,
+  characterId,
+  name,
+  expr,
+  color,
+  dim,
+}: {
+  p: string;
+  characterId: string | null;
+  name: string;
+  expr: string;
+  color: string;
+  dim: boolean;
+}) {
+  const url = useSpriteUrl(characterId, expr);
+  if (!url) return <PlaceholderSprite name={name} expr={expr} color={color} dim={dim} />;
+  return (
+    <img
+      key={url}
+      src={url}
+      alt={name}
+      draggable={false}
+      data-testid={`${p}-sprite-image`}
+      data-expr={expr}
+      className={cx(
+        'stage-fade h-full w-auto max-w-none object-contain object-bottom drop-shadow-[0_0_18px_rgba(0,0,0,.35)] transition-[filter] duration-300 select-none',
+        dim && 'brightness-[.6] saturate-[.7]',
+      )}
+    />
   );
 }
 

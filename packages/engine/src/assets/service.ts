@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { IMAGE_EXT, ProviderError, sniffImage } from '@auto-adv/providers';
+import { decodeJpeg, decodePng, encodeRgbaPng, IMAGE_EXT, type ImageResult, ProviderError, type RgbaImage, sniffImage } from '@auto-adv/providers';
 import {
   type AssetIndex,
   type AssetSettings,
@@ -15,6 +15,7 @@ import type { ImageHandle, ModelGateway } from '../llm/gateway.ts';
 import type { SettingsStore } from '../settings-store.ts';
 import { SerialQueue, writeFileAtomic } from '../util.ts';
 import type { WorldData, WorldStore } from '../world/store.ts';
+import { checkAlpha, hasTransparentBackdrop, keyOut } from './cutout.ts';
 import { type AssetFocus, inputHashOf, type PlannedSlot, planAssets, priorityOf, slotState, wantsWork } from './plan.ts';
 
 export type { AssetFocus } from './plan.ts';
@@ -153,6 +154,11 @@ export class AssetService {
     return this.refresh(worldId);
   }
 
+  /** 这个世界生效的素材设置（全局 + 世界）。 */
+  async effectiveSettings(worldId: string): Promise<AssetSettings> {
+    return (await this.load(worldId)).settings;
+  }
+
   /** 游玩时告诉素材管线现在在哪里，按"马上要用"排优先级。 */
   async focus(worldId: string, focus: AssetFocus): Promise<void> {
     const w = await this.load(worldId);
@@ -190,7 +196,10 @@ export class AssetService {
   }
 
   private enabled(w: WorldAssets, slot: PlannedSlot) {
-    return w.settings.enabled[slot.toggle];
+    if (!w.settings.enabled[slot.toggle]) return false;
+    // 立绘关掉了：表情差分只有基础立绘已经有了才画
+    if (slot.toggle === 'expression' && !w.settings.enabled.sprite) return slot.deps.every((d) => !!w.index.slots[d]?.file);
+    return true;
   }
 
   private async viewOf(w: WorldAssets, route?: Awaited<ReturnType<ModelGateway['imageRoute']>>): Promise<AssetsView> {
@@ -216,6 +225,9 @@ export class AssetService {
         promptEdited: !!rec?.prompt?.trim(),
         size: p.params.size,
         error: rec?.error ?? null,
+        review: rec?.review ?? null,
+        characterId: p.characterId ?? null,
+        expression: p.expression ?? null,
         model: rec?.model ?? null,
         revisedPrompt: rec?.revisedPrompt ?? null,
         history: (rec?.history ?? []).map((h) => ({ file: h.file, at: h.at })),
@@ -331,62 +343,183 @@ export class AssetService {
   private async produce(w: WorldAssets, slot: PlannedSlot, signal: AbortSignal): Promise<void> {
     const input = inputHashOf(slot, w.index);
     const base = this.fileBase(slot, input);
-    let rel = await this.cached(w, base);
-    let generated: { model: string; revisedPrompt: string | null } | null = null;
-    if (!rel) {
-      let h: ImageHandle;
-      try {
-        h = await this.gateway.forImage(`assets.${slot.kind}`);
-      } catch {
-        return; // 职责在排队期间被清掉了
-      }
-      const retries = w.settings.retries;
-      let lastErr: unknown;
-      for (let attempt = 0; attempt <= retries; attempt++) {
-        if (signal.aborted) return;
-        try {
-          const r = await h.client.generate({ model: h.model, prompt: slot.params.prompt, size: slot.params.size }, signal);
-          rel = `${base}.${IMAGE_EXT[r.mime] ?? 'png'}`;
-          await writeFileAtomic(this.store.assetPath(w.id, rel), r.data);
-          generated = { model: h.model, revisedPrompt: r.revisedPrompt };
-          break;
-        } catch (err) {
-          if (signal.aborted || (err instanceof ProviderError && err.aborted)) return;
-          lastErr = err;
-          const retryable = !(err instanceof ProviderError) || err.retryable || err.status === null;
-          if (!retryable || attempt === retries) break;
-          await sleep(this.retryBaseMs * 2 ** attempt, signal);
-        }
-      }
-      if (!rel || !generated) {
-        const message = lastErr instanceof Error ? lastErr.message : String(lastErr);
-        await this.mutate(w, (idx) => {
-          const rec = record(idx, slot.id);
-          rec.error = message;
-          rec.failedInput = input;
-          rec.requested = false;
-          rec.updatedAt = now();
-        });
-        return;
+    const hit = await this.cached(w, base);
+    if (hit) {
+      if (signal.aborted) return;
+      await this.commit(w, slot, input, { file: hit, rawFile: (await this.cached(w, `${base}.raw`)) ?? undefined });
+      return;
+    }
+    const mode = slot.params.transparency;
+    if (mode === 'service' && !(await this.gateway.cutoutRoute())) {
+      await this.fail(w, slot, input, '透明背景选了「抠图服务」，但还没有配「抠图」职责，请到 设置 → 职责路由 配置');
+      return;
+    }
+    let h: ImageHandle;
+    try {
+      h = await this.gateway.forImage(`assets.${slot.toggle}`);
+    } catch {
+      return; // 职责在排队期间被清掉了
+    }
+    // 表情差分：拿基础立绘抠图之前的原图当参考图
+    let reference: { data: Uint8Array; mime: string } | undefined;
+    if (slot.params.mode === 'edit') {
+      const dep = w.index.slots[slot.deps[0] ?? ''];
+      const ref = dep?.rawFile ?? dep?.file;
+      if (!ref) return;
+      const data = new Uint8Array(await fs.readFile(this.store.assetPath(w.id, ref)));
+      reference = { data, mime: sniffImage(data) ?? 'image/png' };
+    }
+
+    let r = await this.call(w, h, slot, reference, signal);
+    if (!r) return;
+    if ('error' in r) {
+      await this.fail(w, slot, input, r.error);
+      return;
+    }
+    let count = 1;
+    const meta = () => ({ model: h.model, revisedPrompt: (r as ImageResult).revisedPrompt, count });
+    if (slot.kind !== 'sprite' || !mode || mode === 'none') {
+      const rel = `${base}.${IMAGE_EXT[r.mime] ?? 'png'}`;
+      await writeFileAtomic(this.store.assetPath(w.id, rel), r.data);
+      if (!signal.aborted) await this.commit(w, slot, input, { file: rel, generated: meta() });
+      return;
+    }
+
+    // 立绘：抠图 → 检查透明度，不合格换一张再试一次，还不合格先用没抠的原图，标成"需要看一下"（18.5）
+    let cut = await this.cutout(slot, r, signal);
+    if (cut.reason && cut.retry && !signal.aborted) {
+      const again = await this.call(w, h, slot, reference, signal);
+      if (!again) return;
+      if (!('error' in again)) {
+        count += 1;
+        r = again;
+        cut = await this.cutout(slot, r, signal);
       }
     }
     if (signal.aborted) return;
-    const file = rel;
+    if (cut.image && !cut.reason && cut.native) {
+      // 服务直接给了透明图：原图就是成品
+      const rel = `${base}.png`;
+      await writeFileAtomic(this.store.assetPath(w.id, rel), r.data);
+      if (!signal.aborted) await this.commit(w, slot, input, { file: rel, generated: meta() });
+      return;
+    }
+    const raw = `${base}.raw.${IMAGE_EXT[r.mime] ?? 'png'}`;
+    await writeFileAtomic(this.store.assetPath(w.id, raw), r.data);
+    if (cut.image && !cut.reason) {
+      const rel = `${base}.png`;
+      await writeFileAtomic(this.store.assetPath(w.id, rel), encodeRgbaPng(cut.image));
+      if (!signal.aborted) await this.commit(w, slot, input, { file: rel, rawFile: raw, generated: meta() });
+    } else if (!signal.aborted) {
+      await this.commit(w, slot, input, { file: raw, rawFile: raw, review: cut.reason ?? '抠图失败', generated: meta() });
+    }
+  }
+
+  /** 调一次图像接口（失败按设置退避重试）。返回 null 表示中止了。 */
+  private async call(
+    w: WorldAssets,
+    h: ImageHandle,
+    slot: PlannedSlot,
+    reference: { data: Uint8Array; mime: string } | undefined,
+    signal: AbortSignal,
+  ): Promise<ImageResult | { error: string } | null> {
+    const retries = w.settings.retries;
+    const transparent = slot.params.transparency === 'auto' || slot.params.transparency === 'native';
+    const req = { model: h.model, prompt: slot.params.prompt, size: slot.params.size, transparent };
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      if (signal.aborted) return null;
+      try {
+        return reference ? await h.client.edit({ ...req, image: reference }, signal) : await h.client.generate(req, signal);
+      } catch (err) {
+        if (signal.aborted || (err instanceof ProviderError && err.aborted)) return null;
+        lastErr = err;
+        const retryable = !(err instanceof ProviderError) || err.retryable || err.status === null;
+        if (!retryable || attempt === retries) break;
+        await sleep(this.retryBaseMs * 2 ** attempt, signal);
+      }
+    }
+    return { error: lastErr instanceof Error ? lastErr.message : String(lastErr) };
+  }
+
+  /**
+   * 立绘抠图（18.5）。image：抠好的图；reason：没通过检查的原因；retry：换一张图值不值得再试
+   * （格式不对、抠图服务连不上这类问题换一张也没用）；native：服务直接给了透明图。
+   */
+  private async cutout(
+    slot: PlannedSlot,
+    r: ImageResult,
+    signal: AbortSignal,
+  ): Promise<{ image: RgbaImage | null; reason: string | null; retry: boolean; native: boolean }> {
+    const mode = slot.params.transparency;
+    const bad = (reason: string, retry = false) => ({ image: null, reason, retry, native: false });
+    if (mode === 'service') {
+      let out: ImageResult;
+      try {
+        const c = await this.gateway.forCutout('assets.cutout');
+        out = await c.client.remove({ data: r.data, mime: r.mime }, c.model, signal);
+      } catch (err) {
+        return bad(`抠图服务出错：${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (out.mime !== 'image/png') return bad('抠图服务返回的不是 PNG');
+      const img = decodePng(out.data);
+      const check = checkAlpha(img, { holes: true });
+      return { image: img, reason: check.reason, retry: true, native: false };
+    }
+    // H3 这类服务返回的是 JPEG（不带透明），也能内置抠图
+    const decode = r.mime === 'image/png' ? decodePng : r.mime === 'image/jpeg' ? decodeJpeg : null;
+    if (!decode) return bad(`图像服务返回的是 ${IMAGE_EXT[r.mime] ?? r.mime}，内置抠图只能处理 PNG 和 JPEG`);
+    let img: RgbaImage;
+    try {
+      img = decode(r.data);
+    } catch (err) {
+      return bad(`读不了这张图：${err instanceof Error ? err.message : String(err)}`);
+    }
+    if ((mode === 'auto' || mode === 'native') && hasTransparentBackdrop(img)) {
+      const check = checkAlpha(img, { holes: true });
+      return { image: img, reason: check.reason, retry: true, native: true };
+    }
+    const keyed = keyOut(img);
+    const check = checkAlpha(keyed);
+    return { image: keyed, reason: check.reason, retry: true, native: false };
+  }
+
+  private async fail(w: WorldAssets, slot: PlannedSlot, input: string, message: string): Promise<void> {
+    await this.mutate(w, (idx) => {
+      const rec = record(idx, slot.id);
+      rec.error = message;
+      rec.failedInput = input;
+      rec.requested = false;
+      rec.updatedAt = now();
+    });
+  }
+
+  /** 画好了（或者用了缓存）：登记文件。 */
+  private async commit(
+    w: WorldAssets,
+    slot: PlannedSlot,
+    input: string,
+    o: { file: string; rawFile?: string; review?: string; generated?: { model: string; revisedPrompt: string | null; count: number } },
+  ): Promise<void> {
     await this.mutate(w, (idx) => {
       const rec = record(idx, slot.id);
       pushHistory(rec);
-      rec.file = file;
+      rec.file = o.file;
+      if (o.rawFile) rec.rawFile = o.rawFile;
+      else delete rec.rawFile;
+      if (o.review) rec.review = o.review;
+      else delete rec.review;
       rec.builtParams = slot.paramsHash;
       rec.builtInput = input;
       rec.source = 'generated';
       rec.requested = false;
       delete rec.error;
       delete rec.failedInput;
-      if (generated) {
-        rec.model = generated.model;
-        if (generated.revisedPrompt) rec.revisedPrompt = generated.revisedPrompt;
+      if (o.generated) {
+        rec.model = o.generated.model;
+        if (o.generated.revisedPrompt) rec.revisedPrompt = o.generated.revisedPrompt;
         else delete rec.revisedPrompt;
-        idx.generated += 1;
+        idx.generated += o.generated.count;
       }
       rec.updatedAt = now();
     });
@@ -442,6 +575,9 @@ export class AssetService {
         r.history = r.history.filter((x) => x !== h);
         pushHistory(r);
         r.file = h.file;
+        if (h.rawFile) r.rawFile = h.rawFile;
+        else delete r.rawFile;
+        delete r.review;
         r.builtParams = h.builtParams;
         r.builtInput = h.builtInput;
         r.source = h.source;
@@ -493,6 +629,8 @@ export class AssetService {
       const r = record(idx, slotId);
       pushHistory(r);
       r.file = rel;
+      delete r.rawFile;
+      delete r.review;
       r.builtParams = slot.paramsHash;
       r.builtInput = inputHashOf(slot, idx);
       r.source = 'uploaded';
@@ -558,6 +696,13 @@ function record(idx: AssetIndex, id: string): AssetSlotRecord {
 /** 换图之前把现在的文件记进历史，素材页里可以换回去。 */
 function pushHistory(r: AssetSlotRecord) {
   if (!r.file) return;
-  const entry = { file: r.file, builtParams: r.builtParams, builtInput: r.builtInput, source: r.source, at: r.updatedAt ?? now() };
+  const entry = {
+    file: r.file,
+    ...(r.rawFile ? { rawFile: r.rawFile } : {}),
+    builtParams: r.builtParams,
+    builtInput: r.builtInput,
+    source: r.source,
+    at: r.updatedAt ?? now(),
+  };
   r.history = [entry, ...r.history.filter((h) => h.file !== r.file)].slice(0, MAX_HISTORY);
 }

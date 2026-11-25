@@ -37,6 +37,9 @@ export const BriefOut = z.object({
   era: text.default(''),
   themes: list,
   proseStyle: text.default(''),
+  artStyle: text.default(''),
+  artNegative: text.default(''),
+  musicStyle: text.default(''),
 });
 export type BriefOut = z.infer<typeof BriefOut>;
 
@@ -51,6 +54,9 @@ export const briefSpec: JsonSpec<BriefOut> = {
     era: '时代与科技水平',
     themes: ['主题1', '主题2', '主题3'],
     proseStyle: '文风要求（50～100 字）：句子长短、描写侧重、对话风格等',
+    artStyle: '画风（30～60 字），给画背景和立绘的图像模型看：插画风格、线条、上色和光影、整体色调，要和题材相配，例如：日系赛璐璐动画风，线条干净，色彩柔和，光影细腻',
+    artNegative: '画面里要避免的东西（可以为空），例如：写实照片感、过度饱和',
+    musicStyle: '音乐风格（20～40 字）：配器、节奏、情绪基调',
   },
 };
 
@@ -69,6 +75,7 @@ export const CharacterOut = z.object({
   age: text.default(''),
   summary: text.default(''),
   appearance: text.default(''),
+  imagePrompt: text.default(''),
   traits: list,
   values: list,
   fears: list,
@@ -106,6 +113,8 @@ export const castSpec: JsonSpec<CastOut> = {
         age: '年龄或年龄段',
         summary: '一句话介绍（20～40 字）',
         appearance: '外貌与衣着（40～80 字）',
+        imagePrompt:
+          '画立绘用的外貌描述（40～80 字），给图像模型看：发型和发色、瞳色、脸型、身材、服装和配饰的样式与颜色，写画师能照着画的具体特征，不写性格、动作和背景',
         traits: ['性格特点1', '性格特点2', '性格特点3'],
         values: ['看重的东西'],
         fears: ['害怕的东西'],

@@ -1,10 +1,12 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { type MockMessage, type MockRequestInfo, schemaNameOf, storyReply } from './mock-story.ts';
-import { mockImage } from './png.ts';
+import { decodeJpeg, isJpeg } from '../jpeg.ts';
+import { decodePng, encodeRgbaPng } from '../png.ts';
+import { colorOf, mockImage, mockSprite } from './png.ts';
 
 export type { MockRequestInfo } from './mock-story.ts';
-export { encodePng, mockImage } from './png.ts';
+export { colorOf, encodePng, mockImage, mockSprite } from './png.ts';
 
 /**
  * 一个本地的模拟 OpenAI 兼容服务，用于测试和没有 API Key 时的开发调试。
@@ -46,6 +48,14 @@ export interface MockServerOptions {
   imageUrl?: boolean;
   /** 模拟不认识 response_format 的服务（例如 gpt-image-1）：带了就返回 400。 */
   imageNoResponseFormat?: boolean;
+  /** 模拟支持透明输出的服务：立绘请求带了 background: "transparent" 就返回透明底的图。默认像 H3 一样忽略这个字段。 */
+  imageTransparent?: boolean;
+  /** 模拟不认识 background 字段的服务：带了就返回 400。 */
+  imageNoBackground?: boolean;
+  /** 提示词里含有这段文字的立绘画成杂乱的底（抠图检查不通过）。 */
+  imageNoisyIf?: string;
+  /** 立绘的文生图返回这张 JPEG（模拟 H3 这类只出 JPEG 的服务）。 */
+  spriteJpeg?: Uint8Array;
   /** 绑定的主机，默认 127.0.0.1。 */
   host?: string;
   port?: number;
@@ -56,8 +66,10 @@ export interface MockServer {
   baseURL: string;
   /** 收到的所有对话请求体。 */
   requests: Record<string, unknown>[];
-  /** 收到的所有图像请求体。 */
+  /** 收到的所有图像请求体（改图请求带 edit: true 和参考图的字节数 imageBytes）。 */
   imageRequests: Record<string, unknown>[];
+  /** 收到的抠图请求（/api/remove）。 */
+  cutoutRequests: { model: string; bytes: number }[];
   close(): Promise<void>;
 }
 
@@ -74,6 +86,33 @@ function defaultReply(last: string): string {
 function sendJson(res: http.ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
   res.end(JSON.stringify(body));
+}
+
+/** 读 multipart 表单（借 fetch 的 Request 解析）。 */
+async function readForm(req: http.IncomingMessage): Promise<FormData> {
+  const parts: Buffer[] = [];
+  for await (const part of req) parts.push(part as Buffer);
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers.set(k, v);
+  return new Request('http://mock.local/', { method: 'POST', headers, body: Buffer.concat(parts) }).formData();
+}
+
+/** 模拟改图：保持参考图不变，只在脸上按提示词换一个颜色的"嘴"（和 mockSprite 的位置一样）。 */
+function mockEdit(reference: Uint8Array, prompt: string): Buffer {
+  const img = isJpeg(reference) ? decodeJpeg(reference) : decodePng(reference);
+  const { width, height, data } = img;
+  const [r, g, b] = colorOf(prompt);
+  const cx = width / 2;
+  const headY = height * 0.26;
+  const headR = Math.min(width, height) * 0.16;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const dx = x + 0.5 - cx;
+      const dy = y + 0.5 - headY;
+      if (Math.abs(dx) < headR * 0.4 && dy > headR * 0.3 && dy < headR * 0.55) data.set([r, g, b, 255], (y * width + x) * 4);
+    }
+  }
+  return encodeRgbaPng(img);
 }
 
 function chunk(text: string, size: number): string[] {
@@ -96,6 +135,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
   };
   const requests: Record<string, unknown>[] = [];
   const imageRequests: Record<string, unknown>[] = [];
+  const cutoutRequests: { model: string; bytes: number }[] = [];
   const files = new Map<string, Buffer>();
   let chatCount = 0;
   let imageCount = 0;
@@ -112,10 +152,42 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         res.writeHead(200, { 'Content-Type': 'image/png' });
         return res.end(file);
       }
-      if (req.method === 'POST' && path === '/v1/images/generations') {
-        let raw = '';
-        for await (const part of req) raw += part;
-        const body = JSON.parse(raw) as Record<string, unknown>;
+      if (req.method === 'POST' && path === '/api/remove') {
+        // 模拟 rembg：接近白色或纯绿的像素变透明
+        const form = await readForm(req);
+        const file = form.get('file');
+        if (!(file instanceof Blob)) return sendJson(res, 400, { detail: 'file is required' });
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        cutoutRequests.push({ model: String(form.get('model') ?? ''), bytes: bytes.length });
+        const img = decodePng(bytes);
+        const d = img.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const [r, g, b] = [d[i] as number, d[i + 1] as number, d[i + 2] as number];
+          if ((r > 235 && g > 235 && b > 235) || (g > 200 && r < 60 && b < 60)) d[i + 3] = 0;
+        }
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        return res.end(encodeRgbaPng(img));
+      }
+      const isEdit = path === '/v1/images/edits';
+      if (req.method === 'POST' && (path === '/v1/images/generations' || isEdit)) {
+        let body: Record<string, unknown>;
+        let reference: Uint8Array | null = null;
+        if (isEdit) {
+          const form = await readForm(req);
+          body = { edit: true };
+          for (const [k, v] of form.entries()) {
+            if (k === 'image' && v instanceof Blob) {
+              reference = new Uint8Array(await v.arrayBuffer());
+              body.imageBytes = reference.length;
+            } else {
+              body[k] = typeof v === 'string' ? v : '[file]';
+            }
+          }
+        } else {
+          let raw = '';
+          for await (const part of req) raw += part;
+          body = JSON.parse(raw) as Record<string, unknown>;
+        }
         imageRequests.push(body);
         imageCount++;
         if (opts.imageDelayMs) await sleep(opts.imageDelayMs);
@@ -125,6 +197,9 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         if (opts.imageNoResponseFormat && body.response_format !== undefined) {
           return sendJson(res, 400, { error: { message: "Unknown parameter: 'response_format'." } });
         }
+        if (opts.imageNoBackground && body.background !== undefined) {
+          return sendJson(res, 400, { error: { message: "Unknown parameter: 'background'." } });
+        }
         const prompt = String(body.prompt ?? '');
         if (opts.imageRejectIf && prompt.includes(opts.imageRejectIf)) {
           return sendJson(res, 400, { error: { message: 'prompt rejected by safety system' } });
@@ -132,7 +207,27 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         // 按请求的比例出一张小图，测试不用真的传几兆的图片
         const [w, h] = String(body.size ?? '1024x1024').split('x').map(Number) as [number, number];
         const scale = 96 / Math.max(w || 1024, h || 1024);
-        const png = mockImage(prompt, Math.max(8, Math.round((w || 1024) * scale)), Math.max(8, Math.round((h || 1024) * scale)));
+        const pw = Math.max(8, Math.round((w || 1024) * scale));
+        const ph = Math.max(8, Math.round((h || 1024) * scale));
+        let png: Buffer;
+        if (isEdit) {
+          if (!reference) return sendJson(res, 400, { error: { message: 'image is required' } });
+          png = mockEdit(reference, prompt);
+        } else if (prompt.includes('立绘') && opts.spriteJpeg) {
+          png = Buffer.from(opts.spriteJpeg);
+        } else if (prompt.includes('立绘')) {
+          const backdrop =
+            opts.imageNoisyIf && prompt.includes(opts.imageNoisyIf)
+              ? 'noisy'
+              : opts.imageTransparent && body.background === 'transparent'
+                ? 'transparent'
+                : prompt.includes('纯绿')
+                  ? 'green'
+                  : 'white';
+          png = mockSprite(prompt, pw, ph, backdrop);
+        } else {
+          png = mockImage(prompt, pw, ph);
+        }
         const item: Record<string, unknown> = { revised_prompt: `（改写）${prompt.slice(0, 40)}` };
         if (opts.imageUrl) {
           const id = `img${imageCount}.png`;
@@ -272,6 +367,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
     baseURL: `http://${opts.host ?? '127.0.0.1'}:${port}/v1`,
     requests,
     imageRequests,
+    cutoutRequests,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

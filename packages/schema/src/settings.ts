@@ -79,7 +79,7 @@ export const AppSettings = z.object({
   endpoints: z.array(Endpoint).default([]),
   roles: z.partialRecord(RoleId, RoleRoute).default({}),
   /** 图像（以后还有语音、音乐）职责。和文本职责分开：没配就不生成，不会退回「默认」。 */
-  media: z.object({ image: MediaRoute.optional() }).prefault({}),
+  media: z.object({ image: MediaRoute.optional(), cutout: MediaRoute.optional() }).prefault({}),
   /** 素材管线的全局设置（18.11）。 */
   assets: AssetSettings.prefault({}),
 });

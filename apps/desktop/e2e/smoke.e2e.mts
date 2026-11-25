@@ -7,7 +7,8 @@
  * → 剧情 ADV：导入手写的示例世界 → VN 舞台上快进、自动、点击推进 → 选项和检定 → 存档 → 好结局
  *   → 回到上一个选择走普通结局 → 读档 → 回想（M3 第 2 步）
  * → 素材：配好图像职责 → 素材页里每个地点和剧本里的背景画好 → 重抽 → 改世界的背景尺寸后全部重画 → 换成自己的图
- *   → 剧情 ADV 舞台上换成真背景（M4 第 1 步）。
+ *   → 剧情 ADV 舞台上换成真背景（M4 第 1 步）
+ *   → 每个角色的基础立绘和表情差分画好、抠成透明 → 给一个角色多加一个表情 → 舞台上换成真立绘（M4 第 2 步）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
@@ -17,6 +18,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { decodePng } from '@auto-adv/providers';
 import { encodePng, startMockServer } from '@auto-adv/providers/testing';
 import { _electron as electron, type Page } from 'playwright-core';
 
@@ -466,13 +468,15 @@ try {
   await shot(page, '24-collection');
   step('收集：结局 2 / 3，CG 画廊里能看已经解锁的 CG');
 
-  // ── 素材（M4 第 1 步）：没配图像模型时用占位图；配好以后每个地点画一张背景，
-  // 手写剧本里自己起名的背景（不是地点 id 的）也各画一张：3 个地点 + 5 张剧本背景
+  // ── 素材（M4 第 1、2 步）：没配图像模型时用占位图；配好以后每个地点画一张背景，
+  // 手写剧本里自己起名的背景（不是地点 id 的）也各画一张：3 个地点 + 5 张剧本背景；
+  // 每个角色一张基础立绘加表情差分：沈默、林夕是主要角色各 6 张，老周是其他角色 3 张，一共 8 + 15 张
   // 只数这个世界的请求（前面生成的世界打开过，配好图像模型后它也会开始画）
   const libImages = () => server.imageRequests.filter((r) => /旧书库|阅览室|海堤|书中人/.test(String(r.prompt)));
+  const libSprites = () => server.imageRequests.filter((r) => /志愿者工牌|一本旧书|铜钥匙/.test(String(r.prompt)));
   await page.click('[data-testid="tab-assets"]');
   await page.waitForSelector('[data-testid="assets-needs-model"]');
-  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 0 / 8');
+  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 0 / 23');
   await page.click('[data-nav="settings"]');
   await page.click('button:has-text("职责路由")');
   await page.selectOption('[data-testid="role-endpoint-image"]', endpointId);
@@ -481,19 +485,25 @@ try {
   await page.waitForSelector('text=已保存「图像」');
   await page.click('[data-testid="tab-assets"]');
   await page.waitForSelector('[data-testid="asset-settings-global"] [data-testid="asset-template-background"]');
+  await page.waitForSelector('[data-testid="asset-settings-global"] [data-testid="asset-expressions"]');
   await shot(page, '25-asset-settings');
   step('设置里配好图像模型；素材的全局设置');
 
   await page.click('[data-nav="home"]');
   await page.click('[data-testid="world-card"] >> text=旧书库的约定');
   await page.click('[data-testid="tab-assets"]');
-  await page.waitForSelector('[data-testid="assets-progress"] >> text=素材 8 / 8', { timeout: 20_000 });
+  await page.waitForSelector('[data-testid="assets-progress"] >> text=素材 23 / 23', { timeout: 30_000 });
   await page.waitForFunction(
-    () => [...document.querySelectorAll('[data-testid="asset-image"]')].filter((i) => (i as HTMLImageElement).naturalWidth > 0).length === 8,
+    () => [...document.querySelectorAll('[data-testid="asset-image"]')].filter((i) => (i as HTMLImageElement).naturalWidth > 0).length === 23,
   );
   assert.equal(libImages().length, 8);
+  // 基础立绘是生成的（提示词里有外貌），表情差分拿基础立绘当参考图改图
+  assert.equal(libSprites().length, 3);
+  assert.equal((await page.$$('[data-testid="asset-character"]')).length, 3);
+  assert.equal(await page.locator('[data-testid="asset-character"][data-character="char_zhou"] [data-testid="asset-slot"]').count(), 3);
+  assert.equal(await page.locator('[data-testid="asset-review"]').count(), 0);
   await shot(page, '26-assets');
-  step('每个地点、剧本里的每张背景各画好一张，素材页里看得到');
+  step('每个地点、剧本里的每张背景，每个角色的立绘和表情差分都画好了，素材页里看得到');
 
   // 重抽一张：旧的进"之前的图"
   const sea = page.locator('[data-testid="asset-slot"][data-slot="bg/loc_seaside"]');
@@ -509,7 +519,7 @@ try {
   assert.equal(libImages().length, 9);
   await page.click('[data-testid="assets-redraw-stale"]');
   await page.waitForSelector('[data-testid="assets-stale"]', { state: 'detached' });
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="asset-slot"][data-status="done"]').length === 8);
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="asset-slot"][data-status="done"]').length === 23);
   assert.deepEqual(
     libImages()
       .slice(9)
@@ -530,6 +540,25 @@ try {
   await shot(page, '27-assets-upload');
   step('换成自己的图，自动锁定');
 
+  // 立绘：抠成透明的（角上透明，人物身上不透明）
+  const linSrc = await page.getAttribute('[data-testid="asset-slot"][data-slot="sprite/char_lin/neutral"] [data-testid="asset-image"]', 'src');
+  const linPng = decodePng(await readFile(path.join(dataDir, 'worlds', ...decodeURIComponent(new URL(linSrc ?? '').pathname).split('/').filter(Boolean))));
+  const alphaAt = (x: number, y: number) => linPng.data[(y * linPng.width + x) * 4 + 3];
+  assert.deepEqual([alphaAt(0, 0), alphaAt(linPng.width >> 1, linPng.height >> 1)], [0, 255], '立绘的角上应该是透明的，人物身上不透明');
+  // 给老周单独多加一个"难过"：只画这一张，用基础立绘改图
+  const editsBefore = server.imageRequests.filter((r) => r.edit === true).length;
+  const zhou = page.locator('[data-testid="asset-character"][data-character="char_zhou"]');
+  await zhou.locator('[data-testid="char-expressions-toggle"]').click();
+  await zhou.locator('[data-testid="char-expression"][data-expr="sad"]').click();
+  await zhou.locator('[data-testid="char-expressions-save"]').click();
+  await page.waitForSelector('[data-testid="asset-slot"][data-slot="sprite/char_zhou/sad"][data-status="done"]', { timeout: 20_000 });
+  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 24 / 24');
+  assert.equal(libSprites().length, 3, '加表情不重画基础立绘');
+  assert.ok(server.imageRequests.filter((r) => r.edit === true).length > editsBefore);
+  assert.equal(await zhou.locator('text=之前的图').count(), 0, '老周别的立绘不重画');
+  await shot(page, '27b-assets-sprites');
+  step('立绘抠成透明；给一个角色多加一个表情，只画这一张');
+
   // 舞台上换成真背景
   await page.click('[data-testid="playthrough"] >> button:has-text("继续")');
   await page.waitForSelector('[data-testid="adv-stage"]');
@@ -537,8 +566,12 @@ try {
     const img = document.querySelector('[data-testid="adv-bg-image"]') as HTMLImageElement | null;
     return !!img && img.complete && img.naturalWidth > 0;
   });
+  await page.waitForFunction(() => {
+    const img = document.querySelector('[data-testid="adv-sprite-image"]') as HTMLImageElement | null;
+    return !!img && img.complete && img.naturalWidth > 0;
+  });
   await shot(page, '28-adv-real-bg');
-  step('剧情 ADV 的舞台上换成了画好的背景');
+  step('剧情 ADV 的舞台上换成了画好的背景和立绘');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

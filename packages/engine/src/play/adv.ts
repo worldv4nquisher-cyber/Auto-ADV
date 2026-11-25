@@ -5,7 +5,7 @@
  * 选项和检定、岔路由玩家决定、数值上限这些规则都在引擎里（plot/judge.ts、plot/transition.ts），不靠提示词。
  */
 import type { ChatMessage } from '@auto-adv/providers';
-import { type Character, PlotScene } from '@auto-adv/schema';
+import { type Character, type ExpressionDef, PlotScene } from '@auto-adv/schema';
 import { z } from 'zod';
 import type { BeatMeta, PlayChunk, PlayEvent, PlotMark, SceneState, Segment } from '../api.ts';
 import { list, required, text } from '../genesis/specs.ts';
@@ -25,6 +25,7 @@ import type { SummaryRow } from './db.ts';
 import { validatePlan } from './observer/beat.ts';
 import { CheckProposal, DirectorOut, directorSpec, plotReportExample, plotReportRules } from './observer/prompts.ts';
 import { checkInstruction, openExits, plotSection, sceneBrief } from './plotprompt.ts';
+import { speechRule } from './expressions.ts';
 import { parseScript, ScriptStream } from './script.ts';
 import { foldState, type StoryState } from './state.ts';
 
@@ -116,6 +117,7 @@ function advWriterMessages(
   memory: string | null,
   recent: PlayEvent[],
   instruction: string,
+  expressions?: readonly ExpressionDef[],
 ): ChatMessage[] {
   const pName = protagonist?.name ?? '主角';
   const location = world.locations.find((l) => l.id === state.scene.locationId);
@@ -124,7 +126,7 @@ function advWriterMessages(
     `你是一部剧情 ADV（视觉小说）的「演员兼旁白」。玩家扮演${pName}，其他角色都由你来演，导演会告诉你这一拍要演什么。
 
 # 输出格式（必须严格遵守）
-- 角色说话：单独一行，以【角色名】开头，动作和神态写在台词前的括号里。例如：【${present[0]?.name ?? '角色名'}】（抬起头）你来晚了。
+${speechRule(present[0]?.name ?? '角色名', expressions)}
 - 旁白：不带任何前缀的行，用第三人称（开场里如果有「你」，指的是${pName}）。
 - 150～350 字，把导演安排的这一拍演出来，停在需要玩家做决定的地方，不要替玩家做决定。
 - ${pName}只做玩家选择的事；可以让${pName}说话，但只说和玩家的选择相符的话。
@@ -168,6 +170,8 @@ export interface AdvBeatInput {
   signal: AbortSignal;
   meter: Meter;
   emit: (c: PlayChunk) => void;
+  /** 表情表（台词前括号里的第一个词换表情，18.6）。 */
+  expressions?: readonly ExpressionDef[];
 }
 
 /** 导演最多看最近这么多条原文（更早的靠前情提要）。 */
@@ -244,7 +248,7 @@ export async function runAdvBeat(p: AdvBeatInput): Promise<{ draft: EventDraft; 
   const stream = new ScriptStream({ cast: world.characters });
   const result = await gateway.run(
     writer,
-    { messages: advWriterMessages(world, playState, protagonist, p.summary?.text ?? null, recent, instruction) },
+    { messages: advWriterMessages(world, playState, protagonist, p.summary?.text ?? null, recent, instruction, p.expressions) },
     {
       signal: p.signal,
       onText: (d) => {
@@ -267,6 +271,7 @@ export async function runAdvBeat(p: AdvBeatInput): Promise<{ draft: EventDraft; 
     before,
     scene: nextScene,
     protagonistId: protagonist?.id ?? null,
+    ...(p.expressions ? { expressions: p.expressions } : {}),
   });
 
   const prev = state.scene;

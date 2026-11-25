@@ -1,4 +1,4 @@
-import type { Character, ObserverSettings } from '@auto-adv/schema';
+import type { Character, ExpressionDef, ObserverSettings } from '@auto-adv/schema';
 import type { BeatMeta, ObserverChunk, PlayEvent, PlotAppend, PlotMark, SceneState, Segment } from '../../api.ts';
 import { checkGraphOut, graphSpec } from '../../genesis/graph.ts';
 import type { Meter, ModelGateway } from '../../llm/gateway.ts';
@@ -40,6 +40,8 @@ export interface BeatInput {
   signal: AbortSignal;
   meter: Meter;
   emit: (c: ObserverChunk) => void;
+  /** 表情表：提示词里让演员在括号里先写表情（舞台在界面里按它换表情差分）。 */
+  expressions?: readonly ExpressionDef[];
 }
 
 /** 导演最多看最近这么多条原文（更早的靠前情提要）。 */
@@ -238,7 +240,7 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
     const stream = new ScriptStream({ cast: world.characters });
     const result = await gateway.run(
       h,
-      { messages: writerMessages(world, playState, p.summary?.text ?? null, p.summary?.characters ?? {}, recent, instruction, pName) },
+      { messages: writerMessages(world, playState, p.summary?.text ?? null, p.summary?.characters ?? {}, recent, instruction, pName, p.expressions) },
       {
         signal: p.signal,
         onText: (d) => {
@@ -308,6 +310,7 @@ export async function runBeat(p: BeatInput, parentId: string): Promise<PlayEvent
             intent,
             whispers: whispers.filter((w) => w.characterId === me.id).map((w) => w.text ?? ''),
             knownSecrets: known,
+            ...(p.expressions ? { expressions: p.expressions } : {}),
           }),
         },
         {

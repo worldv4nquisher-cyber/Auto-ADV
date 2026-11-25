@@ -116,6 +116,11 @@ export interface AssetSlotView {
   promptEdited: boolean;
   size: string;
   error: string | null;
+  /** 立绘抠图没通过透明度检查：现在用的是没抠的原图，要你看一下。 */
+  review: string | null;
+  /** 立绘：哪个角色、哪个表情。 */
+  characterId: string | null;
+  expression: string | null;
   model: string | null;
   revisedPrompt: string | null;
   /** 之前用过的文件，可以换回去。 */

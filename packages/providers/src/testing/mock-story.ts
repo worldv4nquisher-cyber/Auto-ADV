@@ -45,7 +45,17 @@ const NARRATION = [
   '档案馆的书架之间弥漫着纸张发霉的气味，脚步声被吸得很轻。',
   '潮水退了，礁石上露出一串新鲜的脚印，一直通向灯塔。',
 ];
-const ACTIONS = ['压低声音', '把杯子推到一边', '盯着窗外', '从怀里掏出一张旧照片', '笑了一下', '停下脚步', '摸了摸口袋里的钥匙', '回头看了一眼'];
+/** 括号里第一个词是表情（18.6），后面是动作。 */
+const ACTIONS = [
+  '平静，压低声音',
+  '微笑，把杯子推到一边',
+  '难过，盯着窗外',
+  '惊讶，从怀里掏出一张旧照片',
+  '笑了一下',
+  '生气，停下脚步',
+  '害羞，摸了摸口袋里的钥匙',
+  '愣了一下，回头看了一眼',
+];
 const LINES = [
   '昨晚我又看见那道光了，比上次亮。',
   '守灯人的日志少了最后三页，你知道是谁拿走的吗？',
@@ -237,6 +247,9 @@ export function storyReply(info: MockRequestInfo): string | undefined {
         era: '蒸汽与电灯交替的年代',
         themes: ['归乡', '秘密', '守望'],
         proseStyle: '短句为主，多写声音和气味，对话简洁有留白。',
+        artStyle: '水彩质感的日系插画，雾气朦胧，冷色调里点缀昏黄的灯光',
+        artNegative: '写实照片感',
+        musicStyle: '钢琴和大提琴，慢节奏，带一点海风般的回响',
       });
     case 'world_cast': {
       const n = Number(/加上 (\d+) 个其他角色/.exec(firstUser)?.[1] ?? 3);
@@ -251,6 +264,7 @@ export function storyReply(info: MockRequestInfo): string | undefined {
             age: '24',
             summary: '离开雾港多年后回乡的年轻记者',
             appearance: '风衣、旧相机，眼神总在找什么',
+            imagePrompt: '黑色短发，深棕色眼睛，瘦高，灰色长风衣，脖子上挂着旧相机',
             traits: ['好奇', '固执'],
             speechStyle: '简短直接',
             background: '十年前父亲在灯塔失踪，此后离开雾港。',
@@ -264,6 +278,7 @@ export function storyReply(info: MockRequestInfo): string | undefined {
             age: String(20 + i * 7),
             summary: `${name}，雾港的居民，似乎知道些什么`,
             appearance: '被海风吹得有些凌乱的头发',
+            imagePrompt: i === 0 ? '栗色及肩长发，琥珀色眼睛，深蓝色呢子大衣，白色围巾' : `${i % 2 ? '短发' : '马尾'}，灰色眼睛，粗布外套`,
             traits: ['谨慎', '善良'],
             values: ['家人'],
             fears: ['大雾'],

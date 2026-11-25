@@ -4,6 +4,12 @@
   "name": "林夕",
   "aliases": ["小夕"],
   "role": "heroine",
+  "gender": "女",
+  "age": "19",
   "summary": "图书馆的常客，总在找一本不存在的书。三年前，她的姐姐借走那本书后失踪了。",
+  "appearance": {
+    "text": "黑色长发，眼睛很亮，冬天总围着一条红围巾。",
+    "imagePrompt": "黑色及腰长发，琥珀色眼睛，红色针织围巾，米色呢子大衣，深棕色格子短裙，黑色长筒袜，怀里抱着一本旧书"
+  },
   "expressions": ["neutral", "surprised", "angry", "sad", "smile"]
 }

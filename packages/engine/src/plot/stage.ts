@@ -25,6 +25,30 @@ export function resolveSpeaker(token: string, cast: Cast): { characterId: string
   return c ? { characterId: c.id, name: c.name } : { characterId: null, name: token };
 }
 
+/** 表情表里认表情用到的部分（和 @auto-adv/schema 的 ExpressionDef 一样）。 */
+export interface ExpressionLike {
+  id: string;
+  name: string;
+  synonyms: readonly string[];
+}
+
+/**
+ * 台词开头括号里的第一个词对应哪个表情（18.6）：先按名字、id、同义词完全对上，
+ * 再看第一个词里有没有包含这些词（"笑了一下"认成微笑，"愣了一下"认成惊讶）。对不上返回 null，保持上一个表情。
+ */
+export function expressionOfLine(text: string, table: readonly ExpressionLike[]): string | null {
+  const m = /^\s*[（(]([^（）()]{1,40})[）)]/.exec(text);
+  const first = m?.[1]?.split(/[，,、；;。！!？?\s]/)[0]?.trim();
+  if (!first) return null;
+  const lower = first.toLowerCase();
+  for (const e of table) if (e.name === first || e.id === lower || e.synonyms.includes(first)) return e.id;
+  const words = table
+    .flatMap((e) => [e.name, ...e.synonyms].map((w) => ({ w, id: e.id })))
+    .filter((x) => x.w)
+    .sort((a, b) => b.w.length - a.w.length);
+  return words.find((x) => first.includes(x.w))?.id ?? null;
+}
+
 /** 立绘站位：舞台宽度的百分比（立绘中心）。 */
 export const SPRITE_POSITIONS: Record<string, number> = {
   farleft: 14,
@@ -135,7 +159,7 @@ export interface TimelineOptions {
    * 不给时这些事件只按文本段落播放（剧情 ADV 的事件都带着舞台指令）。
    * protagonistId：不出立绘的角色（剧情 ADV 里玩家扮演的主角）；观察模式里观众不是主角，为 null。
    */
-  auto?: { protagonistId: string | null };
+  auto?: { protagonistId: string | null; expressions?: readonly ExpressionLike[] };
 }
 
 const emptyView = (): StageView => ({ bg: null, sprites: [], cg: null, bgm: null });
@@ -262,7 +286,7 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
         ev.kind === 'player' && ev.characterId
           ? [{ kind: 'line', characterId: ev.characterId, name: nameOf(ev.characterId), text: ev.text ?? '' }]
           : [];
-      for (const c of stageFromSegments(segs, { characters: opts.characters, before: view, scene: place, protagonistId: opts.auto.protagonistId }))
+      for (const c of stageFromSegments(segs, { characters: opts.characters, before: view, scene: place, ...opts.auto }))
         run(ev, c);
       continue;
     }
@@ -306,7 +330,7 @@ export function buildTimeline(path: readonly PlayEvent[], opts: TimelineOptions)
     const stage =
       ev.stage ??
       (opts.auto && ev.segments
-        ? stageFromSegments(ev.segments, { characters: opts.characters, before: view, scene: place, protagonistId: opts.auto.protagonistId })
+        ? stageFromSegments(ev.segments, { characters: opts.characters, before: view, scene: place, ...opts.auto })
         : undefined);
     if (stage) {
       for (const c of stage) run(ev, c);
@@ -355,6 +379,8 @@ export interface SegmentsToStageOptions {
   scene: { locationId: string | null; presentCharacterIds: readonly string[] };
   /** 主角（玩家）：VN 里一般不给主角立绘，主角说话只出名字牌。 */
   protagonistId: string | null;
+  /** 表情表：台词前括号里的第一个词是表情时换上对应的表情差分。不给就不换表情。 */
+  expressions?: readonly ExpressionLike[];
 }
 
 /** 同时在台上的立绘最多几个。 */
@@ -368,19 +394,22 @@ export function stageFromSegments(segments: readonly Segment[], o: SegmentsToSta
   const out: StageCommand[] = [];
   const loc = o.scene.locationId;
   let shown: string[] = o.before.sprites.map((s) => s.characterId ?? s.key);
+  const face = new Map(o.before.sprites.map((s) => [s.characterId ?? s.key, s.expr]));
   if (loc && o.before.bg?.id !== loc) {
     out.push({ op: 'bg', id: loc });
     shown = [];
+    face.clear();
   }
   const present = o.scene.presentCharacterIds.filter((id) => id !== o.protagonistId);
   for (const id of shown) {
     if (!present.includes(id) && o.characters.some((c) => c.id === id)) out.push({ op: 'hide', char: id });
   }
   shown = shown.filter((id) => present.includes(id) || !o.characters.some((c) => c.id === id));
-  const enter = (id: string) => {
+  const enter = (id: string, expr?: string) => {
     if (shown.includes(id) || shown.length >= MAX_SPRITES) return;
-    out.push({ op: 'show', char: id });
+    out.push({ op: 'show', char: id, ...(expr ? { expr } : {}) });
     shown.push(id);
+    face.set(id, expr ?? 'neutral');
   };
   for (const id of present.slice(0, 3)) enter(id);
   for (const s of segments) {
@@ -388,7 +417,15 @@ export function stageFromSegments(segments: readonly Segment[], o: SegmentsToSta
       out.push({ op: 'narrate', text: s.text });
       continue;
     }
-    if (s.characterId && s.characterId !== o.protagonistId) enter(s.characterId);
+    if (s.characterId && s.characterId !== o.protagonistId) {
+      const expr = o.expressions ? expressionOfLine(s.text, o.expressions) : null;
+      if (!shown.includes(s.characterId)) enter(s.characterId, expr ?? undefined);
+      else if (expr && face.get(s.characterId) !== expr) {
+        // 换表情：同一个立绘，只换表情
+        out.push({ op: 'show', char: s.characterId, expr });
+        face.set(s.characterId, expr);
+      }
+    }
     out.push({ op: 'say', char: s.characterId ?? s.name, text: s.text });
   }
   return out;

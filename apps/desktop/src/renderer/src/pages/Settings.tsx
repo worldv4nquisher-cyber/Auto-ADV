@@ -1,6 +1,17 @@
 import type { EndpointView, ProbeChunk } from '@auto-adv/engine/api';
 import { ENDPOINT_PRESETS, PROBE_STEP_LABELS, type ProbeStep } from '@auto-adv/providers';
-import { type AssetSettings, type Capabilities, MEDIA_ROLE_LABELS, ROLE_IDS, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
+import {
+  type AssetSettings,
+  type Capabilities,
+  MEDIA_ROLE_APIS,
+  MEDIA_ROLE_LABELS,
+  type MediaRoleId,
+  type MediaRoute,
+  ROLE_IDS,
+  ROLE_LABELS,
+  type RoleId,
+  type RoleRoute,
+} from '@auto-adv/schema';
 import { useEffect, useMemo, useState } from 'react';
 import { Badge, Button, Card, cx, Empty, Field, Input, PageHeader, Select, Spinner, Tabs, useToast } from '../components/ui.tsx';
 import { engine, errorMessage, isAborted } from '../lib/engine.ts';
@@ -553,16 +564,22 @@ function RolesTab() {
         <RoleRow key={role} role={role} />
       ))}
       <h3 className="pt-4 text-sm font-medium text-muted">素材</h3>
-      <ImageRoleRow />
+      <MediaRoleRow role="image" />
+      <MediaRoleRow role="cutout" />
     </div>
   );
 }
 
 /** 图像职责：接入点、模型（不会退回「默认」的文本模型）。可以画一张小图试试，会花一张图的额度。 */
-function ImageRoleRow() {
+const MEDIA_API_LABELS: Record<MediaRoute['api'], string> = { openai: 'OpenAI 风格', rembg: 'rembg（/api/remove）' };
+
+/** 媒体职责的一行：图像（背景、立绘）、抠图（立绘的透明背景选了「抠图服务」时用）。 */
+function MediaRoleRow({ role }: { role: MediaRoleId }) {
   const { settings, refresh } = useSettings();
   const toast = useToast();
-  const current = settings?.media.image;
+  const current = settings?.media[role];
+  const isImage = role === 'image';
+  const api = MEDIA_ROLE_APIS[role][0] ?? 'openai';
   const [endpointId, setEndpointId] = useState(current?.endpointId ?? '');
   const [model, setModel] = useState(current?.model ?? '');
   const [saving, setSaving] = useState(false);
@@ -575,16 +592,20 @@ function ImageRoleRow() {
   const endpoint = settings?.endpoints.find((e) => e.id === endpointId);
   const dirty = endpointId !== (current?.endpointId ?? '') || model !== (current?.model ?? '');
 
+  const label = MEDIA_ROLE_LABELS[role];
   const save = async (clear = false) => {
-    if (!clear && (!endpointId || !model.trim())) {
-      toast('err', '请选择接入点并填写图像模型');
+    if (!clear && (!endpointId || (isImage && !model.trim()))) {
+      toast('err', isImage ? '请选择接入点并填写图像模型' : '请选择抠图服务的接入点');
       return;
     }
     setSaving(true);
     try {
-      await engine.call('setMediaRole', { role: 'image', route: clear ? null : { endpointId, model: model.trim(), api: 'openai' } });
+      await engine.call('setMediaRole', { role, route: clear ? null : { endpointId, model: model.trim(), api } });
       await refresh();
-      toast('ok', clear ? '已清除「图像」' : '已保存「图像」，打开着的世界会开始画背景');
+      toast(
+        'ok',
+        clear ? `已清除「${label.name}」` : isImage ? '已保存「图像」，打开着的世界会开始画背景和立绘' : `已保存「${label.name}」`,
+      );
     } catch (err) {
       toast('err', errorMessage(err));
     } finally {
@@ -604,14 +625,13 @@ function ImageRoleRow() {
     }
   };
 
-  const label = MEDIA_ROLE_LABELS.image;
   return (
-    <Card className="px-5 py-3.5" data-testid="role-image">
+    <Card className="px-5 py-3.5" data-testid={`role-${role}`}>
       <div className="flex items-center gap-4">
         <div className="w-44 shrink-0">
           <div className="flex items-center gap-2 text-sm font-medium">
             {label.name}
-            {!current && <span className="text-xs font-normal text-faint">未设置，用占位图</span>}
+            {!current && <span className="text-xs font-normal text-faint">{isImage ? '未设置，用占位图' : '未设置'}</span>}
           </div>
           <div className="mt-0.5 text-xs leading-snug text-muted">{label.hint}</div>
         </div>
@@ -619,7 +639,7 @@ function ImageRoleRow() {
           value={endpointId}
           onChange={(e) => setEndpointId(e.target.value)}
           className="w-44"
-          data-testid="role-endpoint-image"
+          data-testid={`role-endpoint-${role}`}
         >
           <option value="">未设置</option>
           {settings?.endpoints.map((e) => (
@@ -631,26 +651,32 @@ function ImageRoleRow() {
         <Input
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          placeholder="图像模型名，例如 MiniMax-H3-Image"
-          list="image-models"
+          placeholder={isImage ? '图像模型名，例如 MiniMax-H3-Image' : '模型（可以不填），例如 isnet-anime'}
+          list={`${role}-models`}
           className="min-w-0 flex-1 font-mono text-xs"
           disabled={!endpointId}
-          data-testid="role-model-image"
+          data-testid={`role-model-${role}`}
         />
-        <datalist id="image-models">
+        <datalist id={`${role}-models`}>
           {endpoint?.models.map((m) => (
             <option key={m} value={m} />
           ))}
         </datalist>
-        <Select value="openai" onChange={() => {}} className="w-36" title="接口类型">
-          <option value="openai">OpenAI 风格</option>
+        <Select value={api} onChange={() => {}} className="w-36" title="接口类型">
+          {MEDIA_ROLE_APIS[role].map((a) => (
+            <option key={a} value={a}>
+              {MEDIA_API_LABELS[a]}
+            </option>
+          ))}
         </Select>
         <div className="flex w-40 justify-end gap-1">
-          <Button size="sm" variant="ghost" disabled={!endpointId || !model.trim()} loading={testing} onClick={() => void runTest()} title="画一张小图试试，会花一张图的额度">
-            测试
-          </Button>
+          {isImage && (
+            <Button size="sm" variant="ghost" disabled={!endpointId || !model.trim()} loading={testing} onClick={() => void runTest()} title="画一张小图试试，会花一张图的额度">
+              测试
+            </Button>
+          )}
           {dirty ? (
-            <Button size="sm" variant="primary" onClick={() => void save()} loading={saving} data-testid="role-save-image">
+            <Button size="sm" variant="primary" onClick={() => void save()} loading={saving} data-testid={`role-save-${role}`}>
               保存
             </Button>
           ) : current ? (

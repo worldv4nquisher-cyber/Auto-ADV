@@ -5,11 +5,13 @@ import { existsSync } from 'node:fs';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { encodePng, type MockServer, type MockServerOptions, startMockServer } from '@auto-adv/providers/testing';
+import { decodePng, type RgbaImage } from '@auto-adv/providers';
+import { encodePng, type MockServer, type MockServerOptions, mockSprite, startMockServer } from '@auto-adv/providers/testing';
 import { AssetIndex, AssetSettings } from '@auto-adv/schema';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type AssetsView, createPortPair, Engine, type EngineContract, MemorySecretStore, RpcClient, serveRpc } from '../src/index.ts';
-import { planAssets, priorityOf } from '../src/assets/plan.ts';
+import { checkAlpha, hasTransparentBackdrop, keyOut } from '../src/assets/cutout.ts';
+import { type PlannedSlot, planAssets, priorityOf } from '../src/assets/plan.ts';
 import { BUILTIN_TEMPLATES, DEFAULT_ART_STYLE, renderTemplate } from '../src/assets/templates.ts';
 import { WorldStore } from '../src/world/store.ts';
 
@@ -34,10 +36,13 @@ async function teardown() {
 afterEach(teardown);
 
 /**
- * 导入示例世界。默认去掉手写剧本，只剩 3 个地点的背景；scripts: true 时连剧本一起导入（再加 5 张剧本里的背景）。
+ * 导入示例世界。默认去掉手写剧本、关掉立绘，只剩 3 个地点的背景；
+ * scripts: true 时连剧本一起导入（再加 5 张剧本里的背景）；sprites: true 时画立绘（沈默、林夕各 6 个表情，老周 3 个）。
  * image：要不要配好图像职责。
  */
-async function setup(opts: { image?: boolean; mock?: MockServerOptions; assets?: Partial<AssetSettings>; scripts?: boolean } = {}) {
+async function setup(
+  opts: { image?: boolean; mock?: MockServerOptions; assets?: Partial<AssetSettings>; scripts?: boolean; sprites?: boolean } = {},
+) {
   await teardown();
   open = true;
   dir = await mkdtemp(path.join(os.tmpdir(), 'auto-adv-assets-'));
@@ -54,7 +59,10 @@ async function setup(opts: { image?: boolean; mock?: MockServerOptions; assets?:
     pricing: {},
   });
   endpointId = ep.id;
-  if (opts.assets) await client.call('saveAssetSettings', { settings: AssetSettings.parse(opts.assets) });
+  const sprites = !!opts.sprites;
+  await client.call('saveAssetSettings', {
+    settings: AssetSettings.parse({ ...opts.assets, enabled: { sprite: sprites, expression: sprites, ...opts.assets?.enabled } }),
+  });
   let src = path.join(EXAMPLES, 'old_library');
   if (!opts.scripts) {
     src = path.join(dir, 'src', 'old_library');
@@ -97,7 +105,7 @@ describe('提示词模板', () => {
     const store = new WorldStore(EXAMPLES);
     const world = await store.load('old_library');
     const base = AssetSettings.parse({});
-    const plan = planAssets(world, base, AssetIndex.parse({}));
+    const plan = planAssets(world, base, AssetIndex.parse({})).filter((p) => p.kind === 'background');
     expect(plan.map((p) => p.id)).toEqual([
       'bg/loc_archive',
       'bg/loc_reading',
@@ -139,7 +147,7 @@ describe('提示词模板', () => {
 
   it('优先级：当前地点 → 当前幕和紧接着的幕的地点 → 其余', async () => {
     const world = await new WorldStore(EXAMPLES).load('old_library');
-    const plan = planAssets(world, AssetSettings.parse({}), AssetIndex.parse({}));
+    const plan = planAssets(world, AssetSettings.parse({}), AssetIndex.parse({})).filter((p) => p.kind === 'background');
     const pr = (focus: Parameters<typeof priorityOf>[2]) => plan.map((p) => priorityOf(p, world, focus));
     // 没在玩：开始的幕在阅览室，它通往旧书库。剧本里的背景跟着幕走：sc_01 的先画，紧接着的 sc_02 其次
     expect(pr(null)).toEqual([2, 2, 4, 1, 2, 4, 4, 4]);
@@ -149,7 +157,7 @@ describe('提示词模板', () => {
 
   it('手写剧本里的背景：不是地点 id 的每个 id 一张，用那一幕的地点、标题和第一句旁白描述画面', async () => {
     const world = await new WorldStore(EXAMPLES).load('old_library');
-    const plan = planAssets(world, AssetSettings.parse({}), AssetIndex.parse({}));
+    const plan = planAssets(world, AssetSettings.parse({}), AssetIndex.parse({})).filter((p) => p.kind === 'background');
     const door = plan.find((p) => p.id === 'bg/archive_door');
     expect(door).toMatchObject({ kind: 'background', dir: 'bg', slug: 'archive_door', locationId: 'loc_archive', sceneIds: ['sc_02'] });
     expect(door?.title).toBe('旧书库的门 · archive_door');
@@ -169,7 +177,7 @@ describe('提示词模板', () => {
     );
     expect(reused.filter((p) => p.id === 'bg/loc_archive')).toHaveLength(1);
     expect(reused.find((p) => p.id === 'bg/archive_door')?.sceneIds).toEqual(['sc_02', 'sc_04']);
-    expect(reused).toHaveLength(8);
+    expect(reused.filter((p) => p.kind === 'background')).toHaveLength(8);
   });
 });
 
@@ -179,7 +187,7 @@ describe('素材管线', () => {
     const v = await client.call('assetsView', { worldId: id });
     expect(v.state.needsModel).toBe(true);
     expect(v.state.working).toBe(false);
-    expect(v.slots.map((s) => s.status)).toEqual(['pending', 'pending', 'pending']);
+    expect(v.slots.filter((s) => s.kind === 'background').map((s) => s.status)).toEqual(['pending', 'pending', 'pending']);
     expect(server.imageRequests).toHaveLength(0);
   });
 
@@ -328,7 +336,7 @@ describe('素材管线', () => {
 
     id = await setup({ assets: { enabled: { background: false } as AssetSettings['enabled'] } });
     v = await idle(id);
-    expect(v.slots.map((s) => s.status)).toEqual(['disabled', 'disabled', 'disabled']);
+    expect(v.slots.filter((s) => s.kind === 'background').map((s) => s.status)).toEqual(['disabled', 'disabled', 'disabled']);
     expect(v.counts.total).toBe(0);
     expect(server.imageRequests).toHaveLength(0);
   });
@@ -353,7 +361,7 @@ describe('素材管线', () => {
     const file = slot(v0, 'bg/loc_seaside').file ?? '';
     await rm(path.join(dir, 'worlds', id, 'locations', 'loc_seaside.json'));
     let v = await client.call('assetsView', { worldId: id });
-    expect(v.slots).toHaveLength(2);
+    expect(v.slots.filter((s) => s.kind === 'background')).toHaveLength(2);
     expect(v.orphans).toEqual([{ id: 'bg/loc_seaside', file }]);
     v = await client.call('assetsControl', { worldId: id, action: 'cleanOrphans' });
     expect(v.orphans).toEqual([]);
@@ -400,5 +408,326 @@ describe('手写剧本的背景', () => {
     expect(v.counts).toMatchObject({ total: 8, done: 8 });
     expect(slot(v, 'bg/reading_evening').file).toMatch(/^assets\/bg\/reading_evening-[0-9a-f]{12}\.png$/);
     expect(server.imageRequests).toHaveLength(8);
+  });
+});
+
+// ───────────── 第 2 步：立绘 ─────────────
+
+const rgba = (png: Uint8Array) => decodePng(png);
+const alphaAt = (img: RgbaImage, x: number, y: number) => img.data[(y * img.width + x) * 4 + 3];
+
+describe('内置抠图和透明度检查', () => {
+  it('纯白底、纯绿底、偏灰的白底都能抠干净；人物不透明，边缘半透明', () => {
+    for (const backdrop of ['white', 'green'] as const) {
+      const img = rgba(mockSprite('角色立绘', 64, 96, backdrop));
+      expect(hasTransparentBackdrop(img)).toBe(false);
+      const cut = keyOut(img);
+      expect(alphaAt(cut, 0, 0)).toBe(0);
+      expect(alphaAt(cut, 63, 40)).toBe(0);
+      expect(alphaAt(cut, 32, 25)).toBe(255); // 脸
+      expect(alphaAt(cut, 32, 90)).toBe(255); // 身子
+      expect(hasTransparentBackdrop(cut)).toBe(true);
+      const check = checkAlpha(cut);
+      expect(check.ok).toBe(true);
+      expect(check.coverage).toBeGreaterThan(0.15);
+      expect(check.coverage).toBeLessThan(0.7);
+    }
+    const grey = rgba(encodePng(40, 60, (x, y) => (Math.abs(x - 20) < 8 && y > 10 ? [90, 40, 40, 255] : [238, 238, 230, 255])));
+    expect(alphaAt(keyOut(grey), 0, 0)).toBe(0);
+  });
+
+  it('被人物围起来的大块底色也去掉，小块的高光留着', () => {
+    // 一个"口"字形的人物：中间 10x10 的白底（大块），右上角 1 个白点（高光）
+    const img = rgba(
+      encodePng(40, 60, (x, y) => {
+        const inFrame = x >= 8 && x < 32 && y >= 10;
+        const hole = x >= 15 && x < 25 && y >= 20 && y < 30;
+        const shine = x === 28 && y === 12;
+        return inFrame && !hole && !shine ? [60, 60, 120, 255] : [255, 255, 255, 255];
+      }),
+    );
+    const cut = keyOut(img);
+    expect(alphaAt(cut, 20, 25)).toBe(0);
+    expect(alphaAt(cut, 28, 12)).toBe(255);
+  });
+
+  it('白底：挨着轮廓的小块底色（发丝之间）去掉，离轮廓远的小块（眼白）留着；混了底色的轮廓做半透明并去掉底色', () => {
+    const img = rgba(
+      encodePng(60, 80, (x, y) => {
+        if (x === 9 && y >= 10) return [138, 138, 138, 255]; // 深色轮廓和白底各一半
+        if (x < 10 || x >= 50 || y < 10) return [255, 255, 255, 255];
+        if (x >= 12 && x < 14 && y >= 30 && y < 38) return [255, 255, 255, 255]; // 发丝之间的空隙，离外面 3 个像素
+        if (x >= 28 && x < 32 && y >= 40 && y < 43) return [250, 250, 250, 255]; // 眼白，离外面将近 20 个像素
+        return [20, 20, 20, 255];
+      }),
+    );
+    const cut = keyOut(img);
+    expect(alphaAt(cut, 12, 33)).toBe(0);
+    expect(alphaAt(cut, 29, 41)).toBe(255);
+    const edge = (9 + 40 * 60) * 4;
+    expect(cut.data[edge + 3]).toBeGreaterThan(100);
+    expect(cut.data[edge + 3]).toBeLessThan(160);
+    expect(cut.data[edge]).toBeLessThan(60); // 去掉白底以后是深色的，不是一圈浅灰
+  });
+
+  it('鲜艳的底色（绿）：被围起来的不管大小都去掉（眼镜片后面），轮廓附近压掉渗进来的绿，离轮廓远的绿色留着', () => {
+    const img = rgba(
+      encodePng(60, 80, (x, y) => {
+        if (x < 10 || x >= 50 || y < 10) return [40, 180, 40, 255];
+        if (x === 10) return [90, 130, 90, 255]; // 渗了绿的轮廓
+        if (x >= 40 && x < 43 && y >= 20 && y < 23) return [45, 175, 45, 255]; // 镜片后面透出来的底色
+        if (x >= 28 && x < 31 && y >= 50 && y < 53) return [40, 180, 40, 255];
+        if (x === 30 && y === 30) return [30, 120, 90, 255]; // 绿眼睛
+        return [150, 150, 150, 255];
+      }),
+    );
+    const cut = keyOut(img);
+    expect(alphaAt(cut, 41, 21)).toBe(0);
+    expect(alphaAt(cut, 29, 51)).toBe(0);
+    const at = (x: number, y: number) => [...cut.data.subarray((y * 60 + x) * 4, (y * 60 + x) * 4 + 3)] as [number, number, number];
+    const [r, g, b] = at(10, 40);
+    expect(alphaAt(cut, 10, 40)).toBeGreaterThan(0);
+    expect(g).toBeLessThanOrEqual(Math.max(r, b));
+    expect(at(30, 30)).toEqual([30, 120, 90]);
+  });
+
+  it('检查：背景没抠掉、四边有残留、人物被抠没了、身上有洞', () => {
+    const noisy = keyOut(rgba(mockSprite('角色立绘', 64, 96, 'noisy')));
+    expect(checkAlpha(noisy)).toMatchObject({ ok: false });
+    const full = rgba(encodePng(20, 30, () => [10, 10, 10, 255]));
+    expect(checkAlpha(full).reason).toBe('背景没有抠掉');
+    const empty = rgba(encodePng(20, 30, () => [0, 0, 0, 0]));
+    expect(checkAlpha(empty).reason).toBe('人物几乎全被抠掉了');
+    const edge = rgba(encodePng(20, 30, (x, y) => (y < 2 || (x > 5 && x < 15 && y > 8) ? [10, 10, 10, 255] : [0, 0, 0, 0])));
+    expect(checkAlpha(edge).reason).toBe('四边有没抠干净的背景');
+    const holed = rgba(
+      encodePng(40, 60, (x, y) => (x >= 8 && x < 32 && y >= 10 && !(x >= 14 && x < 26 && y >= 20 && y < 32) ? [10, 10, 10, 255] : [0, 0, 0, 0])),
+    );
+    expect(checkAlpha(holed).ok).toBe(true);
+    expect(checkAlpha(holed, { holes: true }).reason).toBe('人物身上有大块透明的洞');
+  });
+});
+
+describe('立绘的素材清单', () => {
+  it('每个角色一张基础立绘，主要角色 6 个表情、其他角色 3 个，再加上剧本里用到的；表情差分依赖基础立绘', async () => {
+    const world = await new WorldStore(EXAMPLES).load('old_library');
+    const plan = planAssets(world, AssetSettings.parse({}), AssetIndex.parse({})).filter((p) => p.kind === 'sprite');
+    const ids = (c: string) => plan.filter((p) => p.characterId === c).map((p) => p.expression);
+    expect(ids('char_01')).toEqual(['neutral', 'smile', 'angry', 'sad', 'surprised', 'shy']);
+    expect(ids('char_lin')).toEqual(['neutral', 'smile', 'angry', 'sad', 'surprised', 'shy']);
+    expect(ids('char_zhou')).toEqual(['neutral', 'smile', 'surprised']);
+    const base = plan.find((p) => p.id === 'sprite/char_lin/neutral');
+    expect(base).toMatchObject({ toggle: 'sprite', deps: [], dir: 'sprite/char_lin', slug: 'neutral', title: '林夕 · 平静' });
+    expect(base?.params).toMatchObject({ mode: 'generate', size: '1024x1536', transparency: 'auto', keyColor: 'white' });
+    expect(base?.params.prompt).toContain('角色立绘，人物：女，19 岁，黑色及腰长发');
+    expect(base?.params.prompt).toContain('表情：表情平静自然，嘴角放松');
+    expect(base?.params.prompt).toContain('膝盖以上的半身像');
+    expect(base?.params.prompt).toContain('背景是一整片纯白色');
+    expect(base?.params.prompt).not.toContain('透明');
+    const smile = plan.find((p) => p.id === 'sprite/char_lin/smile');
+    expect(smile).toMatchObject({ toggle: 'expression', deps: ['sprite/char_lin/neutral'], title: '林夕 · 微笑' });
+    expect(smile?.params.mode).toBe('edit');
+    expect(smile?.params.prompt).toContain('只改表情：温和地微笑');
+    // 白衬衫：纯色底换成绿色
+    expect(plan.find((p) => p.id === 'sprite/char_01/neutral')?.params).toMatchObject({ keyColor: 'green' });
+    expect(plan.find((p) => p.id === 'sprite/char_01/neutral')?.params.prompt).toContain('纯绿色（#00FF00）');
+    // 剧本里写了表情表里没有的表情：也画
+    const extra = planAssets({ ...world, scripts: { sc_01: 'show zhou thinking' } }, AssetSettings.parse({}), AssetIndex.parse({}));
+    expect(extra.filter((p) => p.characterId === 'char_zhou').map((p) => p.expression)).toEqual(['neutral', 'smile', 'surprised', 'thinking']);
+  });
+
+  it('设置：不画主角、单个角色改表情、换表情表、不抠图、指定底色；透明背景的做法进参数哈希', async () => {
+    const world = await new WorldStore(EXAMPLES).load('old_library');
+    const plan = (s: Partial<AssetSettings>) => planAssets(world, AssetSettings.parse(s), AssetIndex.parse({})).filter((p) => p.kind === 'sprite');
+    expect(plan({ spriteProtagonist: false }).some((p) => p.characterId === 'char_01')).toBe(false);
+    const own = plan({ characters: { char_zhou: { expressions: ['angry'] } } });
+    expect(own.filter((p) => p.characterId === 'char_zhou').map((p) => p.expression)).toEqual(['neutral', 'angry']);
+    const table = plan({
+      expressions: [
+        { id: 'neutral', name: '平常', synonyms: [], prompt: '面无表情' },
+        { id: 'smirk', name: '坏笑', synonyms: [], prompt: '嘴角一边翘起' },
+      ],
+      spriteSets: { main: ['smirk'], other: [] },
+    });
+    expect(table.filter((p) => p.characterId === 'char_lin').map((p) => p.expression)).toEqual(['neutral', 'smirk', 'surprised', 'angry', 'sad', 'smile']);
+    expect(table.find((p) => p.id === 'sprite/char_lin/smirk')?.params.prompt).toContain('只改表情：嘴角一边翘起');
+    expect(table.find((p) => p.id === 'sprite/char_lin/neutral')?.params.prompt).toContain('表情：面无表情');
+    const none = plan({ transparency: 'none' }).find((p) => p.id === 'sprite/char_lin/neutral');
+    expect(none?.params).toMatchObject({ transparency: 'none', keyColor: null });
+    expect(none?.params.prompt).toContain('简单干净的纯色背景');
+    expect(plan({ keyColor: 'green' }).find((p) => p.id === 'sprite/char_lin/neutral')?.params.keyColor).toBe('green');
+    const hashes = new Set(['auto', 'key', 'none'].map((t) => plan({ transparency: t as AssetSettings['transparency'] })[0]?.paramsHash));
+    expect(hashes.size).toBe(3);
+  });
+
+  it('优先级：在场角色的基础立绘 → 这一幕和下一幕要出场的 → 在场角色的其他表情 → 其余', async () => {
+    const world = await new WorldStore(EXAMPLES).load('old_library');
+    const plan = planAssets(world, AssetSettings.parse({}), AssetIndex.parse({}));
+    const pr = (id: string, focus: Parameters<typeof priorityOf>[2]) => priorityOf(plan.find((p) => p.id === id) as PlannedSlot, world, focus);
+    const focus = { locationId: 'loc_reading', characterIds: ['char_lin'], sceneId: 'sc_01' };
+    expect(pr('sprite/char_lin/neutral', focus)).toBe(1);
+    expect(pr('sprite/char_zhou/neutral', focus)).toBe(2); // sc_01 → sc_02 有老周
+    expect(pr('sprite/char_lin/smile', focus)).toBe(3);
+    expect(pr('sprite/char_zhou/smile', focus)).toBe(4);
+    expect(pr('sprite/char_01/neutral', focus)).toBe(4);
+    // 没在玩：开场没写在场角色，就按起始幕的出场角色
+    expect(pr('sprite/char_lin/neutral', null)).toBe(1);
+  });
+});
+
+/** 立绘相关的槽（关掉背景，只看立绘）。 */
+const sprites = (v: AssetsView) => v.slots.filter((s) => s.kind === 'sprite');
+const assetFile = async (worldId: string, rel: string) => new Uint8Array(await readFile(path.join(dir, 'worlds', worldId, rel)));
+
+describe('立绘管线', () => {
+  it('自动：要透明图（服务忽略了）→ 纯白底内置抠图；表情差分拿抠图前的原图当参考图改图', async () => {
+    const id = await setup({ sprites: true, assets: { enabled: { background: false } as AssetSettings['enabled'] } });
+    const v = await idle(id);
+    expect(v.counts).toMatchObject({ total: 15, done: 15, failed: 0 });
+    const gens = server.imageRequests.filter((r) => !r.edit);
+    const edits = server.imageRequests.filter((r) => r.edit);
+    expect(gens).toHaveLength(3);
+    expect(edits).toHaveLength(12);
+    expect(gens.every((r) => r.background === 'transparent' && r.size === '1024x1536')).toBe(true);
+    const lin = slot(v, 'sprite/char_lin/neutral');
+    expect(lin).toMatchObject({ status: 'done', characterId: 'char_lin', expression: 'neutral', review: null });
+    expect(lin.file).toMatch(/^assets\/sprite\/char_lin\/neutral-[0-9a-f]{12}\.png$/);
+    const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
+    const raw = index.slots['sprite/char_lin/neutral']?.rawFile ?? '';
+    expect(raw).toMatch(/neutral-[0-9a-f]{12}\.raw\.png$/);
+    const cut = rgba(await assetFile(id, lin.file ?? ''));
+    expect(alphaAt(cut, 0, 0)).toBe(0);
+    expect(alphaAt(rgba(await assetFile(id, raw)), 0, 0)).toBe(255);
+    // 表情差分的参考图是原图
+    const linEdits = edits.filter((r) => String(r.prompt).includes('温和地微笑'));
+    expect(linEdits.length).toBeGreaterThan(0);
+    expect(edits.every((r) => Number(r.imageBytes) > 0)).toBe(true);
+    const smile = slot(v, 'sprite/char_lin/smile');
+    expect(alphaAt(rgba(await assetFile(id, smile.file ?? '')), 0, 0)).toBe(0);
+    expect(index.generated).toBe(15);
+    const calls = await client.call('listCalls', { limit: 50 });
+    expect(calls.items.filter((c) => c.tag === 'assets.sprite')).toHaveLength(3);
+    expect(calls.items.filter((c) => c.tag === 'assets.expression')).toHaveLength(12);
+  });
+
+  it('服务支持透明输出：直接用，不抠图；表情差分拿透明的基础立绘当参考图', async () => {
+    const id = await setup({ sprites: true, mock: { imageTransparent: true }, assets: { enabled: { background: false } as AssetSettings['enabled'] } });
+    const v = await idle(id);
+    expect(v.counts.done).toBe(15);
+    const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
+    expect(index.slots['sprite/char_lin/neutral']?.rawFile).toBeUndefined();
+    expect(alphaAt(rgba(await assetFile(id, slot(v, 'sprite/char_lin/neutral').file ?? '')), 0, 0)).toBe(0);
+  });
+
+  it('图像服务返回 JPEG（H3 就是）：照样内置抠图，原图存成 .raw.jpg，表情差分拿 JPEG 原图当参考图', async () => {
+    const jpeg = new Uint8Array(await readFile(path.join(import.meta.dirname, 'fixtures', 'sprite.jpg')));
+    const id = await setup({ sprites: true, mock: { spriteJpeg: jpeg }, assets: { enabled: { background: false } as AssetSettings['enabled'] } });
+    const v = await idle(id);
+    expect(v.counts).toMatchObject({ total: 15, done: 15, failed: 0 });
+    const lin = slot(v, 'sprite/char_lin/neutral');
+    expect(lin.review).toBeNull();
+    expect(lin.file).toMatch(/\.png$/);
+    const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
+    expect(index.slots['sprite/char_lin/neutral']?.rawFile).toMatch(/neutral-[0-9a-f]{12}\.raw\.jpg$/);
+    const cut = rgba(await assetFile(id, lin.file ?? ''));
+    expect([cut.width, cut.height]).toEqual([64, 96]);
+    expect(alphaAt(cut, 0, 0)).toBe(0);
+    expect(alphaAt(cut, 32, 60)).toBe(255);
+    // 表情差分的参考图就是那张 JPEG
+    expect(server.imageRequests.filter((r) => r.edit).every((r) => r.imageBytes === jpeg.length)).toBe(true);
+    expect(alphaAt(rgba(await assetFile(id, slot(v, 'sprite/char_lin/smile').file ?? '')), 0, 0)).toBe(0);
+  });
+
+  it('抠图服务：没配就失败并说明；配好以后每张都交给它抠', async () => {
+    const id = await setup({
+      sprites: true,
+      assets: { enabled: { background: false } as AssetSettings['enabled'], transparency: 'service', spriteProtagonist: false },
+    });
+    let v = await idle(id);
+    expect(slot(v, 'sprite/char_lin/neutral')).toMatchObject({ status: 'failed' });
+    expect(slot(v, 'sprite/char_lin/neutral').error).toMatch(/还没有配「抠图」职责/);
+    expect(server.imageRequests).toHaveLength(0);
+    const ep = await client.call('saveEndpoint', {
+      name: 'rembg',
+      baseURL: server.baseURL.replace(/\/v1$/, ''),
+      models: ['isnet-anime'],
+      currency: 'CNY',
+      pricing: {},
+    });
+    await client.call('setMediaRole', { role: 'cutout', route: { endpointId: ep.id, model: 'isnet-anime', api: 'rembg' } });
+    for (const s of sprites(v).filter((x) => x.expression === 'neutral')) {
+      await client.call('assetAction', { worldId: id, slotId: s.id, action: 'retry' });
+    }
+    v = await idle(id);
+    expect(v.counts).toMatchObject({ total: 9, done: 9 });
+    expect(server.cutoutRequests).toHaveLength(9);
+    expect(server.cutoutRequests.every((r) => r.model === 'isnet-anime')).toBe(true);
+    expect(alphaAt(rgba(await assetFile(id, slot(v, 'sprite/char_zhou/smile').file ?? '')), 0, 0)).toBe(0);
+    const calls = await client.call('listCalls', { limit: 50 });
+    expect(calls.items.filter((c) => c.role === 'cutout' && c.tag === 'assets.cutout')).toHaveLength(9);
+  });
+
+  it('抠图检查不过：换一张再试一次，还不过就先用原图，标成"需要看一下"', async () => {
+    const id = await setup({
+      sprites: true,
+      mock: { imageNoisyIf: '花白短发' },
+      assets: { enabled: { background: false, expression: false } as AssetSettings['enabled'] },
+    });
+    const v = await idle(id);
+    const zhou = slot(v, 'sprite/char_zhou/neutral');
+    expect(zhou.status).toBe('done');
+    expect(zhou.review).toBe('背景没有抠掉');
+    expect(zhou.file).toMatch(/\.raw\.png$/);
+    expect(server.imageRequests.filter((r) => String(r.prompt).includes('花白短发'))).toHaveLength(2);
+    expect(slot(v, 'sprite/char_lin/neutral').review).toBeNull();
+    const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
+    expect(index.generated).toBe(4); // 老周画了两张
+  });
+
+  it('重抽基础立绘：表情差分自动跟着重画；换成自己的图也一样；锁定的表情只提示上游改过', async () => {
+    const id = await setup({
+      sprites: true,
+      assets: { enabled: { background: false } as AssetSettings['enabled'], spriteProtagonist: false, spriteSets: { main: ['smile', 'sad'], other: [] } },
+    });
+    let v = await idle(id);
+    // 林夕：平静、微笑、难过 + 角色自己写的惊讶、生气；老周：平静
+    expect(sprites(v).map((s) => s.id)).toEqual([
+      'sprite/char_lin/neutral',
+      'sprite/char_lin/smile',
+      'sprite/char_lin/sad',
+      'sprite/char_lin/surprised',
+      'sprite/char_lin/angry',
+      'sprite/char_zhou/neutral',
+    ]);
+    await client.call('assetAction', { worldId: id, slotId: 'sprite/char_lin/sad', action: 'lock' });
+    const before = server.imageRequests.length;
+    await client.call('assetAction', { worldId: id, slotId: 'sprite/char_lin/neutral', action: 'regenerate' });
+    v = await idle(id);
+    // 基础立绘 1 张 + 没锁的 3 个表情
+    expect(server.imageRequests.length - before).toBe(4);
+    expect(slot(v, 'sprite/char_lin/sad')).toMatchObject({ status: 'done', locked: true, upstreamChanged: true });
+    expect(slot(v, 'sprite/char_lin/smile').status).toBe('done');
+    // 换成自己的图：表情差分拿它当参考图重画
+    const png = path.join(dir, 'lin.png');
+    await writeFile(png, mockSprite('自己画的林夕', 40, 60, 'transparent'));
+    const n = server.imageRequests.length;
+    await client.call('assetUpload', { worldId: id, slotId: 'sprite/char_lin/neutral', path: png });
+    v = await idle(id);
+    const edits = server.imageRequests.slice(n);
+    expect(edits).toHaveLength(3);
+    expect(edits.every((r) => r.edit && Number(r.imageBytes) === (mockSprite('自己画的林夕', 40, 60, 'transparent').length))).toBe(true);
+  });
+
+  it('关掉立绘：基础立绘不画，表情差分也不画；已经有基础立绘的照样画表情', async () => {
+    const id = await setup({ sprites: true, assets: { enabled: { background: false, sprite: false, expression: true } as AssetSettings['enabled'] } });
+    const v = await idle(id);
+    expect(server.imageRequests).toHaveLength(0);
+    expect(new Set(sprites(v).map((s) => s.status))).toEqual(new Set(['disabled']));
+    const png = path.join(dir, 'zhou.png');
+    await writeFile(png, mockSprite('老周', 40, 60, 'white'));
+    await client.call('assetUpload', { worldId: id, slotId: 'sprite/char_zhou/neutral', path: png });
+    const after = await idle(id);
+    expect(server.imageRequests.filter((r) => r.edit)).toHaveLength(2);
+    expect(slot(after, 'sprite/char_zhou/smile').status).toBe('done');
   });
 });

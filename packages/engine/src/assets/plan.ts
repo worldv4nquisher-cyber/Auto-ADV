@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
-import type { AssetIndex, AssetKind, AssetSettings, AssetSlotRecord, AssetToggle } from '@auto-adv/schema';
+import type { AssetIndex, AssetKind, AssetSettings, AssetSlotRecord, AssetToggle, Character, ExpressionDef } from '@auto-adv/schema';
 import { parseAdv, walkScript } from '../plot/adv.ts';
+import { resolveSpeaker } from '../plot/stage.ts';
 import type { WorldData } from '../world/store.ts';
-import { AVOID, BUILTIN_TEMPLATES, COMPOSITION, DEFAULT_ART_STYLE, renderTemplate } from './templates.ts';
+import { AVOID, BUILTIN_TEMPLATES, backdropText, COMPOSITION, DEFAULT_ART_STYLE, renderTemplate, WHITE_WORDS } from './templates.ts';
 
 /**
  * 素材清单（18.2）：从世界算出它现在需要哪些槽、每个槽的生成参数。纯函数，不读写文件。
  * M4 第 1 步只有背景：每个地点一张（AI 演出时舞台用地点 id 当背景 id），
  * 再加上手写剧本里 `bg <id>` 用到、又不是地点 id 的背景，每个 id 一张。
+ * 第 2 步加上立绘：每个角色一张基础立绘（平静），再按设置画表情差分（拿基础立绘当参考图改图）。
  */
 
 export interface SlotParams {
@@ -16,6 +18,12 @@ export interface SlotParams {
   negative: string;
   size: string;
   seed: number;
+  /** generate 文生图；edit 拿依赖槽（基础立绘）当参考图改图。 */
+  mode: 'generate' | 'edit';
+  /** 立绘的透明背景怎么做（18.5）；背景图为 null。 */
+  transparency: AssetSettings['transparency'] | null;
+  /** 纯色底的颜色；不用纯色底时为 null。 */
+  keyColor: 'white' | 'green' | null;
 }
 
 export interface PlannedSlot {
@@ -39,6 +47,9 @@ export interface PlannedSlot {
   locationId?: string;
   /** 手写剧本里的背景：哪几幕用到它（排优先级用）。 */
   sceneIds?: string[];
+  /** 立绘：哪个角色、哪个表情。 */
+  characterId?: string;
+  expression?: string;
 }
 
 export const hashOf = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -65,14 +76,31 @@ function common(world: WorldData, settings: AssetSettings, kind: keyof typeof AV
 export function planAssets(world: WorldData, settings: AssetSettings, index: AssetIndex): PlannedSlot[] {
   const out: PlannedSlot[] = [];
   const add = (
-    base: Omit<PlannedSlot, 'params' | 'paramsHash' | 'defaultPrompt'> & { defaultPrompt: string; negative: string; size: string },
+    base: Omit<PlannedSlot, 'params' | 'paramsHash' | 'defaultPrompt'> & {
+      defaultPrompt: string;
+      negative: string;
+      size: string;
+      mode?: SlotParams['mode'];
+      transparency?: SlotParams['transparency'];
+      keyColor?: SlotParams['keyColor'];
+    },
   ) => {
     const rec: AssetSlotRecord | undefined = index.slots[base.id];
     const variant = rec?.variant ?? 0;
     const prompt = rec?.prompt?.trim() ? rec.prompt.trim() : base.defaultPrompt;
-    const params: SlotParams = { prompt, negative: base.negative, size: base.size, seed: seedOf(base.id, variant) };
-    const { negative: _n, size: _s, ...rest } = base;
-    out.push({ ...rest, params, paramsHash: hashOf([base.kind, params.prompt, params.negative, params.size, variant]) });
+    const params: SlotParams = {
+      prompt,
+      negative: base.negative,
+      size: base.size,
+      seed: seedOf(base.id, variant),
+      mode: base.mode ?? 'generate',
+      transparency: base.transparency ?? null,
+      keyColor: base.keyColor ?? null,
+    };
+    const { negative: _n, size: _s, mode: _m, transparency: _t, keyColor: _k, ...rest } = base;
+    // 背景的哈希保持第 1 步的算法（不然升级以后所有背景都算过期）
+    const extra = params.transparency ? [params.mode, params.transparency, params.keyColor] : [];
+    out.push({ ...rest, params, paramsHash: hashOf([base.kind, params.prompt, params.negative, params.size, variant, ...extra]) });
   };
 
   const bgTemplate = settings.templates.background.trim() || BUILTIN_TEMPLATES.background;
@@ -121,6 +149,110 @@ export function planAssets(world: WorldData, settings: AssetSettings, index: Ass
       sceneIds: sb.sceneIds,
     });
   }
+
+  // 立绘：基础立绘（平静）→ 表情差分
+  const spriteTemplate = settings.templates.sprite.trim() || BUILTIN_TEMPLATES.sprite;
+  const exprTemplate = settings.templates.expression.trim() || BUILTIN_TEMPLATES.expression;
+  const spriteCommon = common(world, settings, 'sprite');
+  const exprAvoid = [...AVOID.expression, ...(world.style?.art.negative.trim() ? [world.style.art.negative.trim()] : [])].join('、');
+  const used = scriptExpressions(world);
+  for (const c of spriteCharacters(world, settings)) {
+    const key = keyColorOf(c, settings);
+    const backdrop = backdropText(settings.transparency === 'none' ? null : key);
+    const exprs = expressionsOf(c, settings, used.get(c.id));
+    const def = (id: string) => expressionDef(id, settings.expressions);
+    const neutral = def('neutral');
+    const baseId = `sprite/${c.id}/neutral`;
+    const content = [c.gender, c.age && /^\d+$/.test(c.age.trim()) ? `${c.age.trim()} 岁` : c.age, c.appearance.imagePrompt.trim() || c.appearance.text.trim()]
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .join('，');
+    const sprite = { kind: 'sprite' as const, size: settings.sizes.sprite, transparency: settings.transparency, keyColor: settings.transparency === 'none' ? null : key };
+    add({
+      ...sprite,
+      id: baseId,
+      toggle: 'sprite',
+      title: `${c.name} · ${neutral.name}`,
+      subtitle: clip(c.appearance.imagePrompt.trim() || c.appearance.text.trim() || c.summary, 60),
+      deps: [],
+      defaultPrompt: renderTemplate(spriteTemplate, {
+        ...spriteCommon,
+        内容: content || c.name,
+        表情: neutral.prompt || neutral.name,
+        构图: COMPOSITION.sprite,
+        背景: backdrop,
+      }),
+      negative: spriteCommon.避免,
+      dir: `sprite/${c.id}`,
+      slug: 'neutral',
+      characterId: c.id,
+      expression: 'neutral',
+    });
+    for (const e of exprs) {
+      if (e === 'neutral') continue;
+      const d = def(e);
+      add({
+        ...sprite,
+        id: `sprite/${c.id}/${e}`,
+        toggle: 'expression',
+        title: `${c.name} · ${d.name}`,
+        subtitle: d.prompt || d.name,
+        deps: [baseId],
+        defaultPrompt: renderTemplate(exprTemplate, { ...spriteCommon, 内容: content || c.name, 表情: d.prompt || d.name, 背景: backdrop, 避免: exprAvoid }),
+        negative: exprAvoid,
+        mode: 'edit',
+        dir: `sprite/${c.id}`,
+        slug: e,
+        characterId: c.id,
+        expression: e,
+      });
+    }
+  }
+  return out;
+}
+
+/** 要画立绘的角色（设置里可以不画主角）。 */
+export function spriteCharacters(world: WorldData, settings: AssetSettings): Character[] {
+  return world.characters.filter((c) => settings.spriteProtagonist || c.role !== 'protagonist');
+}
+
+/** 主要角色：npc 以外的。 */
+export const isMainCharacter = (c: Pick<Character, 'role'>) => c.role !== 'npc';
+
+/** 纯色底用什么颜色：外貌里有白衣、白发这类词时用绿色。 */
+export function keyColorOf(c: Character, settings: AssetSettings): 'white' | 'green' {
+  if (settings.keyColor !== 'auto') return settings.keyColor;
+  return WHITE_WORDS.test(`${c.appearance.imagePrompt} ${c.appearance.text}`) ? 'green' : 'white';
+}
+
+/** 表情表里找一个表情；表里没有的（剧本里写的、你删掉的）就用 id 本身当名字。 */
+export function expressionDef(id: string, table: readonly ExpressionDef[]): ExpressionDef {
+  return table.find((e) => e.id === id) ?? { id, name: id === 'neutral' ? '平静' : id, synonyms: [], prompt: id === 'neutral' ? '表情平静自然' : '' };
+}
+
+/**
+ * 一个角色画哪些表情：世界里给这个角色单独设了就用它，否则按角色类型（主要 / 其他），
+ * 再加上角色自己写的（character.expressions）和手写剧本里用到的。平静（基础立绘）总在第一个。
+ */
+export function expressionsOf(c: Character, settings: AssetSettings, scriptUsed: readonly string[] = []): string[] {
+  const own = settings.characters[c.id]?.expressions;
+  const list = own ?? [...(isMainCharacter(c) ? settings.spriteSets.main : settings.spriteSets.other), ...c.expressions, ...scriptUsed];
+  return ['neutral', ...new Set(list.filter((e) => e !== 'neutral' && /^[a-z][a-z0-9_]*$/.test(e)))];
+}
+
+/** 手写剧本里 show <角色> <表情> 用到的表情，按角色 id。 */
+export function scriptExpressions(world: WorldData): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const text of Object.values(world.scripts)) {
+    walkScript(parseAdv(text).commands, (cmd) => {
+      if (cmd.op !== 'show' || !cmd.expr) return;
+      const id = resolveSpeaker(cmd.char, world.characters).characterId;
+      if (!id) return;
+      const list = out.get(id) ?? [];
+      if (!list.includes(cmd.expr)) list.push(cmd.expr);
+      out.set(id, list);
+    });
+  }
   return out;
 }
 
@@ -158,10 +290,13 @@ export function scriptBackgrounds(world: WorldData): ScriptBackground[] {
   return [...found.values()];
 }
 
-/** 输入哈希：生成参数 + 依赖槽现在的文件。依赖重画了，下游就过期。 */
+/**
+ * 输入哈希：生成参数 + 依赖槽现在的文件。依赖重画了、换成了你上传的图、换回了之前的图，下游都过期。
+ * 文件名里带着它自己的输入哈希（上传的带内容哈希），所以用文件名就够了。
+ */
 export function inputHashOf(slot: PlannedSlot, index: AssetIndex): string {
   if (slot.deps.length === 0) return slot.paramsHash;
-  return hashOf([slot.paramsHash, ...slot.deps.map((d) => index.slots[d]?.builtInput ?? '')]);
+  return hashOf([slot.paramsHash, ...slot.deps.map((d) => index.slots[d]?.file ?? '')]);
 }
 
 /** 依赖都画好了没有。 */
@@ -221,6 +356,15 @@ export function priorityOf(slot: PlannedSlot, world: WorldData, focus: AssetFocu
     ),
   );
   const here = focus ? focus.locationId : (world.opening?.locationId ?? null);
+  if (slot.kind === 'sprite') {
+    // 在场角色的基础立绘最先，其次是这一幕和紧接着的幕要出场的，再其次是在场角色的其他表情（18.3）
+    const opening = world.opening?.presentCharacterIds ?? [];
+    const present = new Set(focus ? focus.characterIds : opening.length ? opening : (scene?.cast ?? []));
+    const soon = new Set([...(scene?.cast ?? []), ...(graph?.scenes ?? []).filter((s) => next.has(s.id)).flatMap((s) => s.cast)]);
+    const id = slot.characterId ?? '';
+    if (slot.expression === 'neutral') return present.has(id) ? 1 : soon.has(id) ? 2 : 4;
+    return present.has(id) ? 3 : 4;
+  }
   if (slot.kind === 'background' && slot.sceneIds) {
     // 剧本里的背景跟着幕走：这一幕的先画，紧接着的幕其次
     if (sceneId && slot.sceneIds.includes(sceneId)) return 1;
