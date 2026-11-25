@@ -1,9 +1,18 @@
 /**
  * 素材设置的表单（18.11），全局设置页和世界的素材页共用。
  * 世界里只保存和全局不一样的项：每一项旁边能"恢复全局"；全局设置里是"恢复默认"。
- * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分。
+ * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分，第 3 步 BGM。
  */
-import { type AssetSettings, type AssetSettingsPatch, type ExpressionDef, AssetSettings as SettingsSchema } from '@auto-adv/schema';
+import {
+  type AssetSettings,
+  type AssetSettingsPatch,
+  BGM_SOURCE_LABELS,
+  BGM_SOURCES,
+  type BgmSource,
+  type ExpressionDef,
+  type MoodDef,
+  AssetSettings as SettingsSchema,
+} from '@auto-adv/schema';
 import { type ReactNode, useEffect, useMemo, useState } from 'react';
 import { Button, cx, Input, Select, Textarea } from '../components/ui.tsx';
 import { useSettings } from '../lib/settings.tsx';
@@ -27,12 +36,29 @@ type Key =
   | 'spriteSets.other'
   | 'expressions'
   | 'imageConcurrency'
-  | 'retries';
+  | 'retries'
+  | 'enabled.bgm'
+  | 'bgm.sources'
+  | 'bgm.libraryDir'
+  | 'bgm.classifyLibrary'
+  | 'bgm.moods'
+  | 'bgm.switchBeats'
+  | 'bgm.fadeSeconds'
+  | 'bgm.gapSeconds'
+  | 'bgm.volume'
+  | 'bgm.template'
+  | 'musicConcurrency';
 
-type Value = string | number | boolean | string[] | ExpressionDef[];
+type Value = string | number | boolean | string[] | ExpressionDef[] | MoodDef[];
 
 /** 并发和重试是按接入点算的，只在全局设置里。 */
-const GLOBAL_ONLY: Key[] = ['imageConcurrency', 'retries'];
+const GLOBAL_ONLY: Key[] = ['imageConcurrency', 'retries', 'musicConcurrency'];
+
+const SOURCE_HINTS: Record<BgmSource, string> = {
+  library: '你自己的音乐文件夹',
+  model: '用「职责路由」里的「音乐」生成，每种情绪一首',
+  builtin: '随应用一起的公有领域钢琴曲',
+};
 
 function get(s: Record<string, unknown>, key: Key): Value | undefined {
   const [a, b] = key.split('.') as [string, string | undefined];
@@ -97,6 +123,7 @@ export function AssetSettingsForm({
   const put = (k: Key, v: Value) => setDraft((d) => set(d, k, v));
   const dirty = useMemo(() => JSON.stringify(draft) !== valueKey, [draft, valueKey]);
   const table = (shown('expressions') as ExpressionDef[] | undefined) ?? [];
+  const moods = (shown('bgm.moods') as MoodDef[] | undefined) ?? [];
 
   const save = async () => {
     setError(null);
@@ -148,6 +175,66 @@ export function AssetSettingsForm({
       className={cx('!w-28', mode === 'world' && !changed(k) && 'text-muted')}
     />
   );
+
+  /** 可以有小数的数字（秒）。 */
+  const dec = (k: Key, min: number, max: number, testId?: string) => (
+    <Input
+      type="number"
+      min={min}
+      max={max}
+      step={0.5}
+      value={String(shown(k) ?? '')}
+      onChange={(e) => {
+        const n = Number(e.target.value);
+        if (Number.isFinite(n)) put(k, Math.min(max, Math.max(min, n)));
+      }}
+      className={cx('!w-28', mode === 'world' && !changed(k) && 'text-muted')}
+      data-testid={testId}
+    />
+  );
+
+  /** BGM 的来源：勾上的按顺序找，可以上下调。 */
+  const sources = () => {
+    const on = ((shown('bgm.sources') as BgmSource[] | undefined) ?? []).filter((x) => BGM_SOURCES.includes(x));
+    const all = [...on, ...BGM_SOURCES.filter((x) => !on.includes(x))];
+    const move = (i: number, d: number) => {
+      const next = [...on];
+      const [x] = next.splice(i, 1);
+      if (x) next.splice(i + d, 0, x);
+      put('bgm.sources', next);
+    };
+    return (
+      <div className="space-y-1" data-testid="asset-bgm-sources">
+        {all.map((src) => {
+          const i = on.indexOf(src);
+          return (
+            <div key={src} className="flex items-center gap-2 text-sm" data-testid={`asset-bgm-source-${src}`}>
+              <input
+                type="checkbox"
+                checked={i >= 0}
+                onChange={(e) => put('bgm.sources', e.target.checked ? [...on, src] : on.filter((x) => x !== src))}
+              />
+              <span className={cx('w-6 text-xs text-faint', i < 0 && 'invisible')}>{i + 1}.</span>
+              <span className={cx('w-20', i < 0 && 'text-faint')}>{BGM_SOURCE_LABELS[src]}</span>
+              <span className="flex-1 text-[11px] text-faint">{SOURCE_HINTS[src]}</span>
+              <button type="button" className="px-1 text-xs text-muted disabled:opacity-25" disabled={i <= 0} onClick={() => move(i, -1)} title="往前">
+                ↑
+              </button>
+              <button
+                type="button"
+                className="px-1 text-xs text-muted disabled:opacity-25"
+                disabled={i < 0 || i >= on.length - 1}
+                onClick={() => move(i, 1)}
+                title="往后"
+              >
+                ↓
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
 
   const toggle = (k: Key, text: string, testId: string) => (
     <label className="flex h-9 items-center gap-2 text-sm">
@@ -317,6 +404,69 @@ export function AssetSettingsForm({
         )}
       </Section>
 
+      <Section title="BGM">
+        {row('enabled.bgm', 'BGM', '每个世界一套情绪曲目，按导演报告的情绪换曲。关掉之后舞台上不放音乐，也不再生成。', toggle('enabled.bgm', '放 BGM', 'asset-toggle-bgm'))}
+        {row('bgm.sources', '来源', '每种情绪按顺序找：第一个有这种情绪的曲子的来源就用它。轮到音乐模型、曲子还没生成好时，先用后面的来源。', sources())}
+        {row(
+          'bgm.libraryDir',
+          '本地曲库',
+          '按子文件夹名或文件名对应情绪，例如「紧张/追逐.mp3」「calm_daily.ogg」（情绪的名字、id、同义词都认）。手写剧本里 bgm 指令写的名字和文件名一样时，直接放这个文件。',
+          <div className="flex gap-2">
+            <Input
+              value={String(shown('bgm.libraryDir') ?? '')}
+              placeholder="不选"
+              onChange={(e) => put('bgm.libraryDir', e.target.value)}
+              className="min-w-0 flex-1 font-mono text-xs"
+              data-testid="asset-bgm-library"
+            />
+            {window.autoAdv && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() =>
+                  void window.autoAdv?.pickFolder('选择本地曲库的文件夹', 'music').then((dir) => {
+                    if (dir) put('bgm.libraryDir', dir);
+                  })
+                }
+              >
+                选择…
+              </Button>
+            )}
+          </div>,
+        )}
+        {row(
+          'bgm.classifyLibrary',
+          '按文件名挑',
+          '文件夹名和文件名都对不上情绪的曲子，让「书记」职责的文本模型按文件名猜一次（每个文件只问一次）。',
+          toggle('bgm.classifyLibrary', '对不上的让模型挑', 'asset-bgm-classify'),
+        )}
+        {row(
+          'bgm.moods',
+          '情绪表',
+          '导演每一拍从这里选一个情绪。说明是给导演看的；描述是用音乐模型生成时告诉它的。同义词用来认手写剧本的 bgm 指令和曲库的文件名（用逗号隔开）。第一个情绪是兜底：认不出来的 bgm 指令放它。',
+          <MoodTable value={moods} onChange={(v) => put('bgm.moods', v)} />,
+        )}
+        {row('bgm.switchBeats', '换曲', '导演报告的情绪连着几拍都一样才换曲，免得来回跳。换幕、换地点时马上换。', num('bgm.switchBeats', 1, 10))}
+        {row('bgm.fadeSeconds', '淡入淡出', '换曲时旧的淡出、新的淡入，单位秒。', dec('bgm.fadeSeconds', 0, 10, 'asset-bgm-fade'))}
+        {row('bgm.gapSeconds', '曲间停顿', '不循环的曲子（本地曲库、内置曲库）放完以后停几秒再放同一情绪的下一首。', dec('bgm.gapSeconds', 0, 60))}
+        {row('bgm.volume', '音量', '0～100。舞台角上的「♫」点一下可以静音。', num('bgm.volume', 0, 100))}
+        {row(
+          'bgm.template',
+          '生成的提示词模板',
+          <>
+            留空用内置模板。能用的占位符：
+            {defaults?.music.placeholders.map((p) => (
+              <span key={p.key} className="ml-1" title={p.hint}>
+                <code className="rounded bg-panel-2 px-1">{`{${p.key}}`}</code>
+              </span>
+            ))}
+            。世界没写音乐风格时用：{defaults?.music.style}
+          </>,
+          template('bgm.template', defaults?.music.template, 'asset-template-bgm'),
+        )}
+        {row('musicConcurrency', '同时生成几首', '同一个音乐接入点同时生成几首，所有世界共用。', num('musicConcurrency', 1, 8))}
+      </Section>
+
       <div className="flex items-center gap-3">
         <Button variant="primary" size="sm" disabled={!dirty} loading={saving} onClick={() => void save()} data-testid="asset-settings-save">
           保存
@@ -394,6 +544,65 @@ function ExpressionTable({ value, onChange }: { value: ExpressionDef[]; onChange
         data-testid="asset-expression-add"
       >
         加一个表情
+      </Button>
+    </div>
+  );
+}
+
+/** 情绪表的编辑：id、名字、同义词、给导演看的说明、生成时的描述；可以增删。 */
+function MoodTable({ value, onChange }: { value: MoodDef[]; onChange: (v: MoodDef[]) => void }) {
+  const update = (i: number, patch: Partial<MoodDef>) => onChange(value.map((m, j) => (j === i ? { ...m, ...patch } : m)));
+  const cols = 'grid grid-cols-[5.5rem_4.5rem_1fr_1fr_1fr_2rem] gap-1.5';
+  return (
+    <div className="space-y-1.5" data-testid="asset-moods">
+      <div className={cx(cols, 'text-[11px] text-faint')}>
+        <span>id</span>
+        <span>名字</span>
+        <span>同义词</span>
+        <span>给导演看的说明</span>
+        <span>生成时的描述</span>
+      </div>
+      {value.map((m, i) => (
+        <div key={i} className={cols} data-testid="asset-mood-row">
+          <Input
+            value={m.id}
+            onChange={(ev) => update(i, { id: ev.target.value.trim().toLowerCase() })}
+            className="font-mono text-xs"
+            title="小写字母开头，字母、数字、下划线"
+          />
+          <Input value={m.name} onChange={(ev) => update(i, { name: ev.target.value })} className="text-xs" />
+          <Input
+            value={m.synonyms.join('，')}
+            onChange={(ev) =>
+              update(i, {
+                synonyms: ev.target.value
+                  .split(/[，,、]/)
+                  .map((x) => x.trim())
+                  .filter(Boolean),
+              })
+            }
+            className="text-xs"
+          />
+          <Input value={m.hint} onChange={(ev) => update(i, { hint: ev.target.value })} className="text-xs" />
+          <Input value={m.prompt} onChange={(ev) => update(i, { prompt: ev.target.value })} className="text-xs" />
+          <button
+            type="button"
+            className="text-xs text-faint hover:text-err disabled:opacity-30"
+            disabled={value.length <= 1}
+            title="删掉这个情绪"
+            onClick={() => onChange(value.filter((_, j) => j !== i))}
+          >
+            ✕
+          </button>
+        </div>
+      ))}
+      <Button
+        size="sm"
+        variant="ghost"
+        onClick={() => onChange([...value, { id: `mood_${value.length + 1}`, name: '新情绪', synonyms: [], hint: '', prompt: '' }])}
+        data-testid="asset-mood-add"
+      >
+        加一个情绪
       </Button>
     </div>
   );

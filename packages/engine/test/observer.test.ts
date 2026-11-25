@@ -114,6 +114,10 @@ describe('观察模式', () => {
     const [b1, b2] = beats(v);
     expect(b1?.beat?.plan).toContain('模拟导演');
     expect(b1?.beat?.strategy).toBe('merged');
+    // 导演每一拍报告一个情绪（BGM，18.7）：提示词里列出情绪表，报告的情绪记在这一拍上
+    expect(['theme', 'daily', 'tense', 'sad', 'warm', 'climax']).toContain(b1?.beat?.mood);
+    const director = server.requests.find((r) => JSON.stringify(r).includes('director_plan'));
+    expect(JSON.stringify(director)).toContain('# 音乐情绪');
     // 剧情图：一拍演到一个要点；第二拍演完这一幕（已经演够 2 拍），导演选了第一个出口
     expect(b1?.plot).toMatchObject({ scene: 'sc_01', points: ['sc_01_1'], vars: [{ var: 'affinity.char_02', from: 30, to: 33 }] });
     expect(b1?.plot?.exit).toBeUndefined();
@@ -425,7 +429,7 @@ describe('观察模式', () => {
   });
 });
 
-const noReport = { points: [], sceneDone: false, exit: '', offTrack: false, set: [], check: null };
+const noReport = { points: [], sceneDone: false, exit: '', offTrack: false, set: [], check: null, mood: '' };
 
 describe('观察模式的纯逻辑', () => {
   it('validatePlan：不存在的地点和角色、没有秘密的揭示都被驳回', async () => {

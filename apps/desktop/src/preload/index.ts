@@ -11,9 +11,11 @@ ipcRenderer.on('engine:restarted', () => {
 const bridge = {
   connectEngine: () => ipcRenderer.send('engine:connect'),
   /** 选一个文件夹；取消时为 null。 */
-  pickFolder: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:pickFolder', title),
+  pickFolder: (title?: string, purpose?: 'music'): Promise<string | null> => ipcRenderer.invoke('dialog:pickFolder', title, purpose),
   /** 选一张图片（PNG、JPEG、WebP）；取消时为 null。 */
   pickImage: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:pickImage', title),
+  /** 选一个音频文件（MP3、Ogg、WAV、FLAC、M4A）；取消时为 null。 */
+  pickAudio: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:pickAudio', title),
   platform: process.platform,
   versions: {
     electron: process.versions.electron,

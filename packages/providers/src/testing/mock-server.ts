@@ -1,6 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { type MockMessage, type MockRequestInfo, schemaNameOf, storyReply } from './mock-story.ts';
+import { encodeWav } from '../audio.ts';
 import { decodeJpeg, isJpeg } from '../jpeg.ts';
 import { decodePng, encodeRgbaPng } from '../png.ts';
 import { colorOf, mockImage, mockSprite } from './png.ts';
@@ -56,6 +57,11 @@ export interface MockServerOptions {
   imageNoisyIf?: string;
   /** 立绘的文生图返回这张 JPEG（模拟 H3 这类只出 JPEG 的服务）。 */
   spriteJpeg?: Uint8Array;
+  /** 音乐接口（/v1/music_generation）每首的延迟，默认 0。 */
+  musicDelayMs?: number;
+  /** 音乐接口总是在 base_resp 里返回这个错误（模拟套餐不含音乐之类）。 */
+  /** 音乐接口返回这个错误（http 不给就是 HTTP 200 加 base_resp）。 */
+  musicError?: { code: number; message: string; http?: number };
   /** 绑定的主机，默认 127.0.0.1。 */
   host?: string;
   port?: number;
@@ -70,6 +76,8 @@ export interface MockServer {
   imageRequests: Record<string, unknown>[];
   /** 收到的抠图请求（/api/remove）。 */
   cutoutRequests: { model: string; bytes: number }[];
+  /** 收到的音乐请求体。 */
+  musicRequests: Record<string, unknown>[];
   close(): Promise<void>;
 }
 
@@ -115,6 +123,19 @@ function mockEdit(reference: Uint8Array, prompt: string): Buffer {
   return encodeRgbaPng(img);
 }
 
+/** 模拟的音乐：两秒的正弦波（音高按提示词换），头尾淡入淡出。 */
+export function mockMusic(prompt: string, seconds = 2, rate = 8000): Uint8Array {
+  const [r, g, b] = colorOf(prompt);
+  const freq = 220 + ((r * 7 + g * 3 + b) % 440);
+  const n = Math.round(seconds * rate);
+  const samples = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const env = Math.min(1, i / (rate * 0.1), (n - i) / (rate * 0.1));
+    samples[i] = 0.2 * env * Math.sin((2 * Math.PI * freq * i) / rate);
+  }
+  return encodeWav(samples, rate);
+}
+
 function chunk(text: string, size: number): string[] {
   const chars = [...text];
   const out: string[] = [];
@@ -136,6 +157,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
   const requests: Record<string, unknown>[] = [];
   const imageRequests: Record<string, unknown>[] = [];
   const cutoutRequests: { model: string; bytes: number }[] = [];
+  const musicRequests: Record<string, unknown>[] = [];
   const files = new Map<string, Buffer>();
   let chatCount = 0;
   let imageCount = 0;
@@ -167,6 +189,28 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
         }
         res.writeHead(200, { 'Content-Type': 'image/png' });
         return res.end(encodeRgbaPng(img));
+      }
+      if (req.method === 'POST' && path === '/v1/music_generation') {
+        let raw = '';
+        for await (const part of req) raw += part;
+        const body = JSON.parse(raw) as Record<string, unknown>;
+        musicRequests.push(body);
+        if (opts.musicDelayMs) await sleep(opts.musicDelayMs);
+        if (opts.musicError) {
+          return sendJson(res, opts.musicError.http ?? 200, { base_resp: { status_code: opts.musicError.code, status_msg: opts.musicError.message } });
+        }
+        const prompt = String(body.prompt ?? '');
+        if (!prompt) return sendJson(res, 200, { base_resp: { status_code: 2013, status_msg: 'invalid params, prompt is required' } });
+        if (!body.is_instrumental && !body.lyrics) {
+          return sendJson(res, 200, { base_resp: { status_code: 2013, status_msg: 'invalid params, lyrics is required' } });
+        }
+        const audio = mockMusic(prompt);
+        return sendJson(res, 200, {
+          data: { audio: Buffer.from(audio).toString('hex'), status: 2 },
+          extra_info: { music_duration: 2000, music_sample_rate: 8000, music_channel: 1, music_size: audio.length },
+          trace_id: `mock-${musicRequests.length}`,
+          base_resp: { status_code: 0, status_msg: 'success' },
+        });
       }
       const isEdit = path === '/v1/images/edits';
       if (req.method === 'POST' && (path === '/v1/images/generations' || isEdit)) {
@@ -368,6 +412,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
     requests,
     imageRequests,
     cutoutRequests,
+    musicRequests,
     close: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections();

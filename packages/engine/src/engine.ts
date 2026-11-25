@@ -35,7 +35,14 @@ import type {
   SettingsView,
 } from './api.ts';
 import { AssetService } from './assets/service.ts';
-import { BUILTIN_TEMPLATES, DEFAULT_ART_STYLE, TEMPLATE_PLACEHOLDERS } from './assets/templates.ts';
+import {
+  BUILTIN_MUSIC_TEMPLATE,
+  BUILTIN_TEMPLATES,
+  DEFAULT_ART_STYLE,
+  DEFAULT_MUSIC_STYLE,
+  MUSIC_PLACEHOLDERS,
+  TEMPLATE_PLACEHOLDERS,
+} from './assets/templates.ts';
 import { CallLog } from './call-log.ts';
 import { GenesisRunner } from './genesis/pipeline.ts';
 import { ModelGateway } from './llm/gateway.ts';
@@ -61,6 +68,8 @@ export interface EngineOptions {
   timeoutMs?: number;
   /** 素材生成失败后重试的基础等待时间，默认 2 秒（测试里调小）。 */
   assetRetryBaseMs?: number;
+  /** 内置曲库的文件夹（里面有 manifest.json，18.7）。不给就没有内置曲库。 */
+  builtinBgmDir?: string;
 }
 
 /** 核心引擎。M0 提供：模型接入点管理、职责路由、能力探测、调试对话、调用日志。 */
@@ -94,13 +103,21 @@ export class Engine {
     this.worlds = new WorldStore(path.join(opts.dataDir, 'worlds'));
     this.genesis = new GenesisRunner(this.worlds, this.gateway);
     this.play = new PlayService(this.worlds, this.gateway);
-    this.assets = new AssetService(this.worlds, this.settings, this.gateway, { retryBaseMs: opts.assetRetryBaseMs });
+    this.assets = new AssetService(this.worlds, this.settings, this.gateway, {
+      retryBaseMs: opts.assetRetryBaseMs,
+      dataDir: opts.dataDir,
+      builtinBgmDir: opts.builtinBgmDir,
+    });
     this.play.onView = (worldId, v) => {
       void this.assets
         .focus(worldId, { locationId: v.scene.locationId, characterIds: v.scene.presentCharacterIds, sceneId: v.plot.scene })
         .catch(() => {});
     };
     this.play.expressionTable = async (worldId) => (await this.assets.effectiveSettings(worldId)).expressions;
+    this.play.moodTable = async (worldId) => {
+      const a = await this.assets.effectiveSettings(worldId);
+      return a.enabled.bgm ? a.bgm.moods : undefined;
+    };
   }
 
   close(): void {
@@ -125,6 +142,7 @@ export class Engine {
         artStyle: DEFAULT_ART_STYLE,
         placeholders: TEMPLATE_PLACEHOLDERS,
         settings: AssetSettings.parse({}),
+        music: { template: BUILTIN_MUSIC_TEMPLATE, style: DEFAULT_MUSIC_STYLE, placeholders: MUSIC_PLACEHOLDERS },
       },
       secretsEncrypted: await this.secrets.isEncrypted(),
       dataDir: this.dataDir,
@@ -205,6 +223,7 @@ export class Engine {
       await this.getEndpoint(route.endpointId);
       // 抠图服务的模型可以不填（用服务自己的默认模型）
       if (role === 'image' && !route.model.trim()) throw new Error('请填写图像模型');
+      if (role === 'music' && !route.model.trim()) throw new Error('请填写音乐模型');
       const apis = MEDIA_ROLE_APIS[role];
       route = { ...route, model: route.model.trim(), api: apis.includes(route.api) ? route.api : (apis[0] ?? route.api) };
     }
@@ -229,6 +248,20 @@ export class Engine {
     return {
       dataUrl: `data:${r.mime};base64,${Buffer.from(r.data).toString('base64')}`,
       revisedPrompt: r.revisedPrompt,
+      latencyMs: r.latencyMs,
+    };
+  }
+
+  /** 生成一首试试音乐职责（会花一首曲子的额度）。 */
+  async testMusic(route: MediaRoute | undefined, ctx: CallContext) {
+    const h = await this.gateway.forMusic('assets.test', route);
+    const r = await h.client.generate(
+      { model: h.model, prompt: '温暖的钢琴小品，轻柔的弦乐伴奏，视觉小说的日常场景，纯音乐', instrumental: true },
+      ctx.signal,
+    );
+    return {
+      dataUrl: `data:${r.mime};base64,${Buffer.from(r.data).toString('base64')}`,
+      durationMs: r.durationMs,
       latencyMs: r.latencyMs,
     };
   }
@@ -399,6 +432,8 @@ export class Engine {
       setMediaRole: (p) => this.setMediaRole(p.role, p.route),
       saveAssetSettings: (p) => this.saveAssetSettings(p.settings),
       testImage: (p, ctx) => this.testImage(p.route, ctx),
+      testMusic: (p, ctx) => this.testMusic(p.route, ctx),
+      builtinBgm: () => this.assets.builtinTracks(),
       chat: (p, ctx) => this.chat(p, ctx),
       listCalls: (p) => this.calls.list(Math.min(p.limit ?? 100, 500), p.offset ?? 0),
       getCall: (p) => this.calls.get(p.id),

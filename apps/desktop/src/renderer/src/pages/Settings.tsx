@@ -1,8 +1,9 @@
-import type { EndpointView, ProbeChunk } from '@auto-adv/engine/api';
+import type { BuiltinTrackInfo, EndpointView, ProbeChunk } from '@auto-adv/engine/api';
 import { ENDPOINT_PRESETS, PROBE_STEP_LABELS, type ProbeStep } from '@auto-adv/providers';
 import {
   type AssetSettings,
   type Capabilities,
+  DEFAULT_MOODS,
   MEDIA_ROLE_APIS,
   MEDIA_ROLE_LABELS,
   type MediaRoleId,
@@ -566,25 +567,40 @@ function RolesTab() {
       <h3 className="pt-4 text-sm font-medium text-muted">素材</h3>
       <MediaRoleRow role="image" />
       <MediaRoleRow role="cutout" />
+      <MediaRoleRow role="music" />
     </div>
   );
 }
 
 /** 图像职责：接入点、模型（不会退回「默认」的文本模型）。可以画一张小图试试，会花一张图的额度。 */
-const MEDIA_API_LABELS: Record<MediaRoute['api'], string> = { openai: 'OpenAI 风格', rembg: 'rembg（/api/remove）' };
+const MEDIA_API_LABELS: Record<MediaRoute['api'], string> = {
+  openai: 'OpenAI 风格',
+  rembg: 'rembg（/api/remove）',
+  minimax: 'MiniMax（/music_generation）',
+};
 
-/** 媒体职责的一行：图像（背景、立绘）、抠图（立绘的透明背景选了「抠图服务」时用）。 */
+const MODEL_PLACEHOLDER: Record<MediaRoleId, string> = {
+  image: '图像模型名，例如 MiniMax-H3-Image',
+  cutout: '模型（可以不填），例如 isnet-anime',
+  music: '音乐模型名，例如 music-2.6',
+};
+
+/** 媒体职责的一行：图像（背景、立绘）、抠图（立绘的透明背景选了「抠图服务」时用）、音乐（BGM 的音乐模型来源）。 */
 function MediaRoleRow({ role }: { role: MediaRoleId }) {
   const { settings, refresh } = useSettings();
   const toast = useToast();
   const current = settings?.media[role];
   const isImage = role === 'image';
+  const isMusic = role === 'music';
+  const needsModel = isImage || isMusic;
   const api = MEDIA_ROLE_APIS[role][0] ?? 'openai';
   const [endpointId, setEndpointId] = useState(current?.endpointId ?? '');
   const [model, setModel] = useState(current?.model ?? '');
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [test, setTest] = useState<{ dataUrl: string; latencyMs: number; revisedPrompt: string | null } | null>(null);
+  const [test, setTest] = useState<{ dataUrl: string; latencyMs: number; revisedPrompt: string | null; durationMs?: number | null } | null>(
+    null,
+  );
   useEffect(() => {
     setEndpointId(current?.endpointId ?? '');
     setModel(current?.model ?? '');
@@ -594,8 +610,8 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
 
   const label = MEDIA_ROLE_LABELS[role];
   const save = async (clear = false) => {
-    if (!clear && (!endpointId || (isImage && !model.trim()))) {
-      toast('err', isImage ? '请选择接入点并填写图像模型' : '请选择抠图服务的接入点');
+    if (!clear && (!endpointId || (needsModel && !model.trim()))) {
+      toast('err', isImage ? '请选择接入点并填写图像模型' : isMusic ? '请选择接入点并填写音乐模型' : '请选择抠图服务的接入点');
       return;
     }
     setSaving(true);
@@ -604,7 +620,13 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
       await refresh();
       toast(
         'ok',
-        clear ? `已清除「${label.name}」` : isImage ? '已保存「图像」，打开着的世界会开始画背景和立绘' : `已保存「${label.name}」`,
+        clear
+          ? `已清除「${label.name}」`
+          : isImage
+            ? '已保存「图像」，打开着的世界会开始画背景和立绘'
+            : isMusic
+              ? '已保存「音乐」，打开着的世界会给还没有曲子的情绪生成 BGM'
+              : `已保存「${label.name}」`,
       );
     } catch (err) {
       toast('err', errorMessage(err));
@@ -617,7 +639,12 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
     setTesting(true);
     setTest(null);
     try {
-      setTest(await engine.call('testImage', { route: { endpointId, model: model.trim(), api: 'openai' } }));
+      if (isMusic) {
+        const r = await engine.call('testMusic', { route: { endpointId, model: model.trim(), api: 'minimax' } });
+        setTest({ ...r, revisedPrompt: null });
+      } else {
+        setTest(await engine.call('testImage', { route: { endpointId, model: model.trim(), api: 'openai' } }));
+      }
     } catch (err) {
       toast('err', errorMessage(err));
     } finally {
@@ -631,7 +658,9 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
         <div className="w-44 shrink-0">
           <div className="flex items-center gap-2 text-sm font-medium">
             {label.name}
-            {!current && <span className="text-xs font-normal text-faint">{isImage ? '未设置，用占位图' : '未设置'}</span>}
+            {!current && (
+              <span className="text-xs font-normal text-faint">{isImage ? '未设置，用占位图' : isMusic ? '未设置，不生成' : '未设置'}</span>
+            )}
           </div>
           <div className="mt-0.5 text-xs leading-snug text-muted">{label.hint}</div>
         </div>
@@ -651,7 +680,7 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
         <Input
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          placeholder={isImage ? '图像模型名，例如 MiniMax-H3-Image' : '模型（可以不填），例如 isnet-anime'}
+          placeholder={MODEL_PLACEHOLDER[role]}
           list={`${role}-models`}
           className="min-w-0 flex-1 font-mono text-xs"
           disabled={!endpointId}
@@ -670,8 +699,16 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
           ))}
         </Select>
         <div className="flex w-40 justify-end gap-1">
-          {isImage && (
-            <Button size="sm" variant="ghost" disabled={!endpointId || !model.trim()} loading={testing} onClick={() => void runTest()} title="画一张小图试试，会花一张图的额度">
+          {needsModel && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!endpointId || !model.trim()}
+              loading={testing}
+              onClick={() => void runTest()}
+              title={isMusic ? '生成一首试试，会花一首曲子的额度' : '画一张小图试试，会花一张图的额度'}
+              data-testid={`role-test-${role}`}
+            >
               测试
             </Button>
           )}
@@ -688,9 +725,16 @@ function MediaRoleRow({ role }: { role: MediaRoleId }) {
       </div>
       {test && (
         <div className="mt-3 flex items-start gap-3 border-t border-line pt-3 text-xs text-muted">
-          <img src={test.dataUrl} alt="测试图" className="size-24 rounded object-cover" />
+          {isMusic ? (
+            <audio src={test.dataUrl} controls className="h-9" data-testid="role-test-audio" />
+          ) : (
+            <img src={test.dataUrl} alt="测试图" className="size-24 rounded object-cover" />
+          )}
           <div className="space-y-1">
-            <div>画好了，用了 {formatMsShort(test.latencyMs)}。</div>
+            <div>
+              {isMusic ? '生成好了' : '画好了'}，用了 {formatMsShort(test.latencyMs)}
+              {test.durationMs ? `，曲子长 ${Math.round(test.durationMs / 1000)} 秒` : ''}。
+            </div>
             {test.revisedPrompt && <div className="text-faint">服务端改写后的提示词：{test.revisedPrompt}</div>}
           </div>
         </div>
@@ -872,13 +916,68 @@ function AboutTab() {
     ['Node', v?.node ?? '—'],
   ];
   return (
-    <Card className="mx-auto max-w-3xl divide-y divide-line">
-      {rows.map(([k, val]) => (
-        <div key={k} className="flex gap-4 px-5 py-3 text-sm">
-          <span className="w-32 shrink-0 text-muted">{k}</span>
-          <span className="min-w-0 font-mono text-[13px] break-all">{val}</span>
-        </div>
-      ))}
+    <div className="mx-auto max-w-3xl space-y-4">
+      <Card className="divide-y divide-line">
+        {rows.map(([k, val]) => (
+          <div key={k} className="flex gap-4 px-5 py-3 text-sm">
+            <span className="w-32 shrink-0 text-muted">{k}</span>
+            <span className="min-w-0 font-mono text-[13px] break-all">{val}</span>
+          </div>
+        ))}
+      </Card>
+      <BuiltinBgmCard />
+    </div>
+  );
+}
+
+const MOOD_NAMES = new Map(DEFAULT_MOODS.map((m) => [m.id, m.name]));
+
+/** 内置曲库的曲目和授权（18.7）：每首写明乐谱从哪里来、怎么做出来的。 */
+function BuiltinBgmCard() {
+  const [tracks, setTracks] = useState<BuiltinTrackInfo[] | null>(null);
+  useEffect(() => {
+    void engine
+      .call('builtinBgm', undefined)
+      .then(setTracks)
+      .catch(() => setTracks([]));
+  }, []);
+  if (!tracks) return null;
+  const methods = [...new Set(tracks.map((t) => t.method))];
+  return (
+    <Card className="px-5 py-4 text-sm" data-testid="about-builtin-bgm">
+      <div className="font-medium">内置曲库</div>
+      {tracks.length === 0 ? (
+        <p className="mt-1 text-muted">这个版本没有带内置曲目。</p>
+      ) : (
+        <>
+          <p className="mt-1 text-muted">
+            没配本地曲库和音乐模型时，舞台放这些曲子。作品和乐谱都是公有领域；{methods.length === 1 ? methods[0] : '每首的做法见下面'}。
+          </p>
+          <ul className="mt-3 divide-y divide-line">
+            {tracks.map((t) => (
+              <li key={t.file} className="py-2" data-testid="about-builtin-track">
+                <div>
+                  {t.title}
+                  <span className="ml-2 text-muted">{t.composer}</span>
+                  <span className="ml-2 text-xs text-muted">· {MOOD_NAMES.get(t.mood) ?? t.mood}</span>
+                </div>
+                <div className="mt-0.5 text-xs text-muted">
+                  {t.license}
+                  {methods.length > 1 && <>；{t.method}</>}
+                  {/^https?:\/\//.test(t.source) && (
+                    <>
+                      {' · '}
+                      <a href={t.source} target="_blank" rel="noreferrer" className="underline">
+                        乐谱
+                      </a>
+                    </>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </Card>
   );
 }

@@ -3,13 +3,24 @@ import type { AssetIndex, AssetKind, AssetSettings, AssetSlotRecord, AssetToggle
 import { parseAdv, walkScript } from '../plot/adv.ts';
 import { resolveSpeaker } from '../plot/stage.ts';
 import type { WorldData } from '../world/store.ts';
-import { AVOID, BUILTIN_TEMPLATES, backdropText, COMPOSITION, DEFAULT_ART_STYLE, renderTemplate, WHITE_WORDS } from './templates.ts';
+import {
+  AVOID,
+  BUILTIN_MUSIC_TEMPLATE,
+  BUILTIN_TEMPLATES,
+  backdropText,
+  COMPOSITION,
+  DEFAULT_ART_STYLE,
+  DEFAULT_MUSIC_STYLE,
+  renderTemplate,
+  WHITE_WORDS,
+} from './templates.ts';
 
 /**
  * 素材清单（18.2）：从世界算出它现在需要哪些槽、每个槽的生成参数。纯函数，不读写文件。
  * M4 第 1 步只有背景：每个地点一张（AI 演出时舞台用地点 id 当背景 id），
  * 再加上手写剧本里 `bg <id>` 用到、又不是地点 id 的背景，每个 id 一张。
  * 第 2 步加上立绘：每个角色一张基础立绘（平静），再按设置画表情差分（拿基础立绘当参考图改图）。
+ * 第 3 步加上 BGM：情绪表里每个情绪一首（bgm/<情绪 id>），用音乐模型生成。本地曲库和内置曲库不是槽（assets/bgm.ts）。
  */
 
 export interface SlotParams {
@@ -50,6 +61,8 @@ export interface PlannedSlot {
   /** 立绘：哪个角色、哪个表情。 */
   characterId?: string;
   expression?: string;
+  /** BGM：哪个情绪。 */
+  mood?: string;
 }
 
 export const hashOf = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
@@ -207,6 +220,27 @@ export function planAssets(world: WorldData, settings: AssetSettings, index: Ass
         expression: e,
       });
     }
+  }
+
+  // BGM：每个情绪一首纯音乐（18.7）
+  const musicTemplate = settings.bgm.template.trim() || BUILTIN_MUSIC_TEMPLATE;
+  const musicStyle = world.style?.music.description.trim() || DEFAULT_MUSIC_STYLE;
+  const worldText = [world.brief?.era ?? '', world.brief?.genre ?? ''].filter((x) => x.trim()).join('，');
+  for (const m of settings.bgm.moods) {
+    add({
+      id: `bgm/${m.id}`,
+      kind: 'bgm',
+      toggle: 'bgm',
+      title: m.name,
+      subtitle: m.hint,
+      deps: [],
+      defaultPrompt: renderTemplate(musicTemplate, { 音乐风格: musicStyle, 世界: worldText, 情绪: m.prompt.trim() || m.name }),
+      negative: '',
+      size: '',
+      dir: 'bgm',
+      slug: m.id,
+      mood: m.id,
+    });
   }
   return out;
 }

@@ -60,6 +60,19 @@ export function backdropText(key: 'white' | 'green' | null): string {
 /** 外貌里有这些词时，纯色底换成绿色（白衣、白发在白底上抠不干净）。 */
 export const WHITE_WORDS = /白衣|白色的?(?:衣|裙|衬衫|外套|长袍|和服|制服|连衣裙|头发|长发|短发)|白裙|白衬衫|白大褂|白发|银发|白色头发|银白|雪白|白金色|white|silver/i;
 
+/** 世界没写音乐风格时用的风格。 */
+export const DEFAULT_MUSIC_STYLE = '视觉小说的背景音乐，以钢琴和弦乐为主，旋律清晰，不抢台词';
+
+/** 音乐模板里能用的占位符和说明（设置页显示）。 */
+export const MUSIC_PLACEHOLDERS: { key: string; hint: string }[] = [
+  { key: '音乐风格', hint: '世界的音乐风格；世界没写就用内置的默认风格' },
+  { key: '世界', hint: '时代和题材，来自世界简报' },
+  { key: '情绪', hint: '情绪表里这个情绪的描述' },
+];
+
+/** 音乐模型的内置模板（18.7）：纯音乐，能循环。MiniMax 的提示词有长度上限，所以写得短。 */
+export const BUILTIN_MUSIC_TEMPLATE = ['{音乐风格}', '题材：{世界}', '情绪：{情绪}', '纯音乐，没有人声，一到两分钟，结尾能自然接回开头循环播放'].join('\n');
+
 const PLACEHOLDER = /\{([^{}\s]{1,8})\}/g;
 
 /**

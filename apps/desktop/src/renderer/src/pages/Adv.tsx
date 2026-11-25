@@ -11,7 +11,8 @@ import { foldPlot } from '@auto-adv/engine/progress';
 import { buildTimeline, findStep, type StageStep, type StageView, type Timeline } from '@auto-adv/engine/stage';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PlaceholderCg } from '../components/placeholder.tsx';
-import { BgImage } from '../lib/assets.tsx';
+import { BgmTag, useStageBgm } from '../components/bgm.tsx';
+import { BgImage, useBgmRules } from '../lib/assets.tsx';
 import {
   AssetProgress,
   Backlog,
@@ -102,15 +103,18 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const colorOf = useColorOf(world);
   const tint = (id: string | null, name: string) => colorOf(id, name) ?? '#a194ff';
   const ref = { worldId: initial.playthrough.worldId, playthroughId: initial.playthrough.id };
+  // 导演每一拍报告的情绪：舞台按它换 BGM（18.7）
+  const bgmRules = useBgmRules();
   /** 时间线用这个周目的剧情图（含跑偏时插进来的幕）出标题卡。 */
   const timelineOf = (path: PlayView['path']) =>
     buildTimeline(path, {
       characters: world.characters,
       graph: world.graph ? foldPlot(world.graph, world.variables, path).graph : null,
+      ...(bgmRules ? { bgm: bgmRules } : {}),
     });
 
   const [view, setView] = useState(initial);
-  const timeline = useMemo(() => timelineOf(view.path), [view.path, world]);
+  const timeline = useMemo(() => timelineOf(view.path), [view.path, world, bgmRules]);
   const graph = useMemo(() => (world.graph ? foldPlot(world.graph, world.variables, view.path).graph : null), [view.path, world]);
   const [cursor, setCursor] = useState(() => initialCursor(timelineOf(initial.path), initial.playthrough.id));
   const [mode, setMode] = useState<Mode>('normal');
@@ -141,6 +145,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
   const driftOpen = !!adv?.drift.ask && atEnd && typed && !busy;
   const menuOpen = !!adv?.menu && !adv.drift.ask && atEnd && typed && !busy;
   const stage: StageView = step?.view ?? timeline.end;
+  const bgm = useStageBgm(stage.bgm);
 
   // 记住看到哪里了（下次打开周目从这里继续）
   useEffect(() => {
@@ -478,7 +483,7 @@ export function AdvPage({ world, initial, onBack }: { world: WorldDetail; initia
             </div>
             <div className="flex flex-col items-end gap-[0.4em]">
               <div className="flex flex-wrap justify-end gap-[0.4em]">
-                {stage.bgm && <span className="rounded bg-black/40 px-[0.7em] py-[0.25em] text-white/60">♫ {stage.bgm}</span>}
+                <BgmTag bgm={bgm} className="pointer-events-auto rounded bg-black/40 px-[0.7em] py-[0.25em] text-white/60 hover:text-white/85" />
                 {visibleVars.map((v) => (
                   <span key={v.id} className="rounded bg-black/40 px-[0.7em] py-[0.25em] text-white/80" data-testid="adv-var">
                     {v.label || v.id} {formatValue(varsNow[v.id])}

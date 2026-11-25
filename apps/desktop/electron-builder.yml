@@ -15,6 +15,9 @@ extraResources:
   - from: ../../examples/worlds
     to: examples
     filter: ['**/*', '!**/playthroughs/**']
+  # 内置曲库（18.7）：每首的来源和授权写在 manifest.json 里
+  - from: ../../resources/bgm
+    to: bgm
 npmRebuild: false
 publish: null
 win:

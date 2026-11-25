@@ -34,6 +34,7 @@ const engine = new Engine({
   secrets: new FileSecretStore(dataDir, cipher),
   // 用 Chromium 的网络栈发请求，自动遵循系统代理设置
   fetch: (url, init) => net.fetch(url, init),
+  ...(process.env.AUTO_ADV_BUILTIN_BGM ? { builtinBgmDir: process.env.AUTO_ADV_BUILTIN_BGM } : {}),
 });
 const handlers = engine.handlers();
 

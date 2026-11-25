@@ -5,6 +5,8 @@ import {
   type ExchangeRecord,
   type FetchLike,
   type ImageExchangeRecord,
+  MiniMaxMusicClient,
+  type MusicExchangeRecord,
   OpenAICompatibleClient,
   OpenAIImageClient,
   type ParamFix,
@@ -46,6 +48,14 @@ export interface CutoutHandle {
   endpoint: Endpoint;
   model: string;
   client: RembgCutoutClient;
+}
+
+/** 音乐职责的句柄。 */
+export interface MusicHandle {
+  endpoint: Endpoint;
+  model: string;
+  client: MiniMaxMusicClient;
+  lastCallId(): string | null;
 }
 
 /** 计量回调：每次 HTTP 调用拿到用量后调用一次（重试、校验失败重来的每一次都算）。 */
@@ -150,7 +160,47 @@ export class ModelGateway {
     return { endpoint, model: r.model, client };
   }
 
-  private logImage(rec: ImageExchangeRecord, endpoint: Endpoint, model: string, tag: string | null, role = 'image'): string | null {
+  /** 音乐职责配了没有。 */
+  async musicRoute(): Promise<MediaRoute | null> {
+    const s = await this.o.settings.get();
+    const route = s.media.music;
+    return route && s.endpoints.some((e) => e.id === route.endpointId) ? route : null;
+  }
+
+  /** 按音乐职责取接入点和模型（MiniMax 的音乐接口）；给了 route 就用它（设置页里测试还没保存的选择）。 */
+  async forMusic(tag: string | null, route?: MediaRoute): Promise<MusicHandle> {
+    const s = await this.o.settings.get();
+    const r = route ?? s.media.music;
+    if (!r) throw new Error('还没有给「音乐」职责指定模型，请到 设置 → 职责路由 配置');
+    const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
+    if (!endpoint) throw new Error('音乐职责指向的接入点已被删除，请重新配置');
+    if (!r.model.trim()) throw new Error('没有指定音乐模型');
+    const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
+    let lastCallId: string | null = null;
+    const client = new MiniMaxMusicClient({
+      baseURL: endpoint.baseURL,
+      apiKey,
+      headers: endpoint.headers,
+      fetch: this.o.fetch,
+      onExchange: (rec) => {
+        const id = this.logImage(rec, endpoint, r.model, tag, 'music');
+        if (id) lastCallId = id;
+      },
+    });
+    return { endpoint, model: r.model, client, lastCallId: () => lastCallId };
+  }
+
+  private logImage(
+    rec: ImageExchangeRecord | MusicExchangeRecord,
+    endpoint: Endpoint,
+    model: string,
+    tag: string | null,
+    role = 'image',
+  ): string | null {
+    const ok =
+      rec.kind === 'music'
+        ? `音乐 ${Math.round(rec.bytes / 1024)} KB${rec.durationMs ? `，${Math.round(rec.durationMs / 1000)} 秒` : ''}`
+        : (rec.revisedPrompt ?? `图片 ${Math.round(rec.bytes / 1024)} KB`);
     try {
       return this.o.calls.insert({
         ts: rec.startedAt,
@@ -171,7 +221,7 @@ export class ModelGateway {
         currency: endpoint.currency,
         error: rec.error,
         request: rec.request,
-        responseText: rec.status === 'ok' ? (rec.revisedPrompt ?? `图片 ${Math.round(rec.bytes / 1024)} KB`) : '',
+        responseText: rec.status === 'ok' ? ok : '',
         reasoning: '',
         toolCalls: [],
       });

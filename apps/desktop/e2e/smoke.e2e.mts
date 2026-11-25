@@ -15,11 +15,11 @@
  * 设置 E2E_APP_PATH=打包后的可执行文件 可以测试安装包里的应用（例如 release/win-unpacked/Auto-ADV.exe）。
  */
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { decodePng } from '@auto-adv/providers';
-import { encodePng, startMockServer } from '@auto-adv/providers/testing';
+import { encodePng, mockMusic, startMockServer } from '@auto-adv/providers/testing';
 import { _electron as electron, type Page } from 'playwright-core';
 
 const appDir = path.resolve(import.meta.dirname, '..');
@@ -559,6 +559,57 @@ try {
   await shot(page, '27b-assets-sprites');
   step('立绘抠成透明；给一个角色多加一个表情，只画这一张');
 
+  // ── BGM（M4 第 3 步）：配好音乐模型，每种情绪生成一首；本地曲库排在前面，曲库里有的情绪用曲库
+  /** 在页面里用 <audio> 读一下这个地址，返回时长（读不了就报错）。 */
+  const audioDuration = (src: string) =>
+    page.evaluate(
+      (url) =>
+        new Promise<number>((resolve, reject) => {
+          const a = new Audio(url);
+          a.onloadedmetadata = () => resolve(a.duration);
+          a.onerror = () => reject(new Error(`读不了 ${url}`));
+        }),
+      src,
+    );
+  // 还没配音乐模型、也没有本地曲库：用内置曲库（公有领域乐谱渲染的 Opus）
+  await page.waitForSelector('[data-testid="asset-mood"][data-mood="tense"][data-source="builtin"]');
+  const builtinSrc = await page.getAttribute('[data-testid="asset-mood"][data-mood="tense"] [data-testid="asset-mood-audio"]', 'src');
+  assert.match(builtinSrc ?? '', /^adv-asset:\/\/builtin\/[\w.-]+\.opus$/);
+  assert.ok((await audioDuration(builtinSrc ?? '')) > 60, '内置曲库的曲子应该能放');
+  await page.click('[data-nav="settings"]');
+  // 「关于」里列出内置曲目和授权
+  await page.click('button:has-text("关于")');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="about-builtin-track"]').length === 12);
+  assert.match((await page.textContent('[data-testid="about-builtin-bgm"]')) ?? '', /公有领域/);
+  await page.locator('[data-testid="about-builtin-bgm"]').scrollIntoViewIfNeeded();
+  await shot(page, '27b2-about-bgm');
+  await page.click('button:has-text("职责路由")');
+  await page.selectOption('[data-testid="role-endpoint-music"]', endpointId);
+  await page.fill('[data-testid="role-model-music"]', 'mock-music');
+  await page.click('[data-testid="role-save-music"]');
+  await page.waitForSelector('text=已保存「音乐」');
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="world-card"] >> text=旧书库的约定');
+  await page.click('[data-testid="tab-assets"]');
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="asset-mood"][data-source="model"]').length === 6, null, { timeout: 20_000 });
+  assert.equal(await page.textContent('[data-testid="assets-progress"]'), '素材 30 / 30');
+  const generated = await page.getAttribute('[data-testid="asset-mood"][data-mood="daily"] [data-testid="asset-mood-audio"]', 'src');
+  assert.ok((await audioDuration(generated ?? '')) > 1, '生成的 BGM 应该能放');
+
+  const lib = path.join(dataDir, 'my-music');
+  await mkdir(path.join(lib, '紧张'), { recursive: true });
+  await writeFile(path.join(lib, '紧张', '追逐.wav'), mockMusic('追逐', 3));
+  await page.click('[data-testid="world-asset-settings-toggle"]');
+  await page.fill('[data-testid="asset-bgm-library"]', lib);
+  await page.click('[data-testid="asset-settings-save"]');
+  await page.waitForSelector('[data-testid="asset-mood"][data-mood="tense"][data-source="library"]');
+  const fromLib = await page.getAttribute('[data-testid="asset-mood"][data-mood="tense"] [data-testid="asset-mood-audio"]', 'src');
+  assert.match(fromLib ?? '', /^adv-asset:\/\/library\//);
+  assert.ok((await audioDuration(fromLib ?? '')) > 2, '本地曲库里的曲子应该能放');
+  await page.locator('[data-testid="asset-bgm"]').scrollIntoViewIfNeeded();
+  await shot(page, '27c-assets-bgm');
+  step('没配音乐时放内置曲库；配好音乐模型，每种情绪生成一首；本地曲库里有的情绪改用曲库');
+
   // 舞台上换成真背景
   await page.click('[data-testid="playthrough"] >> button:has-text("继续")');
   await page.waitForSelector('[data-testid="adv-stage"]');
@@ -570,8 +621,11 @@ try {
     const img = document.querySelector('[data-testid="adv-sprite-image"]') as HTMLImageElement | null;
     return !!img && img.complete && img.naturalWidth > 0;
   });
+  // 手写剧本的 bgm 指令认成情绪（reunion → 温馨），放音乐模型生成的那首
+  await page.waitForSelector('[data-testid="stage-bgm"][data-src^="adv-asset://world/"]');
+  assert.ok(await page.getAttribute('[data-testid="stage-bgm"]', 'data-mood'));
   await shot(page, '28-adv-real-bg');
-  step('剧情 ADV 的舞台上换成了画好的背景和立绘');
+  step('剧情 ADV 的舞台上换成了画好的背景和立绘，放着 BGM');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {
