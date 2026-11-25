@@ -316,4 +316,18 @@ describe('创世前的用量估算', () => {
     const none = estimateAssets({}, AssetSettings.parse({}), { image: false, music: false, voice: false });
     expect(none).toMatchObject({ imageReady: false, images: { upfront: [0, 0] }, music: { tracks: 0, note: '没配音乐模型，用内置曲库' }, voice: null });
   });
+
+  it('估算默认关着；填了单价就折算成钱，没填的项不算', () => {
+    const all = { image: true, music: true, voice: true };
+    const plain = estimateAssets({ characterCount: 3 }, AssetSettings.parse({}), all);
+    expect(plain).toMatchObject({ enabled: false, cost: null });
+    const priced = AssetSettings.parse({ estimate: { enabled: true, currency: 'CNY', image: 0.2, music: 1, voice: 2 } });
+    const e = estimateAssets({ characterCount: 3 }, priced, all);
+    // 开局 16～30 张 × 0.2 + 6 首 × 1；每个周目 CG 4～6 张加时段背景最多 12 张；上限 60 张；每 100 拍 7000～18000 字
+    expect(e.cost).toEqual({ currency: 'CNY', upfront: [9.2, 12], perPlaythrough: [0.8, 3.6], cap: 12, voicePer100Beats: [1.4, 3.6] });
+    // 只填了图的单价：音乐、语音不算；没配图像模型时图也不算
+    const imageOnly = AssetSettings.parse({ estimate: { enabled: true, image: 0.2 } });
+    expect(estimateAssets({ characterCount: 3 }, imageOnly, all).cost).toMatchObject({ upfront: [3.2, 6], voicePer100Beats: null });
+    expect(estimateAssets({ characterCount: 3 }, imageOnly, { image: false, music: true, voice: true }).cost).toMatchObject({ upfront: null, cap: null });
+  });
 });

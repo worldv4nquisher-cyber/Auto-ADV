@@ -1,7 +1,7 @@
 /**
  * 素材设置的表单（18.11），全局设置页和世界的素材页共用。
  * 世界里只保存和全局不一样的项：每一项旁边能"恢复全局"；全局设置里是"恢复默认"。
- * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分，第 3 步 BGM，第 4 步语音，第 5 步 CG 和时段背景。
+ * 做到哪类素材就加上哪类的设置：第 1 步背景，第 2 步立绘和表情差分，第 3 步 BGM，第 4 步语音，第 5 步 CG、时段背景、临时人物和用量估算。
  */
 import {
   type AssetSettings,
@@ -71,12 +71,27 @@ type Key =
   | 'voice.prefetch'
   | 'voice.emotion'
   | 'voice.emotions'
-  | 'voiceConcurrency';
+  | 'voiceConcurrency'
+  | 'estimate.enabled'
+  | 'estimate.currency'
+  | 'estimate.image'
+  | 'estimate.music'
+  | 'estimate.voice';
 
 type Value = string | number | boolean | string[] | ExpressionDef[] | MoodDef[] | TimeVariantDef[] | Record<string, string>;
 
-/** 并发和重试是按接入点算的，只在全局设置里。 */
-const GLOBAL_ONLY: Key[] = ['imageConcurrency', 'retries', 'musicConcurrency', 'voiceConcurrency'];
+/** 并发和重试是按接入点算的，用量估算在新建世界之前用，都只在全局设置里。 */
+const GLOBAL_ONLY: Key[] = [
+  'imageConcurrency',
+  'retries',
+  'musicConcurrency',
+  'voiceConcurrency',
+  'estimate.enabled',
+  'estimate.currency',
+  'estimate.image',
+  'estimate.music',
+  'estimate.voice',
+];
 
 const SOURCE_HINTS: Record<BgmSource, string> = {
   library: '你自己的音乐文件夹',
@@ -617,6 +632,29 @@ export function AssetSettingsForm({
         {row('voice.emotions', '表情对应的情绪', '空着的表情不传情绪，让服务自己判断。MiniMax 常用的有 happy、sad、angry、fearful、disgusted、surprised、calm。', emotionMap())}
         {row('voiceConcurrency', '同时生成几句', '所有世界共用。', num('voiceConcurrency', 1, 8))}
       </Section>
+
+      {mode === 'global' && (
+        <Section title="用量估算">
+          {row(
+            'estimate.enabled',
+            '用量估算',
+            '新建世界页上显示预计的素材用量：开局画多少张、CG 和时段背景、音乐几首、每拍念多少字。按创世的一般规模估，给的是范围。',
+            toggle('estimate.enabled', '新建世界前估算用量', 'asset-estimate-enabled'),
+          )}
+          {row(
+            'estimate.currency',
+            '货币',
+            null,
+            <Select value={String(shown('estimate.currency'))} onChange={(e) => put('estimate.currency', e.target.value)} className="!w-40" data-testid="asset-estimate-currency">
+              <option value="CNY">人民币（¥）</option>
+              <option value="USD">美元（$）</option>
+            </Select>,
+          )}
+          {row('estimate.image', '每张图', '按你用的图像服务的价目填，重抽的也按张算。0 就是不算钱。', dec('estimate.image', 0, 1_000_000, 'asset-estimate-image', 0.01))}
+          {row('estimate.music', '每首曲子', '音乐模型生成一首的价格。内置曲库、本地曲库不花钱。', dec('estimate.music', 0, 1_000_000, 'asset-estimate-music', 0.01))}
+          {row('estimate.voice', '每一万字语音', '语音服务大多按字数收费。新建世界页上按每 100 拍估算。', dec('estimate.voice', 0, 1_000_000, 'asset-estimate-voice', 0.01))}
+        </Section>
+      )}
 
       <div className="flex items-center gap-3">
         <Button variant="primary" size="sm" disabled={!dirty} loading={saving} onClick={() => void save()} data-testid="asset-settings-save">

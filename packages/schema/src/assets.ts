@@ -320,6 +320,22 @@ export const ImageTemplates = z.object({
 });
 export type ImageTemplates = z.infer<typeof ImageTemplates>;
 
+/**
+ * 创世前的用量估算（6.5、18.3）：可选，打开后新建世界页上显示预计的素材用量。单价自己填（服务的价目表里查），
+ * 0 表示不算钱，只显示张数、首数、字数。只在全局设置里。
+ */
+export const EstimateSettings = z.object({
+  enabled: z.boolean().default(false),
+  currency: z.enum(['CNY', 'USD']).default('CNY'),
+  /** 每张图。 */
+  image: z.number().min(0).max(1_000_000).default(0),
+  /** 每首曲子。 */
+  music: z.number().min(0).max(1_000_000).default(0),
+  /** 每一万字语音。 */
+  voice: z.number().min(0).max(1_000_000).default(0),
+});
+export type EstimateSettings = z.infer<typeof EstimateSettings>;
+
 /** 素材管线的设置（18.11）。全局设置存在 settings.json 的 assets 里，世界里只写和全局不一样的项。 */
 export const AssetSettings = z.object({
   enabled: z
@@ -376,6 +392,8 @@ export const AssetSettings = z.object({
   timeOfDay: TimeOfDaySettings.prefault({}),
   /** 临时人物（18.5）。 */
   extras: ExtrasSettings.prefault({}),
+  /** 用量估算和单价（只在全局设置里）。 */
+  estimate: EstimateSettings.prefault({}),
   /** 同一个图像接入点同时画几张。 */
   imageConcurrency: z.number().int().min(1).max(16).default(2),
   /** 同一个音乐接入点同时生成几首。 */

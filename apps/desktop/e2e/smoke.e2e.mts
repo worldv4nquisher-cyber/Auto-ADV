@@ -807,13 +807,30 @@ try {
   await shot(page, '34-asset-settings-cg');
   step('素材设置里有 CG（每幕、每章最多几张、参考图）、时段背景（时段表）、临时人物');
 
-  // 新建世界页：按素材设置估算用量（4 个角色 × 3～6 张立绘，加 4～6 张背景）
+  // 用量估算是可选的：默认关着，新建世界页上不显示；打开、填上单价（每张图 0.2 元、每一万字语音 2 元）
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="new-world"]');
+  await page.waitForSelector('[data-testid="create-world"]');
+  await page.waitForTimeout(300);
+  assert.equal(await page.$('[data-testid="usage-estimate"]'), null, '估算没打开时不显示');
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-testid="tab-assets"]');
+  await globalForm.locator('[data-testid="asset-estimate-enabled"]').check();
+  await globalForm.locator('[data-testid="asset-estimate-image"]').fill('0.2');
+  await globalForm.locator('[data-testid="asset-estimate-voice"]').fill('2');
+  await globalForm.locator('[data-testid="asset-estimate-voice"]').scrollIntoViewIfNeeded();
+  await shot(page, '34b-asset-settings-estimate');
+  await globalForm.locator('[data-testid="asset-settings-save"]').click();
+  await page.waitForSelector('text=已保存素材设置');
+
+  // 新建世界页：按素材设置估算用量（4 个角色 × 3～6 张立绘，加 4～6 张背景），按单价折成钱
   await page.click('[data-nav="home"]');
   await page.click('[data-testid="new-world"]');
   await page.waitForSelector('[data-testid="usage-images"] >> text=开局画 16～30 张');
-  assert.match((await page.textContent('[data-testid="usage-voice"]')) ?? '', /每拍约 70～180 字/);
+  assert.match((await page.textContent('[data-testid="usage-cost"]')) ?? '', /开局约 ¥3\.20～¥6\.00/);
+  assert.match((await page.textContent('[data-testid="usage-voice"]')) ?? '', /每拍约 70～180 字[\s\S]*每 100 拍约 ¥1\.40～¥3\.60/);
   await shot(page, '35-create-estimate');
-  step('新建世界前估算素材用量：开局画多少张、CG 和时段背景、音乐、每拍念多少字');
+  step('用量估算在设置里打开、填上单价以后，新建世界前估算素材用量和花费：开局画多少张、CG 和时段背景、音乐、每拍念多少字');
 
   // 生成的世界开一个新的剧情 ADV 周目：导演标的 CG 画好就在舞台上出来，回想里能看大图
   await page.click('button:has-text("返回")');
