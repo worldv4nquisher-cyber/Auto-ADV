@@ -69,6 +69,8 @@ export interface MockServerOptions {
   speechFailIf?: string;
   /** 异步任务接口（/v1/jobs，测自定义接口的轮询）：查询几次之后才完成，默认 2。 */
   jobPolls?: number;
+  /** 假的 ComfyUI（/prompt、/history）：查询几次之后才画完，默认 1。 */
+  comfyPolls?: number;
   /** 绑定的主机，默认 127.0.0.1。 */
   host?: string;
   port?: number;
@@ -90,8 +92,36 @@ export interface MockServer {
   /** 异步任务接口收到的提交（请求体）和查询次数。 */
   jobRequests: Record<string, unknown>[];
   jobQueries: number;
+  /** 假的 ComfyUI 的地址（没有 /v1），形如 http://127.0.0.1:12345 */
+  comfyURL: string;
+  /** 假的 ComfyUI 收到的工作流（从节点里取出的提示词、尺寸、种子、模型、重绘幅度、参考图）。 */
+  comfyRequests: ComfyMockRequest[];
+  /** 假的 ComfyUI 收到的上传（/upload/image）的文件名。 */
+  comfyUploads: string[];
+  /** 假的 ComfyUI 被删掉的排队任务（/queue）。 */
+  comfyDeleted: string[];
   close(): Promise<void>;
 }
+
+export interface ComfyMockRequest {
+  promptId: string;
+  prompt: string;
+  negative: string;
+  width: number;
+  height: number;
+  seed: unknown;
+  model: unknown;
+  denoise: unknown;
+  /** LoadImage 的图（改图时是上传后的文件名）。 */
+  image: string | null;
+  clientId: unknown;
+}
+
+/** 假的 ComfyUI 认得的节点（ComfyUI 自带的几个）和模型。 */
+const COMFY_NODES = new Set(['CheckpointLoaderSimple', 'CLIPTextEncode', 'EmptyLatentImage', 'KSampler', 'VAEDecode', 'VAEEncode', 'SaveImage', 'PreviewImage', 'LoadImage', 'ImageScale']);
+export const MOCK_COMFY_MODELS = ['mock-sdxl.safetensors', 'mock-anime.safetensors'];
+
+type ComfyNode = { class_type: string; inputs: Record<string, unknown> };
 
 type WireMessage = MockMessage;
 
@@ -199,6 +229,11 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
   const jobRequests: Record<string, unknown>[] = [];
   const speechRequests: Record<string, unknown>[] = [];
   const jobs = new Map<string, { body: Record<string, unknown>; polls: number }>();
+  const comfyRequests: ComfyMockRequest[] = [];
+  const comfyUploads: string[] = [];
+  const comfyDeleted: string[] = [];
+  const comfyJobs = new Map<string, { req: ComfyMockRequest; polls: number; reference: Uint8Array | null; output: string }>();
+  const comfyInputs = new Map<string, Uint8Array>();
   let jobQueries = 0;
   const files = new Map<string, Buffer>();
   let chatCount = 0;
@@ -206,15 +241,132 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
 
   const server = http.createServer(async (req, res) => {
     try {
-      if (opts.apiKey && req.headers.authorization !== `Bearer ${opts.apiKey}`) {
+      const path = (req.url ?? '').replace(/\?.*$/, '');
+      // 本地的 ComfyUI 不要密钥
+      const comfyPath = /^\/(object_info|upload\/image|prompt|history|view|queue)(\/|$)/.test(path);
+      if (opts.apiKey && !comfyPath && req.headers.authorization !== `Bearer ${opts.apiKey}`) {
         return sendJson(res, 401, { error: { message: 'Incorrect API key provided', type: 'invalid_request_error' } });
       }
-      const path = (req.url ?? '').replace(/\?.*$/, '');
       if (req.method === 'GET' && path.startsWith('/files/')) {
         const file = files.get(path.slice('/files/'.length));
         if (!file) return sendJson(res, 404, { error: { message: 'expired' } });
         res.writeHead(200, { 'Content-Type': 'image/png' });
         return res.end(file);
+      }
+      // ── 假的 ComfyUI：/object_info、/upload/image、/prompt、/history、/view、/queue
+      if (req.method === 'GET' && path === '/object_info/CheckpointLoaderSimple') {
+        return sendJson(res, 200, { CheckpointLoaderSimple: { input: { required: { ckpt_name: [MOCK_COMFY_MODELS, {}] } } } });
+      }
+      if (req.method === 'POST' && path === '/upload/image') {
+        const form = await readForm(req);
+        const file = form.get('image');
+        if (!(file instanceof File)) return sendJson(res, 400, { error: 'image is required' });
+        comfyInputs.set(file.name, new Uint8Array(await file.arrayBuffer()));
+        comfyUploads.push(file.name);
+        return sendJson(res, 200, { name: file.name, subfolder: '', type: 'input' });
+      }
+      if (req.method === 'POST' && path === '/prompt') {
+        let raw = '';
+        for await (const part of req) raw += part;
+        const body = JSON.parse(raw || '{}') as { prompt?: Record<string, ComfyNode>; client_id?: unknown };
+        const nodes = body.prompt ?? {};
+        const invalid = (message: string, details = '', nodeErrors: Record<string, unknown> = {}) =>
+          sendJson(res, 400, { error: { type: 'invalid_prompt', message, details, extra_info: {} }, node_errors: nodeErrors });
+        for (const [id, n] of Object.entries(nodes)) {
+          if (!COMFY_NODES.has(n.class_type)) return invalid(`Cannot execute because node ${n.class_type} does not exist.`, `Node ID '#${id}'`);
+        }
+        const find = (t: string) => Object.entries(nodes).find(([, n]) => n.class_type === t);
+        const ref = (v: unknown) => (Array.isArray(v) ? nodes[String(v[0])] : undefined);
+        const ckpt = find('CheckpointLoaderSimple');
+        if (ckpt && !MOCK_COMFY_MODELS.includes(String(ckpt[1].inputs.ckpt_name))) {
+          return invalid('Prompt outputs failed validation', '', {
+            [ckpt[0]]: {
+              class_type: 'CheckpointLoaderSimple',
+              errors: [{ type: 'value_not_in_list', message: 'Value not in list', details: `ckpt_name: '${ckpt[1].inputs.ckpt_name}' not in ${JSON.stringify(MOCK_COMFY_MODELS)}` }],
+            },
+          });
+        }
+        const load = find('LoadImage');
+        const image = load ? String(load[1].inputs.image) : null;
+        if (load && !comfyInputs.has(image ?? '')) {
+          return invalid('Prompt outputs failed validation', '', {
+            [load[0]]: { class_type: 'LoadImage', errors: [{ type: 'custom_validation_failed', message: 'Custom validation failed for node', details: `image - Invalid image file: ${image}` }] },
+          });
+        }
+        const out = find('PreviewImage') ?? find('SaveImage');
+        if (!out) return invalid('Prompt has no outputs');
+        const sampler = find('KSampler')?.[1].inputs ?? {};
+        const size = (find('EmptyLatentImage') ?? find('ImageScale'))?.[1].inputs ?? {};
+        const promptId = `mock-prompt-${comfyRequests.length + 1}`;
+        const r: ComfyMockRequest = {
+          promptId,
+          prompt: String(ref(sampler.positive)?.inputs.text ?? ''),
+          negative: String(ref(sampler.negative)?.inputs.text ?? ''),
+          width: Number(size.width) || 1024,
+          height: Number(size.height) || 1024,
+          seed: sampler.seed,
+          model: ckpt?.[1].inputs.ckpt_name,
+          denoise: sampler.denoise,
+          image,
+          clientId: body.client_id,
+        };
+        comfyRequests.push(r);
+        comfyJobs.set(promptId, { req: r, polls: 0, reference: image ? (comfyInputs.get(image) ?? null) : null, output: out[0] });
+        return sendJson(res, 200, { prompt_id: promptId, number: comfyRequests.length, node_errors: {} });
+      }
+      if (req.method === 'GET' && path.startsWith('/history/')) {
+        const id = decodeURIComponent(path.slice('/history/'.length));
+        const job = comfyJobs.get(id);
+        if (!job) return sendJson(res, 200, {});
+        job.polls++;
+        if (job.polls < (opts.comfyPolls ?? 1)) return sendJson(res, 200, {});
+        if (job.req.prompt.includes('任务失败')) {
+          return sendJson(res, 200, {
+            [id]: {
+              outputs: {},
+              status: {
+                status_str: 'error',
+                completed: false,
+                messages: [
+                  ['execution_start', { prompt_id: id }],
+                  ['execution_error', { prompt_id: id, node_id: '5', node_type: 'KSampler', exception_message: 'mock: CUDA out of memory' }],
+                ],
+              },
+            },
+          });
+        }
+        const name = `ComfyUI_temp_${id}.png`;
+        if (!files.has(name)) {
+          const { width: w, height: h, prompt } = job.req;
+          const scale = 96 / Math.max(w, h);
+          const pw = Math.max(8, Math.round(w * scale));
+          const ph = Math.max(8, Math.round(h * scale));
+          files.set(
+            name,
+            job.reference ? mockEdit(job.reference, prompt) : prompt.includes('立绘') ? mockSprite(prompt, pw, ph, prompt.includes('纯绿') ? 'green' : 'white') : mockImage(prompt, pw, ph),
+          );
+        }
+        return sendJson(res, 200, {
+          [id]: {
+            prompt: [],
+            outputs: { [job.output]: { images: [{ filename: name, subfolder: '', type: 'temp' }] } },
+            status: { status_str: 'success', completed: true, messages: [] },
+          },
+        });
+      }
+      if (req.method === 'GET' && path === '/view') {
+        const q = new URL(req.url ?? '', 'http://mock.local').searchParams;
+        const file = files.get(q.get('filename') ?? '');
+        if (!file) return sendJson(res, 404, { error: 'not found' });
+        res.writeHead(200, { 'Content-Type': 'image/png' });
+        return res.end(file);
+      }
+      if (req.method === 'POST' && path === '/queue') {
+        let raw = '';
+        for await (const part of req) raw += part;
+        const body = JSON.parse(raw || '{}') as { delete?: string[] };
+        comfyDeleted.push(...(body.delete ?? []));
+        return sendJson(res, 200, {});
       }
       if (req.method === 'POST' && path === '/api/remove') {
         // 模拟 rembg：接近白色或纯绿的像素变透明
@@ -525,6 +677,10 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
     musicRequests,
     jobRequests,
     speechRequests,
+    comfyURL: `http://${opts.host ?? '127.0.0.1'}:${port}`,
+    comfyRequests,
+    comfyUploads,
+    comfyDeleted,
     get jobQueries() {
       return jobQueries;
     },

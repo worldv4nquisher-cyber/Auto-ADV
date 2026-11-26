@@ -3,6 +3,7 @@ import {
   type ChatResult,
   computeCost,
   CustomCutoutClient,
+  ComfyImageClient,
   CustomImageClient,
   CustomMusicClient,
   CustomSpeechClient,
@@ -30,7 +31,7 @@ import {
   type Usage,
   type VoiceExchangeRecord,
 } from '@auto-adv/providers';
-import { type Capabilities, type Endpoint, type MediaRoute, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
+import { type Capabilities, ComfySettings, comfyUsesModel, type Endpoint, type MediaRoute, ROLE_LABELS, type RoleId, type RoleRoute } from '@auto-adv/schema';
 import type { ChatTarget } from '../api.ts';
 import type { CallLog } from '../call-log.ts';
 import { endpointKeyId, type SecretStore } from '../secrets.ts';
@@ -49,7 +50,7 @@ export interface ModelHandle {
   lastCallId(): string | null;
 }
 
-/** 图像接口：内置的 OpenAI 风格（OpenAIImageClient）或自定义接口（CustomImageClient）。 */
+/** 图像接口：内置的 OpenAI 风格（OpenAIImageClient）、本地的 ComfyUI（ComfyImageClient）或自定义接口（CustomImageClient）。 */
 export interface ImageClient {
   generate(req: ImageRequest, signal?: AbortSignal): Promise<ImageResult>;
   edit(req: ImageEditRequest, signal?: AbortSignal): Promise<ImageResult>;
@@ -174,7 +175,9 @@ export class ModelGateway {
     if (!r) throw new Error('还没有给「图像」职责指定模型，请到 设置 → 职责路由 配置');
     const endpoint = s.endpoints.find((e) => e.id === r.endpointId);
     if (!endpoint) throw new Error('图像职责指向的接入点已被删除，请重新配置');
-    if (r.api !== 'custom' && !r.model.trim()) throw new Error('没有指定图像模型');
+    if (r.api !== 'custom' && !(r.api === 'comfyui' && !comfyUsesModel(r.comfy ?? ComfySettings.parse({}))) && !r.model.trim()) {
+      throw new Error('没有指定图像模型');
+    }
     const apiKey = await this.o.secrets.get(endpointKeyId(endpoint.id));
     let lastCallId: string | null = null;
     const cfg = {
@@ -187,7 +190,13 @@ export class ModelGateway {
         if (id) lastCallId = id;
       },
     };
-    const client: ImageClient = r.api === 'custom' ? new CustomImageClient(customOf(r, '图像'), cfg) : new OpenAIImageClient(cfg);
+    // ComfyUI：按用途挑工作流（tag 是 assets.background 这样的）
+    const client: ImageClient =
+      r.api === 'custom'
+        ? new CustomImageClient(customOf(r, '图像'), cfg)
+        : r.api === 'comfyui'
+          ? new ComfyImageClient(r.comfy ?? ComfySettings.parse({}), cfg, tag?.startsWith('assets.') ? tag.slice('assets.'.length) : null)
+          : new OpenAIImageClient(cfg);
     return { endpoint, model: r.model, api: r.api, client, lastCallId: () => lastCallId };
   }
 

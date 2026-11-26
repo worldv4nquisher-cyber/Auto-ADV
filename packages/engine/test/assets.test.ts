@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { decodePng, type RgbaImage } from '@auto-adv/providers';
 import { encodePng, type MockServer, type MockServerOptions, mockMusic, mockSprite, startMockServer } from '@auto-adv/providers/testing';
-import { AssetIndex, AssetSettings, BgmSettings, CUSTOM_API_PRESETS, type CustomApi } from '@auto-adv/schema';
+import { AssetIndex, AssetSettings, BgmSettings, ComfySettings, CUSTOM_API_PRESETS, type CustomApi } from '@auto-adv/schema';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type AssetsView, createPortPair, Engine, type EngineContract, MemorySecretStore, RpcClient, serveRpc } from '../src/index.ts';
 import { checkAlpha, hasTransparentBackdrop, keyOut } from '../src/assets/cutout.ts';
@@ -935,5 +935,49 @@ describe('自定义接口（通用 HTTP 适配器）', () => {
     await expect(
       client.call('testMusic', { route: { endpointId, model: 'mock-music', api: 'custom', custom: { request: { ...preset('music', 'minimax').request, resultPath: '' } } } }),
     ).rejects.toThrow(/音乐请求要填结果在响应里的位置/);
+  });
+});
+
+describe('本地生图（ComfyUI）', () => {
+  /** ComfyUI 的接入点：地址是 ComfyUI 本身（没有 /v1），没有密钥。 */
+  const comfyEndpoint = async () =>
+    (await client.call('saveEndpoint', { name: 'ComfyUI', baseURL: server.comfyURL, models: [], currency: 'CNY', pricing: {} })).id;
+
+  it('保存时检查工作流；从 ComfyUI 读模型列表；测试画一张', async () => {
+    await setup({ image: false });
+    const ep = await comfyEndpoint();
+    const route = { endpointId: ep, model: '', api: 'comfyui' as const };
+    await expect(client.call('setMediaRole', { role: 'image', route })).rejects.toThrow(/请填写模型（checkpoint 的文件名/);
+    expect(await client.call('comfyModels', { route })).toEqual(['mock-sdxl.safetensors', 'mock-anime.safetensors']);
+    await expect(client.call('setMediaRole', { role: 'image', route: { ...route, model: 'mock-sdxl.safetensors', comfy: ComfySettings.parse({ edit: '{"1": 2}' }) } })).rejects.toThrow(
+      /改图工作流的节点 1 不是 API 格式/,
+    );
+    const t = await client.call('testImage', { route: { ...route, model: 'mock-sdxl.safetensors' } });
+    expect(t.dataUrl).toMatch(/^data:image\/png;base64,/);
+    expect(server.comfyRequests[0]).toMatchObject({ model: 'mock-sdxl.safetensors', width: 1024, height: 1024 });
+    await client.call('setMediaRole', { role: 'image', route: { ...route, model: 'mock-sdxl.safetensors' } });
+    const s = await client.call('getSettings');
+    expect(s.media.image).toMatchObject({ api: 'comfyui', model: 'mock-sdxl.safetensors', comfy: { negative: expect.stringContaining('watermark'), denoise: 0.55 } });
+    // 连不上 ComfyUI：读模型时说清楚
+    const off = (await client.call('saveEndpoint', { name: '关着的 ComfyUI', baseURL: 'http://127.0.0.1:9', models: [], currency: 'CNY', pricing: {} })).id;
+    await expect(client.call('comfyModels', { route: { ...route, endpointId: off } })).rejects.toThrow(/连不上 ComfyUI/);
+  });
+
+  it('素材管线用 ComfyUI 画背景、立绘和表情差分：表情差分拿基础立绘的原图上传后改图', async () => {
+    const id = await setup({ image: false, sprites: true });
+    const ep = await comfyEndpoint();
+    await client.call('setMediaRole', { role: 'image', route: { endpointId: ep, model: 'mock-anime.safetensors', api: 'comfyui', comfy: ComfySettings.parse({ pollSeconds: 0.1 }) } });
+    const v = await idle(id, 30_000);
+    expect(v.counts.failed).toBe(0);
+    expect(slot(v, 'bg/loc_archive')).toMatchObject({ status: 'done' });
+    expect(slot(v, 'sprite/char_lin/smile')).toMatchObject({ status: 'done' });
+    expect(server.imageRequests).toHaveLength(0);
+    const edits = server.comfyRequests.filter((r) => r.image);
+    const expressions = v.slots.filter((s) => s.kind === 'sprite' && !s.id.endsWith('/neutral'));
+    expect(edits).toHaveLength(expressions.length);
+    expect(server.comfyUploads).toHaveLength(expressions.length);
+    expect(server.comfyRequests.every((r) => r.model === 'mock-anime.safetensors')).toBe(true);
+    const calls = await client.call('listCalls', { limit: 100 });
+    expect(calls.items.filter((c) => c.role === 'image' && c.status === 'ok')).toHaveLength(server.comfyRequests.length);
   });
 });

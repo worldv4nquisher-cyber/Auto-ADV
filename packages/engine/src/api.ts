@@ -790,6 +790,8 @@ export type EngineContract = {
   testVoice: Unary<{ route?: MediaRoute; voice?: string; text?: string }, { dataUrl: string; durationMs: number | null; latencyMs: number }>;
   /** 语音服务上的音色（MiniMax 从服务拉取，OpenAI 是固定的一套）。 */
   fetchVoices: Unary<{ route: MediaRoute }, VoiceDef[]>;
+  /** ComfyUI 上能用的模型（checkpoint 文件名，CheckpointLoaderSimple 的选项）。 */
+  comfyModels: Unary<{ route: MediaRoute }, string[]>;
   /** 一个世界的配音表（还没分配的角色会先分配，可能要等文本模型）。 */
   voiceCast: Unary<{ worldId: string }, VoiceCastView>;
   /** 给一个角色换音色（锁定）；voiceId 为 null 是解除锁定、自动重新分配。 */
