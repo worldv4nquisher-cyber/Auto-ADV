@@ -1,6 +1,7 @@
-import { existsSync, promises as fs } from 'node:fs';
+import { createReadStream, existsSync, promises as fs } from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { Readable } from 'node:stream';
+import type { ReadableStream } from 'node:stream/web';
 import type { HostContract } from '@auto-adv/engine/api';
 import { fromNodePort, serveRpc } from '@auto-adv/engine/rpc';
 import {
@@ -9,7 +10,6 @@ import {
   dialog,
   ipcMain,
   MessageChannelMain,
-  net,
   protocol,
   safeStorage,
   shell,
@@ -29,6 +29,50 @@ protocol.registerSchemesAsPrivileged([
 
 const AUDIO_FILE = /\.(mp3|ogg|opus|oga|wav|flac|m4a|aac)$/i;
 const notFound = () => new Response('not found', { status: 404 });
+
+const MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.mp3': 'audio/mpeg',
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+};
+
+/**
+ * 读一个本地文件，支持 Range 请求：<audio> 靠它拿到曲子的时长、能拖动进度（整份返回时时长是 Infinity，
+ * 也拖不动）。
+ */
+async function serveFile(file: string, req: Request): Promise<Response> {
+  const stat = await fs.stat(file).catch(() => null);
+  if (!stat?.isFile()) return notFound();
+  const size = stat.size;
+  const headers: Record<string, string> = { 'Content-Type': MIME[path.extname(file).toLowerCase()] ?? 'application/octet-stream', 'Accept-Ranges': 'bytes' };
+  let start = 0;
+  let end = size - 1;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(req.headers.get('range')?.trim() ?? '');
+  const ranged = !!m && !!(m[1] || m[2]);
+  if (m && ranged) {
+    if (m[1]) {
+      start = Number(m[1]);
+      if (m[2]) end = Math.min(Number(m[2]), size - 1);
+    } else {
+      start = Math.max(0, size - Number(m[2])); // bytes=-N：最后 N 个字节
+    }
+    if (start >= size || start > end) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+    headers['Content-Range'] = `bytes ${start}-${end}/${size}`;
+  }
+  headers['Content-Length'] = String(size ? end - start + 1 : 0);
+  const body = size ? (Readable.toWeb(createReadStream(file, { start, end })) as ReadableStream<Uint8Array>) : null;
+  return new Response(body as unknown as BodyInit | null, { status: ranged ? 206 : 200, headers });
+}
 
 /** 读一个 JSON 文件里的字段；文件不在、格式不对都当作没有。 */
 async function readJsonField(file: string, pick: (v: unknown) => unknown): Promise<string> {
@@ -58,7 +102,7 @@ function serveAssets(): void {
       const root = builtinBgmDir();
       const name = parts.join('/');
       if (!root || !/^[\w.-]+$/.test(name) || !AUDIO_FILE.test(name)) return notFound();
-      return net.fetch(pathToFileURL(path.join(root, name)).toString());
+      return serveFile(path.join(root, name), req);
     }
     const [worldId = '', ...rest] = parts;
     if (!/^[a-z0-9_]{1,64}$/.test(worldId)) return notFound();
@@ -68,13 +112,13 @@ function serveAssets(): void {
       if (!root || !rest.length || !AUDIO_FILE.test(rest.at(-1) ?? '')) return notFound();
       const file = path.resolve(root, ...rest);
       if (!file.startsWith(root + path.sep)) return notFound();
-      return net.fetch(pathToFileURL(file).toString());
+      return serveFile(file, req);
     }
     if (url.host !== 'world' || rest[0] !== 'assets') return notFound();
     const root = path.join(dataDir(), 'worlds', worldId, 'assets');
     const file = path.resolve(root, ...rest.slice(1));
     if (!file.startsWith(root + path.sep)) return notFound();
-    return net.fetch(pathToFileURL(file).toString());
+    return serveFile(file, req);
   });
 }
 

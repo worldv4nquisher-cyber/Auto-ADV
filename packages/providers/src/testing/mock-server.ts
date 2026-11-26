@@ -57,6 +57,8 @@ export interface MockServerOptions {
   imageNoisyIf?: string;
   /** 立绘的文生图返回这张 JPEG（模拟 H3 这类只出 JPEG 的服务）。 */
   spriteJpeg?: Uint8Array;
+  /** 提示词里含有 if 的基础立绘画成全身像或者只画上半身（构图检查不通过）；给了 times 就只有前几次这样。 */
+  spriteFraming?: { if: string; framing: 'full' | 'bust'; times?: number };
   /** 音乐接口（/v1/music_generation）每首的延迟，默认 0。 */
   musicDelayMs?: number;
   /** 音乐接口返回这个错误（模拟套餐不含音乐之类；http 不给就是 HTTP 200 加 base_resp）。 */
@@ -238,6 +240,7 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
   const files = new Map<string, Buffer>();
   let chatCount = 0;
   let imageCount = 0;
+  let badFraming = 0;
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -530,7 +533,9 @@ export async function startMockServer(options: MockServerOptions = {}): Promise<
                 : prompt.includes('纯绿')
                   ? 'green'
                   : 'white';
-          png = mockSprite(prompt, pw, ph, backdrop);
+          const bad = opts.spriteFraming;
+          const framing = bad && prompt.includes(bad.if) && (bad.times === undefined || badFraming++ < bad.times) ? bad.framing : 'knee';
+          png = mockSprite(prompt, pw, ph, backdrop, '', framing);
         } else {
           png = mockImage(prompt, pw, ph);
         }

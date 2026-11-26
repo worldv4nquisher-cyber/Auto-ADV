@@ -553,13 +553,14 @@ export function priorityOf(slot: PlannedSlot, world: WorldData, focus: AssetFocu
   );
   const here = focus ? focus.locationId : (world.opening?.locationId ?? null);
   if (slot.kind === 'sprite') {
-    // 在场角色的基础立绘最先，其次是这一幕和紧接着的幕要出场的，再其次是在场角色的其他表情（18.3）
+    // 在场角色的基础立绘最先，其次是这一幕和紧接着的幕要出场的，再其次是在场角色的其他表情（18.3）；
+    // 其余角色的基础立绘排在其余表情前面：开场写好之前没有"在场角色"，要先让每个人都有一张（19.8）
     const opening = world.opening?.presentCharacterIds ?? [];
     const present = new Set(focus ? focus.characterIds : opening.length ? opening : (scene?.cast ?? []));
     const soon = new Set([...(scene?.cast ?? []), ...(graph?.scenes ?? []).filter((s) => next.has(s.id)).flatMap((s) => s.cast)]);
     const id = slot.characterId ?? '';
     if (slot.expression === 'neutral') return present.has(id) ? 1 : soon.has(id) ? 2 : 4;
-    return present.has(id) ? 3 : 4;
+    return present.has(id) ? 3 : 5;
   }
   if (slot.kind === 'cg') {
     // 导演标的 CG 要在这一拍还没播完时画好；剧本里的跟着幕走

@@ -270,3 +270,60 @@ export function checkAlpha(img: RgbaImage, opts: { holes?: boolean } = {}): Alph
   }
   return { ok: true, reason: null, coverage };
 }
+
+/** 人物的外框（像素）：只算实心像素超过一行宽度 1% 的行，零星的杂点不算。没有人物时为 null。 */
+export function figureBox(img: RgbaImage): { top: number; bottom: number; left: number; right: number } | null {
+  const { width: w, height: h, data } = img;
+  const min = Math.max(1, Math.floor(w * 0.01));
+  let top = -1;
+  let bottom = -1;
+  let left = w;
+  let right = -1;
+  for (let y = 0; y < h; y++) {
+    let l = -1;
+    let r = -1;
+    let n = 0;
+    for (let x = 0; x < w; x++) {
+      if ((data[(y * w + x) * 4 + 3] as number) >= 128) {
+        if (l < 0) l = x;
+        r = x;
+        n++;
+      }
+    }
+    if (n < min) continue;
+    if (top < 0) top = y;
+    bottom = y;
+    left = Math.min(left, l);
+    right = Math.max(right, r);
+  }
+  return top < 0 ? null : { top, bottom, left, right };
+}
+
+/**
+ * 基础立绘的构图检查（19.8）：要的是膝盖以上的半身像，同一个世界的立绘才能在舞台上一样大。
+ * 看人物外框的高宽比和底下的空白：又细又长、脚下还有空白的是全身像；人物不到画面高度的六成、
+ * 或者又矮又宽的是只画了上半身。返回不对的原因（给人看），对了返回 null。
+ */
+export function checkFraming(img: RgbaImage): string | null {
+  const box = figureBox(img);
+  if (!box) return null;
+  const fh = box.bottom - box.top + 1;
+  const fw = box.right - box.left + 1;
+  const ratio = fh / fw;
+  const gap = (img.height - 1 - box.bottom) / img.height;
+  if (ratio >= 3 || (ratio >= 2.6 && gap > 0.02)) return '画成了全身像（要的是膝盖以上的半身像），站在舞台上会比别人小一圈';
+  if (fh / img.height < 0.6 || ratio < 1.3) return '只画了上半身（要的是膝盖以上的半身像），站在舞台上会比别人大一圈';
+  return null;
+}
+
+/** 人物没画到底边（脚下或者腰下有一截空白）：整个往下挪到底边，站在舞台上不会悬在半空。不用挪时原样返回。 */
+export function anchorBottom(img: RgbaImage): RgbaImage {
+  const box = figureBox(img);
+  if (!box) return img;
+  const shift = img.height - 1 - box.bottom;
+  if (shift <= Math.floor(img.height * 0.005)) return img;
+  const { width: w, height: h, data } = img;
+  const out = new Uint8Array(data.length);
+  out.set(data.subarray(0, (h - shift) * w * 4), shift * w * 4);
+  return { width: w, height: h, data: out };
+}

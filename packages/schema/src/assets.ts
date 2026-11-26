@@ -381,6 +381,8 @@ export const AssetSettings = z.object({
   spriteProtagonist: z.boolean().default(true),
   transparency: TransparencyMode.default('auto'),
   keyColor: KeyColor.default('auto'),
+  /** 检查基础立绘的构图（膝盖以上的半身像）：画成全身像或者只画了上半身时换一张再画一次（19.8）。 */
+  checkFraming: z.boolean().default(true),
   /** 单个角色的设置（只在世界里有）。 */
   characters: z.record(z.string(), CharacterAssetSettings).default({}),
   /** BGM（18.7）。 */
@@ -419,6 +421,7 @@ export const AssetSettingsPatch = z.object({
   spriteProtagonist: z.boolean().optional(),
   transparency: TransparencyMode.optional(),
   keyColor: KeyColor.optional(),
+  checkFraming: z.boolean().optional(),
   characters: z.record(z.string(), CharacterAssetSettings).optional(),
   bgm: z
     .object({
@@ -470,6 +473,7 @@ export function mergeAssetSettings(base: AssetSettings, patch: AssetSettingsPatc
     ...(patch.spriteProtagonist !== undefined ? { spriteProtagonist: patch.spriteProtagonist } : {}),
     ...(patch.transparency !== undefined ? { transparency: patch.transparency } : {}),
     ...(patch.keyColor !== undefined ? { keyColor: patch.keyColor } : {}),
+    ...(patch.checkFraming !== undefined ? { checkFraming: patch.checkFraming } : {}),
     enabled: { ...base.enabled, ...patch.enabled },
     sizes: { ...base.sizes, ...patch.sizes },
     templates: { ...base.templates, ...patch.templates },
