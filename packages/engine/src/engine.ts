@@ -32,6 +32,7 @@ import {
 import type {
   AssetsChunk,
   CreateWorldParams,
+  DeletedEntity,
   EndpointView,
   GenesisChunk,
   ObserverChunk,
@@ -59,7 +60,9 @@ import {
   TEMPLATE_PLACEHOLDERS,
 } from './assets/templates.ts';
 import { CallLog } from './call-log.ts';
-import { GenesisRunner } from './genesis/pipeline.ts';
+import { missingInputs, staleSteps, stampInputs } from './genesis/inputs.ts';
+import { type GenesisRunOptions, GenesisRunner, type RewriteChunk } from './genesis/pipeline.ts';
+import { applyRenames, findRenames, type RenamePatch } from './world/rename.ts';
 import { ModelGateway } from './llm/gateway.ts';
 import { PlayService } from './play/runtime.ts';
 import { checkWorldPlot } from './plot/session.ts';
@@ -320,9 +323,9 @@ export class Engine {
     await this.assets.refreshAll();
   }
 
-  async saveEditorSettings(settings: EditorSettings): Promise<void> {
-    const parsed = EditorSettings.parse(settings);
-    await this.settings.update((s) => ({ ...s, editor: parsed }));
+  /** 编辑器设置：只给要改的项也行，没给的留着原来的。 */
+  async saveEditorSettings(settings: Partial<EditorSettings>): Promise<void> {
+    await this.settings.update((s) => ({ ...s, editor: EditorSettings.parse({ ...s.editor, ...settings }) }));
   }
 
   /** 画一张小图试试图像职责。 */
@@ -491,7 +494,142 @@ export class Engine {
       revs: allRevs(world),
       issues: checkWorld(world),
       editable: !this.genesis.isRunning(id),
+      stale: staleSteps(world),
     };
+  }
+
+  /** M5 之前生成的世界没有输入哈希：第一次改动之前按现在的内容补上，当作"那时是新的"（20.4"过期"）。 */
+  private async baseline(world: WorldData): Promise<void> {
+    const missing = missingInputs(world);
+    if (!missing.length) return;
+    await this.worlds.updateManifest(world.manifest.id, (m) => {
+      const steps = { ...m.genesis.steps };
+      for (const id of missing) {
+        const st = steps[id];
+        if (st?.status === 'done' && !st.inputs) steps[id] = { ...st, ...stampInputs(world, id) };
+      }
+      return { ...m, genesis: { ...m.genesis, steps } };
+    });
+  }
+
+  /** 过期的步骤不更新了：按现在的上游记下新的输入哈希。 */
+  async acceptStale(p: { worldId: string; steps?: GenesisStepId[] }): Promise<WorldDetail> {
+    const world = await this.editableWorld(p.worldId);
+    const targets = new Set(p.steps ?? staleSteps(world).map((x) => x.step));
+    await this.worlds.updateManifest(p.worldId, (m) => {
+      const steps = { ...m.genesis.steps };
+      for (const id of targets) {
+        const st = steps[id];
+        if (st?.status === 'done') steps[id] = { ...st, ...stampInputs(world, id) };
+      }
+      return { ...m, genesis: { ...m.genesis, steps } };
+    });
+    return this.getWorld(p.worldId);
+  }
+
+  /** 只重写一个角色、地点或设定条目（20.4"一个实体"）。 */
+  rerollEntity(p: { worldId: string; kind: EntityKind; id: string; note?: string }, ctx: CallContext) {
+    return fromCallback<RewriteChunk, WorldDetail>(async (emit) => {
+      const world = await this.editableWorld(p.worldId);
+      await this.baseline(world);
+      await this.genesis.rewriteEntity(p.worldId, p, emit, ctx.signal);
+      await this.worlds.updateManifest(p.worldId, (m) => m);
+      void this.assets.refresh(p.worldId).catch(() => {});
+      return this.getWorld(p.worldId);
+    });
+  }
+
+  /** 只重写一个字段，返回新的文字（不保存）。 */
+  rewriteField(p: { worldId: string; key: RevKey; path: string; data?: unknown; note?: string }, ctx: CallContext) {
+    return fromCallback<RewriteChunk, { text: string }>(async (emit) => {
+      assertWorldId(p.worldId);
+      return { text: await this.genesis.rewriteField(p.worldId, p, emit, ctx.signal) };
+    });
+  }
+
+  /** 改名之前：正文里还写着旧名字的地方（20.4"改名"）。 */
+  async renameHits(p: { worldId: string; kind: 'character' | 'location'; id: string; to: string; draft?: unknown }) {
+    assertWorldId(p.worldId);
+    const world = await this.worlds.load(p.worldId);
+    const item = (p.kind === 'character' ? world.characters : world.locations).find((x) => x.id === p.id);
+    if (!item) return [];
+    // 正在改的这一个按表单里的算（保存后才是它），解析不了就按存着的
+    if (p.draft && typeof p.draft === 'object') {
+      const data = { ...item, ...p.draft, id: p.id };
+      if (p.kind === 'character') {
+        const parsed = PART_SCHEMAS.character.safeParse(data);
+        if (parsed.success) world.characters = world.characters.map((c) => (c.id === p.id ? parsed.data : c));
+      } else {
+        const parsed = PART_SCHEMAS.location.safeParse(data);
+        if (parsed.success) world.locations = world.locations.map((l) => (l.id === p.id ? parsed.data : l));
+      }
+    }
+    return findRenames(world, item.name, p.to.trim(), { kind: p.kind, id: p.id });
+  }
+
+  /** 把改名替换写回去（都记成你改的，进历史，不加锁）。 */
+  private async writeRenames(worldId: string, world: WorldData, patch: RenamePatch): Promise<void> {
+    if (patch.manifest) {
+      const { title, logline } = patch.manifest;
+      await this.worlds.updateManifest(worldId, (m) => ({ ...m, title: title.trim() || m.title, logline }));
+    }
+    if (patch.brief) await this.worlds.writeBrief(worldId, patch.brief, 'edit');
+    if (patch.style) await this.worlds.writeStyle(worldId, patch.style, 'edit');
+    if (patch.worldview !== undefined) await this.worlds.writeWorldview(worldId, patch.worldview, 'edit');
+    for (const c of patch.characters) await this.worlds.writeCharacter(worldId, c, 'edit');
+    for (const l of patch.locations) await this.worlds.writeLocation(worldId, l, 'edit');
+    for (const e of patch.lore) await this.worlds.writeLoreEntry(worldId, e, 'edit');
+    if (patch.graph) await this.worlds.writePlot(worldId, patch.graph, 'edit');
+    if (patch.variables) await this.worlds.writeVariables(worldId, patch.variables, 'edit');
+    if (patch.opening) await this.worlds.writeOpening(worldId, patch.opening, 'edit');
+    for (const [sceneId, text] of Object.entries(patch.scripts)) {
+      const scene = world.graph?.scenes.find((x) => x.id === sceneId);
+      await this.worlds.writeScript(worldId, scene?.script ?? `${sceneId}.adv`, text, 'edit');
+    }
+  }
+
+  /** 删掉的角色、地点、设定条目：历史里还在、现在没有了的（20.5"历史版本"）。 */
+  async deletedEntities(p: { worldId: string }): Promise<DeletedEntity[]> {
+    assertWorldId(p.worldId);
+    const world = await this.worlds.load(p.worldId);
+    const out: DeletedEntity[] = [];
+    for (const kind of ['character', 'location', 'lore'] as const) {
+      const list: { id: string }[] = kind === 'character' ? world.characters : kind === 'location' ? world.locations : world.lore;
+      const now = new Set(list.map((x) => x.id));
+      for (const id of await this.worlds.historyIds(p.worldId, kind)) {
+        if (now.has(id)) continue;
+        const key = `${kind}:${id}` as const;
+        const last = (await this.worlds.listHistory(p.worldId, key))[0];
+        if (!last) continue;
+        const r = await this.worldHistoryRead({ worldId: p.worldId, key, name: last.name });
+        const d = r.data as { name?: string; title?: string } | null;
+        out.push({ kind, id, title: d?.name ?? d?.title ?? id, name: last.name, at: last.at, restorable: d !== null });
+      }
+    }
+    return out.sort((a, b) => b.at.localeCompare(a.at));
+  }
+
+  /** 从历史里找回一个删掉的实体。id 已经被占了就换一个新的。删的时候一起去掉的引用不会回来。 */
+  async restoreDeleted(p: { worldId: string; kind: EntityKind; id: string; name: string }): Promise<SaveWorldPartResult> {
+    const world = await this.editableWorld(p.worldId);
+    await this.baseline(world);
+    const r = await this.worldHistoryRead({ worldId: p.worldId, key: `${p.kind}:${p.id}`, name: p.name });
+    if (!r.data) throw Object.assign(new Error('这个版本的格式读不懂，没法找回'), { code: 'invalid' });
+    const list: { id: string }[] = p.kind === 'character' ? world.characters : p.kind === 'location' ? world.locations : world.lore;
+    const taken = list.map((x) => x.id);
+    const id = taken.includes(p.id) ? nextId(ID_PREFIX[p.kind], [...taken, ...(await this.worlds.historyIds(p.worldId, p.kind))]) : p.id;
+    if (p.kind === 'character') {
+      const c = PART_SCHEMAS.character.parse({ ...(r.data as object), id });
+      c.secrets = c.secrets.map((s) => (Array.isArray(s.knownBy) ? { ...s, knownBy: s.knownBy.map((x) => (x === p.id ? id : x)) } : s));
+      await this.worlds.writeCharacter(p.worldId, c, 'edit');
+    } else if (p.kind === 'location') {
+      await this.worlds.writeLocation(p.worldId, PART_SCHEMAS.location.parse({ ...(r.data as object), id }), 'edit');
+    } else {
+      await this.worlds.writeLoreEntry(p.worldId, PART_SCHEMAS.lore.parse({ ...(r.data as object), id }), 'edit');
+    }
+    await this.worlds.updateManifest(p.worldId, (m) => m);
+    void this.assets.refresh(p.worldId).catch(() => {});
+    return { key: `${p.kind}:${id}`, world: await this.getWorld(p.worldId) };
   }
 
   // ───────────── 世界编辑器（20.5） ─────────────
@@ -507,7 +645,9 @@ export class Engine {
   /** 保存一块内容：校验、检查版本号、手改的字段自动锁住、旧版本进历史，然后重算素材清单。 */
   async saveWorldPart(p: SaveWorldPartParams): Promise<SaveWorldPartResult> {
     const world = await this.editableWorld(p.worldId);
-    const { autoLock } = (await this.settings.get()).editor;
+    await this.baseline(world);
+    const { autoLock, rename: renameMode } = (await this.settings.get()).editor;
+    let rename: { kind: 'character' | 'location'; id: string; from: string; to: string } | null = null;
     const unlocked = new Set(p.unlocked ?? []);
     const now = new Date().toISOString();
     const check = (key: RevKey) => {
@@ -599,7 +739,11 @@ export class Engine {
         const kind = p.part;
         const list: { id: string }[] =
           kind === 'character' ? world.characters : kind === 'location' ? world.locations : world.lore;
-        const id = p.data.id || nextId(ID_PREFIX[kind], list.map((x) => x.id));
+        const id = p.data.id || nextId(ID_PREFIX[kind], [...list.map((x) => x.id), ...(await this.worlds.historyIds(p.worldId, kind))]);
+        const before = list.find((x) => x.id === id) as { name?: string } | undefined;
+        if (kind !== 'lore' && before?.name && p.data.name && before.name !== p.data.name.trim()) {
+          rename = { kind, id, from: before.name, to: p.data.name.trim() };
+        }
         key = `${kind}:${id}`;
         check(key);
         const label = { character: '角色', location: '地点', lore: '设定条目' }[kind];
@@ -623,14 +767,24 @@ export class Engine {
       default:
         throw Object.assign(new Error('不认识的内容'), { code: 'invalid' });
     }
+    // 改名：正文里的旧名字按选的换掉（不给就按设置：总是替换才全换）
+    let renamed: number | undefined;
+    const groups = p.rename?.groups ?? (renameMode === 'always' ? 'all' : []);
+    if (rename && (groups === 'all' || groups.length)) {
+      const after = await this.worlds.load(p.worldId);
+      const patch = applyRenames(after, rename.from, rename.to, groups, rename);
+      await this.writeRenames(p.worldId, after, patch);
+      renamed = patch.count;
+    }
     await this.worlds.updateManifest(p.worldId, (m) => m);
     void this.assets.refresh(p.worldId).catch(() => {});
-    return { key, world: await this.getWorld(p.worldId) };
+    return { key, world: await this.getWorld(p.worldId), ...(renamed !== undefined ? { renamed } : {}) };
   }
 
   /** 删掉一个角色、地点或设定条目；removeRefs 时先把别处能去掉的引用去掉（20.5"删除"）。 */
   async deleteWorldPart(p: { worldId: string; kind: EntityKind; id: string; removeRefs: boolean }): Promise<WorldDetail> {
     const world = await this.editableWorld(p.worldId);
+    await this.baseline(world);
     const key = `${p.kind}:${p.id}` as const;
     const list: { id: string }[] =
       p.kind === 'character' ? world.characters : p.kind === 'location' ? world.locations : world.lore;
@@ -724,9 +878,12 @@ export class Engine {
     });
   }
 
-  runGenesis(worldId: string, from: GenesisStepId | undefined, ctx: CallContext) {
+  runGenesis(worldId: string, opts: GenesisRunOptions, ctx: CallContext) {
     return fromCallback<GenesisChunk, WorldSummary>(async (emit) => {
-      await this.genesis.run(worldId, from, this.withAssets(emit, () => worldId), ctx.signal);
+      assertWorldId(worldId);
+      // 重抽某一步之前先给没有输入哈希的步骤补上，这样它的下游之后能标过期
+      if (!this.genesis.isRunning(worldId)) await this.baseline(await this.worlds.load(worldId));
+      await this.genesis.run(worldId, opts, this.withAssets(emit, () => worldId), ctx.signal);
       void this.assets.refresh(worldId).catch(() => {});
       return this.summarize(await this.worlds.load(worldId));
     });
@@ -781,7 +938,18 @@ export class Engine {
         ]);
         return estimateAssets(p.options, s.assets, { image: !!image, music: !!music, voice: !!voice });
       },
-      runGenesis: (p, ctx) => this.runGenesis(p.worldId, p.from, ctx),
+      runGenesis: (p, ctx) =>
+        this.runGenesis(
+          p.worldId,
+          { ...(p.from ? { from: p.from } : {}), ...(p.steps ? { steps: p.steps } : {}), ...(p.note ? { note: p.note } : {}) },
+          ctx,
+        ),
+      acceptStale: (p) => this.acceptStale(p),
+      rerollEntity: (p, ctx) => this.rerollEntity(p, ctx),
+      rewriteField: (p, ctx) => this.rewriteField(p, ctx),
+      renameHits: (p) => this.renameHits(p),
+      deletedEntities: (p) => this.deletedEntities(p),
+      restoreDeleted: (p) => this.restoreDeleted(p),
 
       assetsView: (p) => this.assets.view(p.worldId),
       assetsWatch: (p, ctx) => fromCallback<AssetsChunk, void>((emit) => this.assets.watch(p.worldId, emit, ctx.signal)),

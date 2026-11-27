@@ -939,7 +939,7 @@ function AssetsSettingsTab() {
 
 // ───────────── 编辑器（20.11） ─────────────
 
-const EDITOR_DEFAULTS: EditorSettings = { autoLock: true, historyLimit: 20 };
+const EDITOR_DEFAULTS: EditorSettings = { autoLock: true, historyLimit: 20, downstream: 'prompt', rename: 'ask' };
 
 function EditorSettingsTab() {
   const { settings, refresh } = useSettings();
@@ -994,6 +994,42 @@ function EditorSettingsTab() {
             onChange={(e) => setDraft({ ...draft, historyLimit: Math.max(0, Math.min(200, Math.round(Number(e.target.value) || 0))) })}
             data-testid="editor-history-limit"
           />
+        </div>
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">上游改了以后</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">
+              比如改了角色，剧情图、设定集、开场还是按改之前写的。提示：世界页顶上说一声，点了才重写；自动：马上重写这几步（锁住的保留，会用掉额度）；不管：只在创世步骤里标"过期"。
+            </p>
+          </div>
+          <Select
+            className="w-32 shrink-0"
+            value={draft.downstream}
+            onChange={(e) => setDraft({ ...draft, downstream: e.target.value as EditorSettings['downstream'] })}
+            data-testid="editor-downstream"
+          >
+            <option value="prompt">提示</option>
+            <option value="auto">自动重写</option>
+            <option value="ignore">不管</option>
+          </Select>
+        </div>
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">改名时替换正文里的旧名字</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">
+              角色、地点改了名字，世界观、别的角色的经历、剧情图、开场里还写着旧名字。问：列出来让你勾；总是：全部换掉；从不：不换（引用不会断，只是文字里还是旧名字）。
+            </p>
+          </div>
+          <Select
+            className="w-32 shrink-0"
+            value={draft.rename}
+            onChange={(e) => setDraft({ ...draft, rename: e.target.value as EditorSettings['rename'] })}
+            data-testid="editor-rename"
+          >
+            <option value="ask">问我</option>
+            <option value="always">总是替换</option>
+            <option value="never">从不替换</option>
+          </Select>
         </div>
         <div className="flex justify-end gap-2 border-t border-line pt-4">
           <Button variant="ghost" onClick={() => setDraft(EDITOR_DEFAULTS)} disabled={JSON.stringify(draft) === JSON.stringify(EDITOR_DEFAULTS)}>

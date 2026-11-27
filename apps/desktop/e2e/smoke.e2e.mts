@@ -11,7 +11,9 @@
  *   → 每个角色的基础立绘和表情差分画好、抠成透明 → 给一个角色多加一个表情 → 舞台上换成真立绘（M4 第 2 步）
  *   → BGM：内置曲库、音乐模型、本地曲库（M4 第 3 步）→ 图像职责改成自定义接口
  *   → 配音：语音职责、拉取音色表 → 素材页的配音表（试听、换音色锁定、重新分配）→ 舞台上念台词、回想里重播、缓存（M4 第 4 步）
- * → 世界编辑器：改角色（自动加锁）、没保存先问、历史版本、加角色、删地点连引用、关掉自动锁、JSON 视图（M5 第 1 步）。
+ * → 世界编辑器：改角色（自动加锁）、没保存先问、历史版本、加角色、删地点连引用、关掉自动锁、JSON 视图（M5 第 1 步）
+ *   → 整个锁住角色、单独重抽一个角色、重抽一整步（锁住的留下）、过期提示和更新、AI 重写一个字段、改名换掉正文里的旧名字、
+ *   找回被换掉的角色、"上游改了以后"的设置（M5 第 2 步）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
@@ -1009,6 +1011,8 @@ try {
   await page.waitForSelector('[data-testid="unsaved-dialog"]');
   await page.click('[data-testid="unsaved-dialog"] >> text=接着改');
   await page.click(`${linForm} [data-testid="save-edit"]`);
+  // 等表单关掉（保存完）再看：受控的多行输入框里也有这段文字，光看文字会在保存完之前就对上
+  await page.waitForSelector(linForm, { state: 'detached' });
   await page.waitForSelector('[data-panel="character:char_lin"] >> text=在旧书库里找一本不存在的书。');
   assert.deepEqual((await libJson('characters/char_lin/character.json'))._meta.locked, ['summary']);
   await page.hover('[data-panel="character:char_lin"]');
@@ -1060,11 +1064,133 @@ try {
   const manifestJson = JSON.parse(await page.inputValue('[data-testid="json-editor"]')) as Record<string, unknown>;
   await page.fill('[data-testid="json-editor"]', JSON.stringify({ ...manifestJson, logline: '改过的简介' }, null, 2));
   await page.click('[data-testid="save-edit"]');
+  await page.waitForSelector('[data-testid="json-editor"]', { state: 'detached' });
   await page.waitForSelector('[data-panel="manifest"] >> text=改过的简介');
   const libManifest = await libJson('world.json');
   assert.equal(libManifest.logline, '改过的简介');
   assert.deepEqual(libManifest.locked, []);
   step('设置里关掉自动锁；在 JSON 里改世界的简介，保存后不加锁');
+
+  // ── M5 第 2 步（回到「雾港谜灯」）：整个锁住一个角色、单独重抽一个角色、重抽角色这一步、
+  // 上游改了以后的提示、AI 重写一个字段、改名时把正文里的旧名字换掉、找回被换掉的角色、"上游改了以后"的设置
+  const fogDir = path.join(dataDir, 'worlds', fogWorld);
+  type FogChar = { id: string; name: string; role: string; summary: string; background: string; _meta: { locked: string[] } };
+  const fogChars = async () => {
+    const out: FogChar[] = [];
+    for (const d of await readdir(path.join(fogDir, 'characters'), { withFileTypes: true })) {
+      if (d.isDirectory()) out.push(JSON.parse(await readFile(path.join(fogDir, 'characters', d.name, 'character.json'), 'utf8')) as FogChar);
+    }
+    return out;
+  };
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="world-card"] >> text=雾港谜灯');
+  await page.click('[data-testid="tab-characters"]');
+  // 周目里升级成正式角色的码头老板不算改了上游：没有过期提示
+  assert.equal(await page.$('[data-testid="stale-banner"]'), null);
+  const cast0 = await fogChars();
+  const fogLin = cast0.find((c) => c.name === '林夕');
+  const fogOther = cast0.find((c) => c.role !== 'protagonist' && c.name !== '林夕');
+  assert.ok(fogLin && fogOther, '雾港谜灯里要有林夕和另一个配角');
+  await page.hover(`[data-panel="character:${fogLin.id}"]`);
+  await page.click(`[data-testid="lockall-character:${fogLin.id}"]`);
+  await page.waitForSelector(`[data-testid="lockall-character:${fogLin.id}"][data-state="locked"]`, { state: 'attached' });
+  assert.deepEqual((await fogChars()).find((c) => c.id === fogLin.id)?._meta.locked, ['*']);
+  // 单独重抽另一个角色，写一句要求：id 不变；剧情图、设定集、开场标成过期，世界页上提示
+  await page.hover(`[data-panel="character:${fogOther.id}"]`);
+  await page.click(`[data-testid="reroll-character:${fogOther.id}"]`);
+  await page.fill('[data-testid="reroll-note"]', '更冷淡一点');
+  await shot(page, '47-editor-reroll-entity');
+  await page.click('[data-testid="reroll-confirm"]');
+  await page.waitForSelector(`text=重写好了「${fogOther.name}」`);
+  const rerolled = (await fogChars()).find((c) => c.id === fogOther.id);
+  assert.ok(rerolled?.summary.includes('重写过的角色'), '重抽的角色没有写回去');
+  assert.ok(
+    server.requests.some((r) => JSON.stringify(r).includes('world_character') && JSON.stringify(r).includes('更冷淡一点')),
+    '重抽的要求没有交给模型',
+  );
+  await page.waitForSelector('[data-testid="stale-banner"] >> text=剧情图');
+  assert.equal(await page.getAttribute('[data-step="plot"]', 'data-stale'), 'true');
+  await shot(page, '48-editor-stale');
+  await page.click('[data-testid="stale-dismiss"]');
+  await page.waitForSelector('[data-testid="stale-banner"]', { state: 'detached' });
+  assert.equal(await page.$('[data-step][data-stale]'), null);
+  step(`整个锁住林夕；单独重抽「${fogOther.name}」（写了要求，id 不变）；剧情图、设定集、开场标成过期，点「不用了」收起`);
+
+  // 重抽角色这一步（不连带下游）：林夕原样留下，其他角色换成新的（新 id，同名的用回原来的）；下游提示过期，点「更新这几步」
+  const linLocked = (await fogChars()).find((c) => c.id === fogLin.id);
+  await page.hover('[data-step="cast"]');
+  await page.click('[data-testid="reroll-step-cast"]');
+  await page.waitForSelector('[data-testid="reroll-step-dialog"]');
+  assert.equal(await page.isChecked('[data-testid="reroll-cascade"]'), false);
+  await page.click('[data-testid="reroll-confirm"]');
+  await page.waitForSelector('[data-testid="stale-banner"]', { timeout: 60_000 });
+  const cast1 = await fogChars();
+  const linAfter = cast1.find((c) => c.id === fogLin.id);
+  assert.equal(linAfter?.name, linLocked?.name);
+  assert.equal(linAfter?.summary, linLocked?.summary);
+  assert.ok(!cast1.some((c) => c.id === fogOther.id), '没锁的角色应该换成新的');
+  assert.ok(!cast1.some((c) => cast0.some((o) => o.id === c.id && o.name !== c.name && c.id !== fogLin.id)), '换上来的角色不能用别人的旧 id');
+  assert.equal(cast1.filter((c) => c.role === 'protagonist').length, 1);
+  await shot(page, '49-editor-reroll-step');
+  await page.click('[data-testid="stale-update"]');
+  await page.waitForFunction(
+    () => !document.querySelector('[data-step][data-stale]') && document.querySelector('[data-step="opening"]')?.getAttribute('data-status') === 'done',
+    undefined,
+    { timeout: 120_000 },
+  );
+  assert.equal(await page.$('[data-testid="stale-banner"]'), null);
+  step('重抽「角色」这一步：林夕整个锁着原样留下，其他角色换成新 id 的新角色；点「更新这几步」重写剧情图、设定集、开场');
+
+  // AI 重写主角的经历（写了要求）：只填进表单；顺手改名，保存时问要不要把正文里的旧名字换掉
+  const hero = (await fogChars()).find((c) => c.role === 'protagonist');
+  assert.ok(hero, '没有主角');
+  const heroForm = `[data-testid="editing-character:${hero.id}"]`;
+  await page.hover(`[data-panel="character:${hero.id}"]`);
+  await page.click(`[data-testid="edit-character:${hero.id}"]`);
+  await page.click(`${heroForm} [data-testid="rewrite-background"]`);
+  await page.fill('[data-testid="rewrite-note"]', '多写一点童年');
+  await page.click('[data-testid="rewrite-go"]');
+  await page.waitForFunction(
+    (sel) => (document.querySelector(`${sel} [data-testid="field-background"]`) as HTMLTextAreaElement | null)?.value.includes('重写过的'),
+    heroForm,
+  );
+  assert.ok(server.requests.some((r) => JSON.stringify(r).includes('多写一点童年')), '重写的要求没有交给模型');
+  const newName = `${hero.name}二`;
+  await page.fill(`${heroForm} [data-testid="field-name"]`, newName);
+  await page.click(`${heroForm} [data-testid="save-edit"]`);
+  await page.waitForSelector('[data-testid="rename-dialog"] [data-testid="rename-hit"]');
+  await shot(page, '50-editor-rename');
+  await page.click('[data-testid="rename-all"]');
+  await page.waitForSelector('text=正文里的旧名字换了');
+  const heroAfter = (await fogChars()).find((c) => c.id === hero.id);
+  assert.equal(heroAfter?.name, newName);
+  assert.ok(heroAfter?.background.includes('重写过的'));
+  assert.ok(heroAfter?.summary.includes(newName) && !heroAfter.summary.includes(`${hero.name}，`), '简介里的旧名字没换掉');
+  step(`AI 重写主角的经历（写了要求，只填进表单）；改名「${hero.name}」→「${newName}」，正文里的旧名字一起换掉`);
+
+  // 最近删掉的：重抽这一步时被换掉的角色在里面，找回一个（id 没被占，用原来的）
+  await page.click('[data-testid="deleted-list"]');
+  await page.waitForSelector(`[data-testid="deleted-dialog"] >> text=${rerolled.name}`);
+  await shot(page, '51-editor-deleted');
+  await page.click(`[data-testid="restore-${fogOther.id}"]`);
+  await page.waitForSelector(`text=找回了「${rerolled.name}」`);
+  await page.click('[data-testid="deleted-dialog"] >> text=关闭');
+  await page.waitForSelector(`[data-panel="character:${fogOther.id}"]`);
+  assert.equal((await fogChars()).find((c) => c.id === fogOther.id)?.name, rerolled.name);
+  step(`最近删掉的：找回重抽时被换掉的「${rerolled.name}」`);
+
+  // 设置"上游改了以后"选"不管"：不再提示，只在创世步骤上标"过期"
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-testid="tab-editor"]');
+  await page.selectOption('[data-testid="editor-downstream"]', 'ignore');
+  await page.click('[data-testid="editor-settings-save"]');
+  await page.waitForSelector('text=已保存编辑器设置');
+  assert.equal(JSON.parse(await readFile(path.join(dataDir, 'settings.json'), 'utf8')).editor.downstream, 'ignore');
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="world-card"] >> text=雾港谜灯');
+  await page.waitForSelector('[data-step="plot"][data-stale="true"]');
+  assert.equal(await page.$('[data-testid="stale-banner"]'), null);
+  step('设置里"上游改了以后"选"不管"：世界页不提示，创世步骤上标着过期');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

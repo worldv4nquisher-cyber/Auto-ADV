@@ -19,8 +19,8 @@ interface GenesisState {
   finished: number;
   /** 开始创世；拿到世界 id 后就返回，生成在后台继续。 */
   create: (p: CreateWorldParams) => Promise<string>;
-  /** 续跑或从某一步起重新生成。 */
-  run: (worldId: string, from?: GenesisStepId) => void;
+  /** 续跑；给了 from 从这一步起（含下游）重新生成；给了 steps 只重新生成这几步，note 是附给它们的一句说明。 */
+  run: (worldId: string, opts?: { from?: GenesisStepId; steps?: GenesisStepId[]; note?: string }) => void;
   cancel: (worldId: string) => void;
 }
 
@@ -102,11 +102,11 @@ export function GenesisProvider({ children }: { children: ReactNode }) {
   );
 
   const run = useCallback(
-    (worldId: string, from?: GenesisStepId) => {
+    (worldId: string, opts: { from?: GenesisStepId; steps?: GenesisStepId[]; note?: string } = {}) => {
       if (jobsRef.current[worldId]) return;
       const controller = new AbortController();
       setJobs((all) => ({ ...all, [worldId]: { worldId, steps: {}, progress: {}, controller } }));
-      settle(worldId, engine.stream('runGenesis', { worldId, from }, (c) => onChunk(worldId, c), controller.signal));
+      settle(worldId, engine.stream('runGenesis', { worldId, ...opts }, (c) => onChunk(worldId, c), controller.signal));
     },
     [onChunk, settle],
   );

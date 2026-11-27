@@ -68,6 +68,8 @@ const RoleOut = z.preprocess(
 );
 
 export const CharacterOut = z.object({
+  /** 重抽时已经有的角色照填原来的 id，新角色留空（20.4）。 */
+  id: text.default(''),
   name: required,
   aliases: list,
   role: RoleOut.default('npc'),
@@ -100,12 +102,7 @@ export type CharacterOut = z.infer<typeof CharacterOut>;
 export const CastOut = z.object({ characters: z.array(CharacterOut).min(1) });
 export type CastOut = z.infer<typeof CastOut>;
 
-export const castSpec: JsonSpec<CastOut> = {
-  name: 'world_cast',
-  schema: CastOut,
-  example: {
-    characters: [
-      {
+const characterExample = {
         name: '角色名',
         aliases: ['别称或昵称'],
         role: 'protagonist / heroine / hero / rival / antagonist / mentor / npc 之一',
@@ -124,74 +121,109 @@ export const castSpec: JsonSpec<CastOut> = {
         goals: ['当前想达成的目标'],
         secret: '不为人知的秘密（可以为空）',
         relationships: [{ to: '另一个角色的名字', type: '关系，例如：青梅竹马、暗恋、宿敌', affinity: 30 }],
-      },
-    ],
-  },
+};
+
+export const castSpec: JsonSpec<CastOut> = {
+  name: 'world_cast',
+  schema: CastOut,
+  example: { characters: [characterExample] },
+};
+
+const KEEP_ID = '已经有的写原来的 id，新的留空';
+
+/** 重抽角色这一步、有锁住的角色时：要补全的角色带上原来的 id。 */
+export const castRerollSpec: JsonSpec<CastOut> = {
+  name: 'world_cast',
+  schema: CastOut,
+  example: { characters: [{ id: KEEP_ID, ...characterExample }] },
+};
+
+/** 只重抽一个角色（20.4"一个实体"）。 */
+export const characterSpec: JsonSpec<CharacterOut> = {
+  name: 'world_character',
+  schema: CharacterOut,
+  example: characterExample,
 };
 
 // ───────────── 地点 ─────────────
 
-export const LocationsOut = z.object({
-  locations: z
-    .array(
-      z.object({
-        name: required,
-        description: text.default(''),
-        connections: list,
-      }),
-    )
-    .min(1),
+export const LocationOut = z.object({
+  id: text.default(''),
+  name: required,
+  description: text.default(''),
+  connections: list,
 });
+export type LocationOut = z.infer<typeof LocationOut>;
+
+export const LocationsOut = z.object({ locations: z.array(LocationOut).min(1) });
 export type LocationsOut = z.infer<typeof LocationsOut>;
+
+const locationExample = {
+  name: '地点名',
+  description: '这里的样子、氛围、常见的人和事（60～120 字）',
+  connections: ['相连或相邻的其他地点名'],
+};
 
 export const locationsSpec: JsonSpec<LocationsOut> = {
   name: 'world_locations',
   schema: LocationsOut,
-  example: {
-    locations: [
-      {
-        name: '地点名',
-        description: '这里的样子、氛围、常见的人和事（60～120 字）',
-        connections: ['相连或相邻的其他地点名'],
-      },
-    ],
-  },
+  example: { locations: [locationExample] },
+};
+
+export const locationsRerollSpec: JsonSpec<LocationsOut> = {
+  name: 'world_locations',
+  schema: LocationsOut,
+  example: { locations: [{ id: KEEP_ID, ...locationExample }] },
+};
+
+export const locationSpec: JsonSpec<LocationOut> = {
+  name: 'world_location',
+  schema: LocationOut,
+  example: locationExample,
 };
 
 // ───────────── 设定集 ─────────────
 
-export const LoreOut = z.object({
-  entries: z
-    .array(
-      z.object({
-        title: required,
-        category: text.default('general'),
-        content: required,
-        keys: list,
-        always: z
-          .preprocess((v) => (typeof v === 'string' ? v === 'true' : v), z.boolean())
-          .catch(false)
-          .default(false),
-      }),
-    )
-    .min(1),
+export const LoreEntryOut = z.object({
+  id: text.default(''),
+  title: required,
+  category: text.default('general'),
+  content: required,
+  keys: list,
+  always: z
+    .preprocess((v) => (typeof v === 'string' ? v === 'true' : v), z.boolean())
+    .catch(false)
+    .default(false),
 });
+export type LoreEntryOut = z.infer<typeof LoreEntryOut>;
+
+export const LoreOut = z.object({ entries: z.array(LoreEntryOut).min(1) });
 export type LoreOut = z.infer<typeof LoreOut>;
+
+const loreExample = {
+  title: '条目名',
+  category: '分类，例如：地理、势力、历史、物品、规则、风俗',
+  content: '条目正文（50～200 字），自成一体，不依赖其他条目也能看懂',
+  keys: ['触发词1', '触发词2'],
+  always: false,
+};
 
 export const loreSpec: JsonSpec<LoreOut> = {
   name: 'world_lore',
   schema: LoreOut,
-  example: {
-    entries: [
-      {
-        title: '条目名',
-        category: '分类，例如：地理、势力、历史、物品、规则、风俗',
-        content: '条目正文（50～200 字），自成一体，不依赖其他条目也能看懂',
-        keys: ['触发词1', '触发词2'],
-        always: false,
-      },
-    ],
-  },
+  example: { entries: [loreExample] },
+};
+
+export const loreRerollSpec: JsonSpec<LoreOut> = {
+  name: 'world_lore',
+  schema: LoreOut,
+  example: { entries: [{ id: KEEP_ID, ...loreExample }] },
+};
+
+export const loreEntrySpec: JsonSpec<LoreEntryOut> = {
+  name: 'world_lore_entry',
+  schema: LoreEntryOut,
+  example: loreExample,
 };
 
 // ───────────── 开场 ─────────────

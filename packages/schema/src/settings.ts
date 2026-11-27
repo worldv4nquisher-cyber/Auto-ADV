@@ -79,6 +79,10 @@ export const EditorSettings = z.object({
   autoLock: z.boolean().default(true),
   /** 每个文件留几个历史版本（20.5），0 不留。 */
   historyLimit: z.number().int().min(0).max(200).default(20),
+  /** 上游改了以后（20.4）：prompt 提示、点了才重算；auto 自动重算过期的步骤；ignore 不提示（创世步骤里仍标过期）。 */
+  downstream: z.enum(['prompt', 'auto', 'ignore']).default('prompt'),
+  /** 角色、地点改名时替换正文里的旧名字（20.4）：ask 列出来问、always 总是全部替换、never 从不替换。 */
+  rename: z.enum(['ask', 'always', 'never']).default('ask'),
 });
 export type EditorSettings = z.infer<typeof EditorSettings>;
 

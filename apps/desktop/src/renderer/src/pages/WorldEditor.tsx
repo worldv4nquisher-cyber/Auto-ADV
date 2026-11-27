@@ -3,7 +3,19 @@
  * 每块内容一个 EditPanel：点「编辑」进表单，能切到 JSON、看历史版本；字段旁边的锁表示重抽时不会被覆盖，
  * 手改过的字段保存时自动锁住（设置里可以关），点一下锁能解开。
  */
-import type { EntityKind, HistoryEntry, RevKey, SaveWorldPartParams, WorldDetail, WorldIssue, WorldPartKey, WorldRef } from '@auto-adv/engine/api';
+import type {
+  DeletedEntity,
+  EntityKind,
+  HistoryEntry,
+  RenameHit,
+  RevKey,
+  SaveWorldPartParams,
+  SaveWorldPartResult,
+  WorldDetail,
+  WorldIssue,
+  WorldPartKey,
+  WorldRef,
+} from '@auto-adv/engine/api';
 import {
   Character,
   Location,
@@ -15,10 +27,10 @@ import {
 } from '@auto-adv/schema';
 import { createContext, type ReactNode, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { BgImage } from '../lib/assets.tsx';
-import { engine, errorMessage } from '../lib/engine.ts';
+import { engine, errorMessage, isAborted } from '../lib/engine.ts';
 import { formatTime } from '../lib/format.ts';
 import { useSettings } from '../lib/settings.tsx';
-import { Badge, Button, Card, cx, Empty, Input, Markdown, Select, Spinner, Textarea, useToast } from '../components/ui.tsx';
+import { Badge, Button, Card, cx, Empty, Field, Input, Markdown, Select, Spinner, Textarea, useToast } from '../components/ui.tsx';
 
 // ───────────── 上下文 ─────────────
 
@@ -42,11 +54,30 @@ function useEdit(): EditCtx {
   return ctx;
 }
 
-/** 保存一块内容，返回保存的键。 */
-async function savePart(p: SaveWorldPartParams, onSaved: (w: WorldDetail) => void): Promise<RevKey> {
+/** 保存一块内容。 */
+async function savePart(p: SaveWorldPartParams, onSaved: (w: WorldDetail) => void): Promise<SaveWorldPartResult> {
   const r = await engine.call('saveWorldPart', p);
   onSaved(r.world);
-  return r.key;
+  return r;
+}
+
+/** 编辑中的这块内容：给字段旁边的「AI 重写」用（20.4"一个字段"）。 */
+interface PanelCtx {
+  /** 这块内容的键；新建的只有类型（`character:`）。 */
+  partKey: RevKey;
+  draft: unknown;
+  setDraft: (v: unknown) => void;
+  /** AI 写进来的字段：保存时不当成手改的，不自动锁。 */
+  markAi: (path: string) => void;
+}
+
+const PanelContext = createContext<PanelCtx | null>(null);
+
+function setPath<T>(v: T, path: string, value: unknown): T {
+  const [head, ...rest] = path.split('.') as [string, ...string[]];
+  const base = { ...(v as Record<string, unknown>) };
+  base[head] = rest.length ? setPath(base[head], rest.join('.'), value) : value;
+  return base as T;
 }
 
 // ───────────── 小工具 ─────────────
@@ -136,6 +167,7 @@ function LField({
   lock,
   hint,
   className,
+  ai,
   children,
 }: {
   label: string;
@@ -143,6 +175,8 @@ function LField({
   lock?: LockApi;
   hint?: ReactNode;
   className?: string;
+  /** 旁边放一个「AI 重写」：只重写这一个字段，写进表单，看过再存。 */
+  ai?: boolean;
   children: ReactNode;
 }) {
   const st = path && lock ? lock.state(path) : null;
@@ -150,6 +184,7 @@ function LField({
     <div className={cx('flex flex-col gap-1.5', className)}>
       <div className="flex items-center gap-1.5">
         <span className="text-xs font-medium text-muted">{label}</span>
+        {ai && path && <RewriteButton path={path} label={label} />}
         {st && path && lock && (
           <button
             type="button"
@@ -180,6 +215,66 @@ function LField({
   );
 }
 
+/** 只重写一个字段（20.4）：可以附一句要求；写好的放进表单，不直接保存。 */
+function RewriteButton({ path, label }: { path: string; label: string }) {
+  const { world } = useEdit();
+  const panel = useContext(PanelContext);
+  const toast = useToast();
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [chars, setChars] = useState<number | null>(null);
+  const ctrl = useRef<AbortController | null>(null);
+  if (!panel) return null;
+  const run = async () => {
+    ctrl.current = new AbortController();
+    setChars(0);
+    try {
+      const r = await engine.stream(
+        'rewriteField',
+        { worldId: world.manifest.id, key: panel.partKey, path, data: panel.draft, ...(note.trim() ? { note: note.trim() } : {}) },
+        (c) => setChars(c.chars),
+        ctrl.current.signal,
+      );
+      panel.setDraft(setPath(panel.draft, path, r.text));
+      panel.markAi(path);
+      setOpen(false);
+      setNote('');
+    } catch (err) {
+      if (!isAborted(err)) toast('err', errorMessage(err));
+    } finally {
+      setChars(null);
+    }
+  };
+  return (
+    <span className="relative">
+      <button
+        type="button"
+        data-testid={`rewrite-${path}`}
+        onClick={() => setOpen(!open)}
+        title="让 AI 只重写这一项，写好放进表单，看过再保存"
+        className="rounded px-1 text-[11px] text-faint transition-colors hover:bg-panel-2 hover:text-accent-strong"
+      >
+        AI 重写
+      </button>
+      {open && (
+        <div className="absolute top-5 left-0 z-30 w-72 rounded-lg border border-line bg-panel p-3 shadow-lg" data-testid="rewrite-popover">
+          <div className="mb-2 text-xs text-muted">重写「{label}」</div>
+          <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="要求（可以不写），比如：再阴暗一点" data-testid="rewrite-note" autoFocus />
+          <div className="mt-2 flex items-center justify-end gap-2">
+            {chars !== null && <span className="mr-auto text-xs text-faint">正在写…… {chars} 字</span>}
+            <Button size="sm" variant="ghost" onClick={() => (chars !== null ? ctrl.current?.abort() : setOpen(false))}>
+              {chars !== null ? '停止' : '取消'}
+            </Button>
+            <Button size="sm" variant="primary" loading={chars !== null} onClick={() => void run()} data-testid="rewrite-go">
+              重写
+            </Button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 // ───────────── 编辑面板 ─────────────
 
 interface PanelProps<T> {
@@ -202,10 +297,16 @@ interface PanelProps<T> {
   className?: string;
   /** 只在编辑时加的样式（比如在网格里占满一行）。 */
   editClassName?: string;
+  /** 这块内容的键（给「AI 重写」用）；新建的写类型加冒号。 */
+  partKey?: RevKey;
+  /** 「整个锁住」时的锁：实体是 `*`，世界观是 `worldview`……不给就没有这个按钮。 */
+  wholeLock?: string[];
+  /** 「重抽」：只重写这一个实体（20.4）。 */
+  reroll?: { kind: EntityKind; id: string; name: string };
 }
 
-export function EditPanel<T>({ id, title, value, locked, historyKey, isNew, onDiscard, view, form, save, actions, className, editClassName }: PanelProps<T>) {
-  const { world, setDirty } = useEdit();
+export function EditPanel<T>({ id, title, value, locked, historyKey, isNew, onDiscard, view, form, save, actions, className, editClassName, partKey, wholeLock, reroll }: PanelProps<T>) {
+  const { world, setDirty, onSaved } = useEdit();
   const { settings } = useSettings();
   const autoLock = settings?.editor.autoLock ?? true;
   const toast = useToast();
@@ -217,6 +318,17 @@ export function EditPanel<T>({ id, title, value, locked, historyKey, isNew, onDi
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [history, setHistory] = useState(false);
+  const [rerolling, setRerolling] = useState(false);
+  const fullyLocked = !!wholeLock && (locked.includes('*') || wholeLock.every((x) => locked.includes(x)));
+  const toggleWhole = async () => {
+    if (!wholeLock) return;
+    try {
+      await save(value, { locked: fullyLocked ? [] : wholeLock, unlocked: [] });
+      toast('ok', fullyLocked ? '解开了，重抽时会重新写' : '整个锁住了，重抽时原样留下');
+    } catch (err) {
+      toast('err', errorMessage(err));
+    }
+  };
 
   const begin = (from: T = value) => {
     setDraft(from);
@@ -277,7 +389,7 @@ export function EditPanel<T>({ id, title, value, locked, historyKey, isNew, onDi
       if (isNew) onDiscard?.();
       toast('ok', '已保存');
     } catch (err) {
-      toast('err', errorMessage(err));
+      if (!(err instanceof Cancelled)) toast('err', errorMessage(err));
     } finally {
       setSaving(false);
     }
@@ -295,6 +407,31 @@ export function EditPanel<T>({ id, title, value, locked, historyKey, isNew, onDi
         {view}
         {world.editable && (
           <div className="absolute top-3 right-3 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+            {wholeLock && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => void toggleWhole()}
+                data-testid={`lockall-${id}`}
+                data-state={fullyLocked ? 'locked' : 'open'}
+                title={fullyLocked ? '整个锁着：重抽时原样留下。点一下解开' : '整个锁住：重抽这一步时原样留下'}
+              >
+                <LockIcon open={!fullyLocked} />
+                {fullyLocked ? '解锁' : '锁住'}
+              </Button>
+            )}
+            {reroll && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={fullyLocked || locked.includes('*')}
+                title={locked.includes('*') ? '整个锁住了，先解锁再重抽' : '只重写这一个，锁住的字段留着'}
+                onClick={() => setRerolling(true)}
+                data-testid={`reroll-${id}`}
+              >
+                重抽
+              </Button>
+            )}
             {historyKey && (
               <Button size="sm" variant="ghost" onClick={() => setHistory(true)} data-testid={`history-${id}`}>
                 历史
@@ -312,6 +449,28 @@ export function EditPanel<T>({ id, title, value, locked, historyKey, isNew, onDi
             onPick={(data) => {
               setHistory(false);
               begin(data as T);
+            }}
+          />
+        )}
+        {rerolling && reroll && (
+          <RerollDialog
+            title={`重抽「${reroll.name}」`}
+            detail={
+              <>
+                只重写这一个，id 不变，剧情图和素材里的引用都不断。重写之前的版本进历史，不满意可以退回去。
+                {locked.length > 0 && <span className="text-accent-strong">锁住的 {locked.length} 项原样留下。</span>}
+              </>
+            }
+            onClose={() => setRerolling(false)}
+            run={async (note, onChars, signal) => {
+              const w = await engine.stream(
+                'rerollEntity',
+                { worldId: world.manifest.id, kind: reroll.kind, id: reroll.id, ...(note ? { note } : {}) },
+                (c) => onChars(c.chars),
+                signal,
+              );
+              onSaved(w);
+              toast('ok', `重写好了「${reroll.name}」`);
             }}
           />
         )}
@@ -343,7 +502,18 @@ export function EditPanel<T>({ id, title, value, locked, historyKey, isNew, onDi
         </Button>
       </div>
       {json === null ? (
-        <div className="space-y-4">{form(draft, setDraft, lockApi)}</div>
+        <PanelContext.Provider
+          value={{
+            partKey: partKey ?? ((historyKey ?? 'manifest') as RevKey),
+            draft,
+            setDraft: (v) => setDraft(v as T),
+            markAi: (path) => {
+              if (lockApi.state(path) !== 'locked') setUnlocked((u) => new Set([...u, path]));
+            },
+          }}
+        >
+          <div className="space-y-4">{form(draft, setDraft, lockApi)}</div>
+        </PanelContext.Provider>
       ) : (
         <div className="space-y-2">
           <Textarea
@@ -440,6 +610,216 @@ export function Modal({ children, onClose, testId, wide }: { children: ReactNode
         {children}
       </Card>
     </div>
+  );
+}
+
+/**
+ * 重抽的对话框（20.4）：可以附一句说明。run 给了就在这里等它写完（显示字数、能停）；
+ * 没给就是交给后台（创世步骤），点了就关。
+ */
+export function RerollDialog({
+  title,
+  detail,
+  extra,
+  onClose,
+  run,
+  onConfirm,
+  testId = 'reroll-dialog',
+}: {
+  title: string;
+  detail: ReactNode;
+  extra?: ReactNode;
+  onClose: () => void;
+  run?: (note: string, onChars: (n: number) => void, signal: AbortSignal) => Promise<void>;
+  onConfirm?: (note: string) => void;
+  testId?: string;
+}) {
+  const toast = useToast();
+  const [note, setNote] = useState('');
+  const [chars, setChars] = useState<number | null>(null);
+  const ctrl = useRef<AbortController | null>(null);
+  const go = async () => {
+    if (!run) {
+      onConfirm?.(note.trim());
+      onClose();
+      return;
+    }
+    ctrl.current = new AbortController();
+    setChars(0);
+    try {
+      await run(note.trim(), setChars, ctrl.current.signal);
+      onClose();
+    } catch (err) {
+      if (!isAborted(err)) toast('err', errorMessage(err));
+      setChars(null);
+    }
+  };
+  return (
+    <Modal onClose={() => chars === null && onClose()} testId={testId}>
+      <div className="mb-2 text-base font-semibold">{title}</div>
+      <p className="text-sm leading-relaxed text-muted">{detail}</p>
+      <Field label="这次的要求（可以不写）" className="mt-4">
+        <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder="比如：反派再狠一点、更像个老水手" data-testid="reroll-note" autoFocus />
+      </Field>
+      {extra}
+      <div className="mt-5 flex items-center justify-end gap-2">
+        {chars !== null && (
+          <span className="mr-auto flex items-center gap-2 text-xs text-faint">
+            <Spinner className="size-3" />
+            正在重写…… {chars} 字
+          </span>
+        )}
+        <Button variant="ghost" onClick={() => (chars !== null ? ctrl.current?.abort() : onClose())}>
+          {chars !== null ? '停止' : '取消'}
+        </Button>
+        <Button variant="primary" loading={chars !== null} onClick={() => void go()} data-testid="reroll-confirm">
+          重抽
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+// ───────────── 改名（20.4"改名"） ─────────────
+
+/**
+ * 改名时正文里还写着旧名字的地方：勾上的换成新名字。按设置"问我"时，保存前弹出来。
+ * 返回要换的组（'all' 全换，[] 不换），关掉对话框是 null（不保存，接着改）。
+ */
+function RenameDialog({ from, to, hits, onDone }: { from: string; to: string; hits: RenameHit[]; onDone: (groups: string[] | 'all' | null) => void }) {
+  const [picked, setPicked] = useState(() => new Set(hits.map((h) => h.group)));
+  const total = hits.reduce((n, h) => n + h.count, 0);
+  return (
+    <Modal onClose={() => onDone(null)} testId="rename-dialog" wide>
+      <div className="mb-2 text-base font-semibold">
+        「{from}」改成「{to}」：正文里还有 {total} 处旧名字
+      </div>
+      <p className="text-sm text-muted">勾上的换成新名字。不换也不会断（引用用的是 id），只是文字里还是旧名字，下游会标成过期。</p>
+      <ul className="mt-4 max-h-[50vh] space-y-1.5 overflow-y-auto">
+        {hits.map((h) => (
+          <li key={h.group}>
+            <label className="flex items-start gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-panel-2" data-testid="rename-hit" data-group={h.group}>
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={picked.has(h.group)}
+                onChange={(e) => {
+                  const next = new Set(picked);
+                  if (e.target.checked) next.add(h.group);
+                  else next.delete(h.group);
+                  setPicked(next);
+                }}
+              />
+              <span className="min-w-0">
+                <span className="text-fg">{h.label}</span>
+                <span className="ml-1.5 text-xs text-faint">{h.count} 处</span>
+                <span className="block truncate text-xs text-muted">{h.preview}</span>
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-5 flex justify-end gap-2">
+        <Button variant="ghost" onClick={() => onDone([])} data-testid="rename-none">
+          不替换
+        </Button>
+        {picked.size < hits.length && (
+          <Button onClick={() => onDone([...picked])} data-testid="rename-selected" disabled={!picked.size}>
+            只换勾上的
+          </Button>
+        )}
+        <Button variant="primary" onClick={() => onDone('all')} data-testid="rename-all">
+          全部替换
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+/** 保存角色、地点时处理改名：按设置问不问、换哪些。返回 null 表示不保存（关掉了对话框）。 */
+function useRename(kind: 'character' | 'location', id: string, oldName: string) {
+  const { world } = useEdit();
+  const { settings } = useSettings();
+  const [ask, setAsk] = useState<{ to: string; hits: RenameHit[]; resolve: (g: string[] | 'all' | null) => void } | null>(null);
+  const resolveGroups = async (to: string, draft: unknown): Promise<{ groups: string[] | 'all' } | undefined | null> => {
+    const mode = settings?.editor.rename ?? 'ask';
+    if (!oldName || to.trim() === oldName || mode !== 'ask') return undefined;
+    const hits = await engine.call('renameHits', { worldId: world.manifest.id, kind, id, to: to.trim(), draft });
+    if (!hits.length) return undefined;
+    const groups = await new Promise<string[] | 'all' | null>((resolve) => setAsk({ to: to.trim(), hits, resolve }));
+    setAsk(null);
+    return groups === null ? null : { groups };
+  };
+  const dialog = ask && <RenameDialog from={oldName} to={ask.to} hits={ask.hits} onDone={ask.resolve} />;
+  return { resolveGroups, dialog };
+}
+
+/** 保存被取消了（改名对话框关掉了）：表单留着接着改。 */
+class Cancelled extends Error {
+  constructor() {
+    super('没有保存');
+  }
+}
+
+// ───────────── 最近删掉的 ─────────────
+
+const KIND_TEXT: Record<EntityKind, string> = { character: '角色', location: '地点', lore: '设定' };
+
+/** 删掉的（或者重抽时被换掉的）角色、地点、设定，从历史里找回来。 */
+function DeletedButton({ kind }: { kind: EntityKind }) {
+  const { world, onSaved } = useEdit();
+  const toast = useToast();
+  const [items, setItems] = useState<DeletedEntity[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const open = async () => {
+    try {
+      setItems((await engine.call('deletedEntities', { worldId: world.manifest.id })).filter((x) => x.kind === kind));
+    } catch (err) {
+      toast('err', errorMessage(err));
+    }
+  };
+  const restore = async (x: DeletedEntity) => {
+    setBusy(x.id);
+    try {
+      const r = await engine.call('restoreDeleted', { worldId: world.manifest.id, kind, id: x.id, name: x.name });
+      onSaved(r.world);
+      toast('ok', `找回了「${x.title}」`);
+      setItems((all) => all?.filter((y) => y.id !== x.id) ?? null);
+    } catch (err) {
+      toast('err', errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <>
+      <Button size="sm" variant="ghost" onClick={() => void open()} data-testid="deleted-list">
+        最近删掉的
+      </Button>
+      {items && (
+        <Modal onClose={() => setItems(null)} testId="deleted-dialog">
+          <div className="mb-2 text-base font-semibold">最近删掉的{KIND_TEXT[kind]}</div>
+          <p className="text-sm text-muted">删掉的和重抽时被换掉的都在这里。找回来以后，删的时候一起去掉的引用不会回来。</p>
+          <ul className="mt-4 max-h-[50vh] space-y-1.5 overflow-y-auto">
+            {items.length === 0 && <li className="text-sm text-faint">没有。</li>}
+            {items.map((x) => (
+              <li key={x.id} className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-panel-2" data-testid="deleted-item" data-id={x.id}>
+                <span className="min-w-0 flex-1 truncate">{x.title}</span>
+                <span className="text-xs text-faint">{formatTime(Date.parse(x.at))}</span>
+                <Button size="sm" disabled={!x.restorable || !world.editable} loading={busy === x.id} onClick={() => void restore(x)} data-testid={`restore-${x.id}`}>
+                  找回
+                </Button>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-5 flex justify-end">
+            <Button variant="ghost" onClick={() => setItems(null)}>
+              关闭
+            </Button>
+          </div>
+        </Modal>
+      )}
+    </>
   );
 }
 
@@ -544,6 +924,8 @@ export function OverviewTab() {
         title="世界名和简介"
         value={{ title: m.title, logline: m.logline }}
         locked={m.locked.filter((x) => x === 'title' || x === 'logline')}
+        partKey="manifest"
+        wholeLock={['title', 'logline']}
         view={
           <Card className="p-5 text-sm">
             <div className="text-base font-semibold">{m.title}</div>
@@ -555,7 +937,7 @@ export function OverviewTab() {
             <LField label="世界名" path="title" lock={lock}>
               <Input value={d.title} onChange={(e) => set({ ...d, title: e.target.value })} data-testid="field-title" />
             </LField>
-            <LField label="一句话简介" path="logline" lock={lock}>
+            <LField label="一句话简介" path="logline" lock={lock} ai>
               <Input value={d.logline} onChange={(e) => set({ ...d, logline: e.target.value })} data-testid="field-logline" />
             </LField>
           </>
@@ -574,6 +956,7 @@ export function OverviewTab() {
         value={b}
         locked={b._meta.locked}
         historyKey={world.brief ? 'brief' : undefined}
+        wholeLock={world.brief ? ['*'] : undefined}
         view={
           <Card className="grid grid-cols-2 gap-x-6 gap-y-3 p-5 text-sm">
             {!world.brief && <p className="col-span-2 text-faint">还没有世界简报。</p>}
@@ -643,6 +1026,8 @@ export function OverviewTab() {
         value={st}
         locked={st._meta.locked}
         historyKey={world.style ? 'style' : undefined}
+        partKey="style"
+        wholeLock={world.style ? ['*'] : undefined}
         view={
           <Card className="grid grid-cols-2 gap-x-6 gap-y-3 p-5 text-sm">
             {!world.style && <p className="col-span-2 text-faint">还没有风格指南。</p>}
@@ -663,19 +1048,19 @@ export function OverviewTab() {
               </Select>
             </LField>
             <div />
-            <LField label="文风" path="prose.description" lock={lock} className="col-span-2">
+            <LField label="文风" path="prose.description" lock={lock} className="col-span-2" ai>
               <Textarea rows={2} value={d.prose.description} onChange={(e) => set({ ...d, prose: { ...d.prose, description: e.target.value } })} />
             </LField>
             <LField label="文风例句" path="prose.samples" lock={lock} className="col-span-2">
               <LinesInput value={d.prose.samples} onChange={(v) => set({ ...d, prose: { ...d.prose, samples: v } })} />
             </LField>
-            <LField label="画风提示词" path="art.prompt" lock={lock} className="col-span-2" hint="所有图片的提示词都带上它；改了以后素材页里的图会标成过期，点了才重画">
+            <LField label="画风提示词" path="art.prompt" lock={lock} className="col-span-2" ai hint="所有图片的提示词都带上它；改了以后素材页里的图会标成过期，点了才重画">
               <Textarea rows={2} value={d.art.prompt} onChange={(e) => set({ ...d, art: { ...d.art, prompt: e.target.value } })} data-testid="field-art-prompt" />
             </LField>
             <LField label="反向提示词" path="art.negative" lock={lock} className="col-span-2">
               <Input value={d.art.negative} onChange={(e) => set({ ...d, art: { ...d.art, negative: e.target.value } })} />
             </LField>
-            <LField label="音乐风格" path="music.description" lock={lock} className="col-span-2">
+            <LField label="音乐风格" path="music.description" lock={lock} className="col-span-2" ai>
               <Input value={d.music.description} onChange={(e) => set({ ...d, music: { description: e.target.value } })} />
             </LField>
           </div>
@@ -704,6 +1089,7 @@ export function WorldviewTab() {
       value={world.worldview}
       locked={locked ? ['worldview'] : []}
       historyKey={world.worldview ? 'worldview' : undefined}
+      wholeLock={world.worldview ? ['worldview'] : undefined}
       view={<Card className="p-5">{world.worldview ? <Markdown text={world.worldview} /> : <Empty title="世界观还没有写" />}</Card>}
       form={(d, set, lock) => (
         <LField label="正文（Markdown）" path="worldview" lock={lock}>
@@ -753,7 +1139,8 @@ export function CharactersTab() {
   return (
     <div className="grid gap-3">
       {world.editable && (
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-1">
+          <DeletedButton kind="character" />
           <Button size="sm" onClick={() => setAdding(adding + 1)} disabled={adding > 0} data-testid="add-character">
             添加角色
           </Button>
@@ -770,15 +1157,22 @@ export function CharactersTab() {
 
 function CharacterPanel({ c, isNew, onDiscard }: { c: Character; isNew?: boolean; onDiscard?: () => void }) {
   const { world, onSaved } = useEdit();
+  const toast = useToast();
   const others = world.characters.filter((x) => x.id !== c.id);
   const key = `character:${c.id}` as const;
+  const rn = useRename('character', c.id, isNew ? '' : c.name);
   return (
+    <>
+    {rn.dialog}
     <EditPanel
       id={isNew ? 'character-new' : key}
       title={isNew ? '新角色' : c.name}
       value={c}
       locked={c._meta.locked}
       historyKey={isNew ? undefined : key}
+      partKey={isNew ? 'character:' : key}
+      wholeLock={isNew ? undefined : ['*']}
+      reroll={isNew ? undefined : { kind: 'character', id: c.id, name: c.name }}
       isNew={isNew}
       onDiscard={onDiscard}
       actions={!isNew && <DeleteButton kind="character" id={c.id} name={c.name} />}
@@ -808,13 +1202,13 @@ function CharacterPanel({ c, isNew, onDiscard }: { c: Character; isNew?: boolean
               <Input value={d.age} onChange={(e) => set({ ...d, age: e.target.value })} />
             </LField>
           </div>
-          <LField label="一句话简介" path="summary" lock={lock} className="col-span-2">
+          <LField label="一句话简介" path="summary" lock={lock} className="col-span-2" ai>
             <Input value={d.summary} onChange={(e) => set({ ...d, summary: e.target.value })} data-testid="field-summary" />
           </LField>
-          <LField label="外貌" path="appearance.text" lock={lock} className="col-span-2">
+          <LField label="外貌" path="appearance.text" lock={lock} className="col-span-2" ai>
             <Textarea rows={2} value={d.appearance.text} onChange={(e) => set({ ...d, appearance: { ...d.appearance, text: e.target.value } })} data-testid="field-appearance" />
           </LField>
-          <LField label="画图用的外貌提示词" path="appearance.imagePrompt" lock={lock} className="col-span-2" hint="改了以后这个角色的立绘会标成过期，在素材页点了才重画">
+          <LField label="画图用的外貌提示词" path="appearance.imagePrompt" lock={lock} className="col-span-2" ai hint="改了以后这个角色的立绘会标成过期，在素材页点了才重画">
             <Input value={d.appearance.imagePrompt} onChange={(e) => set({ ...d, appearance: { ...d.appearance, imagePrompt: e.target.value } })} />
           </LField>
           <LField label="性格特点" path="personality.traits" lock={lock}>
@@ -826,14 +1220,14 @@ function CharacterPanel({ c, isNew, onDiscard }: { c: Character; isNew?: boolean
           <LField label="害怕的" path="personality.fears" lock={lock}>
             <ListInput value={d.personality.fears} onChange={(v) => set({ ...d, personality: { ...d.personality, fears: v } })} />
           </LField>
-          <LField label="说话方式" path="speech.style" lock={lock}>
+          <LField label="说话方式" path="speech.style" lock={lock} ai>
             <Input value={d.speech.style} onChange={(e) => set({ ...d, speech: { ...d.speech, style: e.target.value } })} />
           </LField>
           <LField label="台词例句" path="speech.examples" lock={lock} className="col-span-2">
             <LinesInput value={d.speech.examples} onChange={(v) => set({ ...d, speech: { ...d.speech, examples: v } })} />
           </LField>
-          <LField label="经历" path="background" lock={lock} className="col-span-2">
-            <Textarea rows={3} value={d.background} onChange={(e) => set({ ...d, background: e.target.value })} />
+          <LField label="经历" path="background" lock={lock} className="col-span-2" ai>
+            <Textarea rows={3} value={d.background} onChange={(e) => set({ ...d, background: e.target.value })} data-testid="field-background" />
           </LField>
           <LField label="目标" path="goals" lock={lock} className="col-span-2">
             <Rows
@@ -900,18 +1294,23 @@ function CharacterPanel({ c, isNew, onDiscard }: { c: Character; isNew?: boolean
       )}
       save={async (d, locks) => {
         const { id: _id, ...rest } = d;
-        await savePart(
+        const rename = isNew ? undefined : await rn.resolveGroups(d.name, rest);
+        if (rename === null) throw new Cancelled();
+        const r = await savePart(
           {
             worldId: world.manifest.id,
             part: 'character',
             base: isNew ? null : world.revs[key],
             data: { ...(isNew ? rest : d), _meta: { ...d._meta, locked: locks.locked } },
             unlocked: locks.unlocked,
+            ...(rename ? { rename } : {}),
           },
           onSaved,
         );
+        if (r.renamed) toast('ok', `正文里的旧名字换了 ${r.renamed} 处`);
       }}
     />
+    </>
   );
 }
 
@@ -1037,7 +1436,8 @@ export function LocationsTab() {
   return (
     <div className="space-y-3">
       {world.editable && (
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-1">
+          <DeletedButton kind="location" />
           <Button size="sm" onClick={() => setAdding(adding + 1)} disabled={adding > 0} data-testid="add-location">
             添加地点
           </Button>
@@ -1056,14 +1456,21 @@ export function LocationsTab() {
 
 function LocationPanel({ l, isNew, onDiscard }: { l: Location; isNew?: boolean; onDiscard?: () => void }) {
   const { world, onSaved } = useEdit();
+  const toast = useToast();
   const key = `location:${l.id}` as const;
+  const rn = useRename('location', l.id, isNew ? '' : l.name);
   return (
+    <>
+    {rn.dialog}
     <EditPanel
       id={isNew ? 'location-new' : key}
       title={isNew ? '新地点' : l.name}
       value={l}
       locked={l._meta.locked}
       historyKey={isNew ? undefined : key}
+      partKey={isNew ? 'location:' : key}
+      wholeLock={isNew ? undefined : ['*']}
+      reroll={isNew ? undefined : { kind: 'location', id: l.id, name: l.name }}
       isNew={isNew}
       onDiscard={onDiscard}
       editClassName="col-span-2"
@@ -1087,7 +1494,7 @@ function LocationPanel({ l, isNew, onDiscard }: { l: Location; isNew?: boolean; 
           <LField label="名字" path="name" lock={lock}>
             <Input value={d.name} onChange={(e) => set({ ...d, name: e.target.value })} data-testid="field-name" />
           </LField>
-          <LField label="描述" path="description" lock={lock} hint="背景图按它画；改了以后背景会标成过期，在素材页点了才重画">
+          <LField label="描述" path="description" lock={lock} ai hint="背景图按它画；改了以后背景会标成过期，在素材页点了才重画">
             <Textarea rows={4} value={d.description} onChange={(e) => set({ ...d, description: e.target.value })} data-testid="field-description" />
           </LField>
           <LField label="连着哪些地点" path="connections" lock={lock}>
@@ -1101,18 +1508,23 @@ function LocationPanel({ l, isNew, onDiscard }: { l: Location; isNew?: boolean; 
       )}
       save={async (d, locks) => {
         const { id: _id, ...rest } = d;
-        await savePart(
+        const rename = isNew ? undefined : await rn.resolveGroups(d.name, rest);
+        if (rename === null) throw new Cancelled();
+        const r = await savePart(
           {
             worldId: world.manifest.id,
             part: 'location',
             base: isNew ? null : world.revs[key],
             data: { ...(isNew ? rest : d), _meta: { ...d._meta, locked: locks.locked } },
             unlocked: locks.unlocked,
+            ...(rename ? { rename } : {}),
           },
           onSaved,
         );
+        if (r.renamed) toast('ok', `正文里的旧名字换了 ${r.renamed} 处`);
       }}
     />
+    </>
   );
 }
 
@@ -1127,7 +1539,8 @@ export function LoreTab() {
   return (
     <div className="grid gap-2">
       {world.editable && (
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-1">
+          <DeletedButton kind="lore" />
           <Button size="sm" onClick={() => setAdding(adding + 1)} disabled={adding > 0} data-testid="add-lore">
             添加设定
           </Button>
@@ -1159,6 +1572,9 @@ function LorePanel({ e, isNew, onDiscard }: { e: LoreEntry; isNew?: boolean; onD
       value={e}
       locked={e._meta.locked}
       historyKey={isNew ? undefined : key}
+      partKey={isNew ? 'lore:' : key}
+      wholeLock={isNew ? undefined : ['*']}
+      reroll={isNew ? undefined : { kind: 'lore', id: e.id, name: e.title }}
       isNew={isNew}
       onDiscard={onDiscard}
       actions={!isNew && <DeleteButton kind="lore" id={e.id} name={e.title} />}
@@ -1182,7 +1598,7 @@ function LorePanel({ e, isNew, onDiscard }: { e: LoreEntry; isNew?: boolean; onD
           <LField label="分类" path="category" lock={lock}>
             <Input value={d.category} onChange={(ev) => set({ ...d, category: ev.target.value })} />
           </LField>
-          <LField label="正文" path="content" lock={lock} className="col-span-2">
+          <LField label="正文" path="content" lock={lock} className="col-span-2" ai>
             <Textarea rows={4} value={d.content} onChange={(ev) => set({ ...d, content: ev.target.value })} data-testid="field-content" />
           </LField>
           <LField label="触发方式" path="activation" lock={lock}>
@@ -1266,6 +1682,7 @@ export function VariablesTab() {
       value={world.variables}
       locked={locked ? ['variables'] : []}
       historyKey={world.variables.length ? 'variables' : undefined}
+      wholeLock={['variables']}
       view={
         <Card className="p-5">
           {world.variables.length === 0 ? (
@@ -1380,6 +1797,8 @@ export function OpeningTab() {
       value={o}
       locked={o._meta.locked}
       historyKey={world.opening ? 'opening' : undefined}
+      partKey="opening"
+      wholeLock={world.opening ? ['*'] : undefined}
       view={
         <Card className="p-5">
           {!world.opening ? (
@@ -1423,7 +1842,7 @@ export function OpeningTab() {
               <Chips options={world.characters} value={d.presentCharacterIds} onChange={(presentCharacterIds) => set({ ...d, presentCharacterIds })} testId="field-opening-present" />
             </LField>
           </div>
-          <LField label="旁白" path="narration" lock={lock}>
+          <LField label="旁白" path="narration" lock={lock} ai>
             <Textarea rows={5} value={d.narration} onChange={(e) => set({ ...d, narration: e.target.value })} data-testid="field-narration" />
           </LField>
           <LField label="开场台词" path="lines" lock={lock}>

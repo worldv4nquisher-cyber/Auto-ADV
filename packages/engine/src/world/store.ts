@@ -98,6 +98,7 @@ export function partFile(key: WorldPartKey): string {
 }
 
 const ENTITY_DIRS = { character: 'characters', location: 'locations', lore: 'setting/lore' } as const;
+export type EntityDirKind = keyof typeof ENTITY_DIRS;
 const HISTORY_DIR = '.history';
 const HISTORY_NAME = /^(\d{8}T\d{9}Z)(?:_(\d+))?-(edit|genesis|delete)\.(json|md)$/;
 
@@ -365,6 +366,24 @@ export class WorldStore {
   async readHistory(id: string, key: WorldPartKey, name: string): Promise<string> {
     if (!HISTORY_NAME.test(name)) throw new Error('历史版本的文件名不合法');
     return fs.readFile(path.join(this.dir(id), HISTORY_DIR, partFile(key), name), 'utf8');
+  }
+
+  /** 历史里出现过的某一类实体的 id（包括已经删掉的）：新实体不用这些 id，免得和删掉的混在一起。 */
+  async historyIds(id: string, kind: EntityDirKind): Promise<string[]> {
+    let names: string[];
+    try {
+      names = await fs.readdir(path.join(this.dir(id), HISTORY_DIR, ENTITY_DIRS[kind]));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw err;
+    }
+    return names.map((n) => n.replace(/\.json$/, '')).filter((n) => /^[a-z][a-z0-9_]*$/.test(n));
+  }
+
+  /** 写一个手写剧本（plot/scenes/ 下的 .adv 文件，改名替换时用）。 */
+  writeScript(id: string, file: string, text: string, reason: HistoryReason = 'edit') {
+    if (!/^[a-z0-9_]+\.adv$/.test(file)) throw new Error('剧本文件名不合法');
+    return this.put(id, `plot/scenes/${file}`, text, reason);
   }
 
   writeBrief(id: string, brief: WorldBrief, reason: HistoryReason = 'genesis') {

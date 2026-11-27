@@ -43,11 +43,17 @@ import type { CheckResult } from './plot/dice.ts';
 import type { VarChange } from './plot/vars.ts';
 import type { Streaming, Unary } from './rpc/index.ts';
 import type { EntityKind, RevKey, WorldIssue, WorldPart, WorldRef } from './world/edit.ts';
+import type { StaleStep } from './genesis/inputs.ts';
+import type { RewriteChunk } from './genesis/pipeline.ts';
+import type { RenameHit } from './world/rename.ts';
 import type { HistoryEntry, WorldPartKey } from './world/store.ts';
 
 export type { CheckResult } from './plot/dice.ts';
 export type { EntityKind, RevKey, WorldIssue, WorldPart, WorldRef } from './world/edit.ts';
 export type { HistoryEntry, HistoryReason, WorldPartKey } from './world/store.ts';
+export type { StaleStep, StepInput } from './genesis/inputs.ts';
+export type { RewriteChunk } from './genesis/pipeline.ts';
+export type { RenameHit } from './world/rename.ts';
 export type { PlotCheckResult, PlotIssue } from './plot/check.ts';
 export type { CheckOutcome } from './plot/conditions.ts';
 export type { VarChange } from './plot/vars.ts';
@@ -418,6 +424,8 @@ export interface WorldDetail {
   issues: WorldIssue[];
   /** 能不能编辑：正在创世时不能。 */
   editable: boolean;
+  /** 过期的创世步骤（20.4）：上游改过，这几步还是按改之前写的。 */
+  stale: StaleStep[];
 }
 
 /** 保存一块内容（20.5）。 */
@@ -429,12 +437,32 @@ export type SaveWorldPartParams = WorldPart & {
   unlocked?: string[];
   /** 世界观、数值、世界名这几块没有 `_meta`：true 锁住，false 解锁，不给就按"手改自动锁住"。 */
   lock?: boolean;
+  /**
+   * 角色、地点改了名字时，正文里的旧名字换掉哪些（20.4"改名"）：renameHits 列出来的组，或者 'all'。
+   * 不给就按设置（总是替换 = 全换；问、从不 = 不换）。
+   */
+  rename?: { groups: string[] | 'all' };
 };
 
 export interface SaveWorldPartResult {
   /** 保存的是哪一块（新建的实体在这里拿到分配的 id）。 */
   key: RevKey;
   world: WorldDetail;
+  /** 改名时正文里换了几处旧名字。 */
+  renamed?: number;
+}
+
+/** 删掉的角色、地点、设定条目（历史里还留着，能找回来）。 */
+export interface DeletedEntity {
+  kind: EntityKind;
+  id: string;
+  /** 名字或标题。 */
+  title: string;
+  /** 历史文件名（找回时原样传回来）。 */
+  name: string;
+  at: string;
+  /** 能不能直接找回（历史文件的格式读得懂）。 */
+  restorable: boolean;
 }
 
 /** "更多世界选项"。都可以不填，留给 AI。 */
@@ -814,7 +842,7 @@ export type EngineContract = {
   /** 保存素材管线的全局设置。 */
   saveAssetSettings: Unary<{ settings: AssetSettings }, void>;
   /** 保存世界编辑器的设置。 */
-  saveEditorSettings: Unary<{ settings: EditorSettings }, void>;
+  saveEditorSettings: Unary<{ settings: Partial<EditorSettings> }, void>;
   /** 用图像职责（或给的 route）画一张小图试试。会花一张图的额度。 */
   testImage: Unary<{ route?: MediaRoute }, { dataUrl: string; revisedPrompt: string | null; latencyMs: number }>;
   testMusic: Unary<{ route?: MediaRoute }, { dataUrl: string; durationMs: number | null; latencyMs: number }>;
@@ -850,8 +878,23 @@ export type EngineContract = {
   createWorld: Streaming<CreateWorldParams, GenesisChunk, WorldSummary>;
   /** 创世前估算新世界的素材用量：图片张数、音乐首数、每拍念多少字（6.5、18.3）。 */
   estimateAssets: Unary<{ options: GenesisOptions }, AssetEstimate>;
-  /** 续跑没完成的步骤；给了 from 则从这一步起（含下游）全部重新生成。 */
-  runGenesis: Streaming<{ worldId: string; from?: GenesisStepId }, GenesisChunk, WorldSummary>;
+  /**
+   * 续跑没完成的步骤；给了 from 则从这一步起（含下游）全部重新生成；给了 steps 只重新生成这几步（20.4，锁住的保留）。
+   * note 是附给这几步的一句说明。
+   */
+  runGenesis: Streaming<{ worldId: string; from?: GenesisStepId; steps?: GenesisStepId[]; note?: string }, GenesisChunk, WorldSummary>;
+  /** 过期的步骤不更新了：按现在的上游记下新的输入哈希（不给 steps 就是全部过期的）。 */
+  acceptStale: Unary<{ worldId: string; steps?: GenesisStepId[] }, WorldDetail>;
+  /** 只重写一个角色、地点或设定条目（20.4）：id 不变，锁住的字段保留，之前的版本进历史。 */
+  rerollEntity: Streaming<{ worldId: string; kind: EntityKind; id: string; note?: string }, RewriteChunk, WorldDetail>;
+  /** 只重写一个字段（长文本），返回新的文字，不保存：放进表单里，看过再存。data 是表单里现在的内容。 */
+  rewriteField: Streaming<{ worldId: string; key: RevKey; path: string; data?: unknown; note?: string }, RewriteChunk, { text: string }>;
+  /** 改名之前：正文里还写着旧名字的地方（draft 是表单里正在改的这一个）。 */
+  renameHits: Unary<{ worldId: string; kind: 'character' | 'location'; id: string; to: string; draft?: unknown }, RenameHit[]>;
+  /** 删掉的角色、地点、设定条目（新的在前）。 */
+  deletedEntities: Unary<{ worldId: string }, DeletedEntity[]>;
+  /** 从历史里找回一个删掉的实体（id 被占了就换一个）。 */
+  restoreDeleted: Unary<{ worldId: string; kind: EntityKind; id: string; name: string }, SaveWorldPartResult>;
 
   /** 世界编辑器（M5，20.5）：保存一块内容。 */
   saveWorldPart: Unary<SaveWorldPartParams, SaveWorldPartResult>;

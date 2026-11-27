@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { DEFAULT_EXPRESSIONS, type ExpressionDef, type MoodDef, ObserverSettings } from '@auto-adv/schema';
+import { DEFAULT_EXPRESSIONS, type ExpressionDef, type GenesisStepId, type MoodDef, ObserverSettings } from '@auto-adv/schema';
 import type {
   ObserverChunk,
   ObserverStatus,
@@ -18,6 +18,7 @@ import type {
   StartPlaythroughParams,
   WorldProgress,
 } from '../api.ts';
+import { freshStamps } from '../genesis/inputs.ts';
 import type { Meter, ModelGateway } from '../llm/gateway.ts';
 import { generateJson, stripThinking } from '../llm/structured.ts';
 import type { AdvAction } from '../plot/runner.ts';
@@ -848,6 +849,17 @@ export class PlayService {
         const now = await this.store.load(ref.worldId);
         if (matchByName(x.name, now.characters)) return; // 别的周目已经升级过了
         await this.store.writeCharacter(ref.worldId, extraCharacter(now, x, value).character);
+        // 玩出来的角色不算改了上游：剧情图、设定集、开场不因为它标成过期
+        const stamps = freshStamps(now, await this.store.load(ref.worldId));
+        if (Object.keys(stamps).length) {
+          await this.store.updateManifest(ref.worldId, (m) => ({
+            ...m,
+            genesis: {
+              ...m.genesis,
+              steps: Object.fromEntries(Object.entries(m.genesis.steps).map(([k, st]) => [k, { ...st, ...stamps[k as GenesisStepId] }])),
+            },
+          }));
+        }
       });
       db.updateData(pt.id, (d) => ({ ...d, extras: { ...d.extras, [x.name]: 'done' } }));
       this.onWorldChanged?.(ref.worldId);

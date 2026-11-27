@@ -194,25 +194,29 @@ describe('历史版本', () => {
   it('重新生成一步之前把被换掉的存进历史，超过上限删最早的', async () => {
     const worldId = await setup();
     await client.call('saveEditorSettings', { settings: { autoLock: true, historyLimit: 2 } });
-    for (let i = 0; i < 3; i++) await client.stream('runGenesis', { worldId, from: 'lore' }, () => {});
-    const w = await client.call('getWorld', { id: worldId });
+    // 锁住第一条设定的标题：重抽设定集时它留下（id 不变），正文重新写
+    let w = await client.call('getWorld', { id: worldId });
     const first = w.lore[0];
     if (!first) throw new Error('没有设定');
-    const hist = await client.call('worldHistory', { worldId, key: `lore:${first.id}` });
-    // 模拟服务每次给的内容一样，内容没变就不存；改一下文件再重抽
-    expect(hist.length).toBeLessThanOrEqual(2);
+    await client.call('saveWorldPart', { worldId, part: 'lore', base: w.revs[`lore:${first.id}`], data: { ...first, _meta: { ...first._meta, locked: ['title'] } } });
     const file = path.join(dir, 'worlds', worldId, 'setting', 'lore', `${first.id}.json`);
     for (let i = 0; i < 3; i++) {
       const raw = JSON.parse(await readFile(file, 'utf8'));
       await writeFile(file, JSON.stringify({ ...raw, content: `改过 ${i}` }));
-      await client.stream('runGenesis', { worldId, from: 'lore' }, () => {});
+      await client.stream('runGenesis', { worldId, steps: ['lore'] }, () => {});
     }
+    w = await client.call('getWorld', { id: worldId });
+    expect(w.lore[0]?.id).toBe(first.id);
+    expect(w.lore[0]?.content).not.toContain('改过');
     const after = await client.call('worldHistory', { worldId, key: `lore:${first.id}` });
     expect(after).toHaveLength(2);
     expect(after.every((h) => h.reason === 'genesis')).toBe(true);
     const newest = await client.call('worldHistoryRead', { worldId, key: `lore:${first.id}`, name: after[0]?.name ?? '' });
     expect((newest.data as { content: string }).content).toBe('改过 2');
     expect(await readdir(path.join(dir, 'worlds', worldId, '.history', 'setting', 'lore', `${first.id}.json`))).toHaveLength(2);
+    // 没锁的换成了新的（新 id），换下来的留在历史里，算"删掉的"
+    const gone = await client.call('deletedEntities', { worldId });
+    expect(gone.filter((x) => x.kind === 'lore').length).toBeGreaterThanOrEqual(2);
     const bad = await errorOf(client.call('worldHistoryRead', { worldId, key: `lore:${first.id}`, name: '../../world.json' }));
     expect(bad.message).toContain('不合法');
   });

@@ -1,5 +1,5 @@
-import type { PlaythroughInfo, PlotCheckResult, StartPlaythroughParams, WorldDetail } from '@auto-adv/engine/api';
-import { GENESIS_STEPS, type GenesisStepId, type ObserverSettings } from '@auto-adv/schema';
+import type { PlaythroughInfo, PlotCheckResult, StartPlaythroughParams, StepInput, WorldDetail } from '@auto-adv/engine/api';
+import { GENESIS_DEPS, GENESIS_STEPS, type GenesisStepId, type ObserverSettings } from '@auto-adv/schema';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
@@ -20,6 +20,7 @@ import { engine, errorMessage } from '../lib/engine.ts';
 import { formatTime, formatTokens } from '../lib/format.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
+import { useSettings } from '../lib/settings.tsx';
 import { AssetsProvider, useAssetsContext } from '../lib/assets.tsx';
 import { AssetsTab } from './Assets.tsx';
 import { CollectionView } from './Collection.tsx';
@@ -32,6 +33,7 @@ import {
   Modal,
   OpeningTab,
   OverviewTab,
+  RerollDialog,
   tabOfKey,
   VariablesTab,
   WorldviewTab,
@@ -71,7 +73,19 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
     if (dirty.current.size) setLeaving(() => go);
     else go();
   };
-  const editCtx = useMemo(() => (world ? { world, onSaved: setWorld, setDirty } : null), [world, setDirty]);
+  const { settings } = useSettings();
+  const downstream = settings?.editor.downstream ?? 'prompt';
+  const [rerollStep, setRerollStep] = useState<GenesisStepId | null>(null);
+  const [cascade, setCascade] = useState(false);
+  // 保存以后：设置成"自动重写"时，马上重写过期的步骤（锁住的保留，20.4）
+  const onSaved = useCallback(
+    (w: WorldDetail) => {
+      setWorld(w);
+      if (downstream === 'auto' && w.stale.length && !genesis.jobs[worldId]) genesis.run(worldId, { steps: w.stale.map((x) => x.step) });
+    },
+    [downstream, genesis, worldId],
+  );
+  const editCtx = useMemo(() => (world ? { world, onSaved, setDirty } : null), [world, onSaved, setDirty]);
 
   const load = useCallback(async () => {
     try {
@@ -166,6 +180,11 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
       <div className="flex-1 overflow-y-auto">
         <div className="mx-auto grid max-w-6xl grid-cols-[1fr_280px] gap-6 px-8 py-6">
           <div className="min-w-0 space-y-4">
+            {world.stale.length > 0 && downstream === 'prompt' && !running && (
+              <StaleBanner world={world} onUpdate={() => genesis.run(worldId, { steps: world.stale.map((x) => x.step) })} onDismiss={() =>
+                engine.call('acceptStale', { worldId }).then(setWorld, (err) => toast('err', errorMessage(err)))
+              } />
+            )}
             <Tabs
               value={tab}
               onChange={(t) => guard(() => setTab(t))}
@@ -279,23 +298,34 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
                 {GENESIS_STEPS.map((s) => {
                   const st = steps[s.id];
                   const chars = job?.progress[s.id];
+                  const stale = !running && world.stale.some((x) => x.step === s.id);
                   return (
-                    <li key={s.id} className="group" data-step={s.id} data-status={st?.status ?? 'pending'}>
+                    <li key={s.id} className="group" data-step={s.id} data-status={st?.status ?? 'pending'} data-stale={stale ? 'true' : undefined}>
                       <div className="flex h-8 items-center gap-2 text-sm">
                         <StepIcon status={st?.status} />
                         <span className={cx(st?.status === 'done' ? 'text-fg' : 'text-muted')}>{s.name}</span>
+                        {stale && (
+                          <span title="上游改过，这一步还是按改之前写的" className="text-[11px] text-warn">
+                            过期
+                          </span>
+                        )}
                         {st?.status === 'running' && chars ? (
                           <span className="text-xs text-faint">{chars} 字</span>
                         ) : null}
-                        {st?.status === 'done' && !running && (
-                          <ConfirmButton
+                        {st?.status === 'done' && !running && world.editable && (
+                          <Button
+                            size="sm"
                             variant="ghost"
-                            confirmText="连同下游一起重抽？"
-                            title="重新生成这一步，依赖它的步骤也会一起重新生成"
-                            onConfirm={() => genesis.run(worldId, s.id as GenesisStepId)}
+                            className="ml-auto opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+                            title="重新生成这一步，锁住的内容留下"
+                            data-testid={`reroll-step-${s.id}`}
+                            onClick={() => {
+                              setCascade(downstream === 'auto');
+                              setRerollStep(s.id as GenesisStepId);
+                            }}
                           >
-                            <span className="opacity-0 transition-opacity group-hover:opacity-100">重抽</span>
-                          </ConfirmButton>
+                            重抽
+                          </Button>
                         )}
                       </div>
                       {st?.status === 'failed' && st.error && (
@@ -342,6 +372,26 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
             </Button>
           </div>
         </Modal>
+      )}
+      {rerollStep && (
+        <RerollDialog
+          testId="reroll-step-dialog"
+          title={`重抽「${GENESIS_STEPS.find((x) => x.id === rerollStep)?.name ?? rerollStep}」这一步`}
+          detail={<StepRerollText world={world} step={rerollStep} />}
+          extra={
+            downstreamOf(rerollStep).length > 0 && (
+              <label className="mt-3 flex items-start gap-2 text-sm text-muted">
+                <input type="checkbox" className="mt-1" checked={cascade} onChange={(e) => setCascade(e.target.checked)} data-testid="reroll-cascade" />
+                <span>
+                  下游的{downstreamOf(rerollStep).map((id) => GENESIS_STEPS.find((x) => x.id === id)?.name).join('、')}也一起重写
+                  <span className="block text-xs text-faint">不勾的话，它们会标成"过期"，之后可以一起更新。</span>
+                </span>
+              </label>
+            )
+          }
+          onClose={() => setRerollStep(null)}
+          onConfirm={(note) => genesis.run(worldId, { ...(cascade ? { from: rerollStep } : { steps: [rerollStep] }), ...(note ? { note } : {}) })}
+        />
       )}
       {dialog && (
         <StartDialog
@@ -587,5 +637,96 @@ function GraphView({ world }: { world: WorldDetail }) {
         </Card>
       ))}
     </div>
+  );
+}
+
+const INPUT_NAMES: Record<StepInput, string> = {
+  seed: '世界选项',
+  brief: '简报',
+  worldview: '世界观',
+  characters: '角色',
+  locations: '地点',
+  plot: '剧情图',
+};
+
+const stepName = (id: GenesisStepId) => GENESIS_STEPS.find((x) => x.id === id)?.name ?? id;
+
+/** 依赖某一步的所有步骤（不含它自己）。 */
+function downstreamOf(step: GenesisStepId): GenesisStepId[] {
+  const out = new Set<GenesisStepId>([step]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const { id } of GENESIS_STEPS) {
+      if (!out.has(id) && GENESIS_DEPS[id].some((d) => out.has(d))) {
+        out.add(id);
+        grew = true;
+      }
+    }
+  }
+  out.delete(step);
+  return [...out];
+}
+
+/** 上游改过的提示（20.4"过期"）：「更新这几步」按新的上游重写（锁住的保留），「不用了」接受现状。 */
+function StaleBanner({ world, onUpdate, onDismiss }: { world: WorldDetail; onUpdate: () => void; onDismiss: () => void }) {
+  const changed = [...new Set(world.stale.flatMap((x) => x.changed))].map((k) => INPUT_NAMES[k]);
+  return (
+    <Card className="flex items-center gap-3 border-warn/30 p-3 text-sm" data-testid="stale-banner">
+      <span className="flex-1 leading-relaxed text-muted">
+        <span className="text-fg">{changed.join('、')}</span>改过了，{world.stale.map((x) => stepName(x.step)).join('、')}还是按改之前写的。世界照样能玩。
+      </span>
+      <Button size="sm" variant="ghost" onClick={onDismiss} data-testid="stale-dismiss">
+        不用了
+      </Button>
+      <Button size="sm" variant="primary" onClick={onUpdate} title="按新的内容重写这几步，锁住的留下" data-testid="stale-update">
+        更新这几步
+      </Button>
+    </Card>
+  );
+}
+
+/** 重抽一整步时说明哪些会留下（20.4 的表）。 */
+function StepRerollText({ world, step }: { world: WorldDetail; step: GenesisStepId }) {
+  const count = (list: { _meta: { locked: string[] } }[]) => {
+    const kept = list.filter((x) => x._meta.locked.length);
+    return { kept: kept.length, full: kept.filter((x) => x._meta.locked.includes('*')).length };
+  };
+  let keep = '';
+  switch (step) {
+    case 'brief': {
+      const n = (world.brief?._meta.locked.length ?? 0) + (world.style?._meta.locked.length ?? 0) + world.manifest.locked.filter((x) => x === 'title' || x === 'logline').length;
+      keep = n ? `简报和风格里锁住的 ${n} 项原样留下。` : '';
+      break;
+    }
+    case 'worldview':
+      keep = world.manifest.locked.includes('worldview') ? '世界观整篇锁着，不会重写。' : '';
+      break;
+    case 'cast':
+    case 'locations':
+    case 'lore': {
+      const list = step === 'cast' ? world.characters : step === 'locations' ? world.locations : world.lore;
+      const noun = step === 'cast' ? '角色' : step === 'locations' ? '地点' : '设定';
+      const c = count(list);
+      keep = c.kept
+        ? `有锁的 ${c.kept} 个${noun}留下，id 不变${c.full ? `（整个锁住的 ${c.full} 个原样不动）` : ''}；其余的换成新的。`
+        : `没有锁住的${noun}，全部换成新的。想留下哪个，先在${noun}那一页点它的锁。`;
+      break;
+    }
+    case 'plot':
+      keep = world.graph?._meta.locked.includes('*')
+        ? '剧情图整张锁着，不会重写。'
+        : world.manifest.locked.includes('variables')
+          ? '数值表锁着，新的剧情图只用这些数值。'
+          : '';
+      break;
+    case 'opening':
+      keep = world.opening?._meta.locked.length ? `开场里锁住的 ${world.opening._meta.locked.length} 项原样留下。` : '';
+      break;
+  }
+  return (
+    <>
+      重新生成这一步，可以附一句要求。{keep}换下来的内容进历史版本，不满意可以退回去。
+    </>
   );
 }

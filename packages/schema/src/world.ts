@@ -7,6 +7,13 @@ export const GenesisStepState = z.object({
   status: z.enum(['pending', 'running', 'done', 'failed']),
   error: z.string().optional(),
   updatedAt: z.string().optional(),
+  /**
+   * 这一步生成时读到的上游内容的哈希（20.4"过期"），按来源分开：`brief`、`worldview`、`characters`……
+   * 现在算出来的对不上，就说明上游改过，这一步是按改之前写的。
+   */
+  inputs: z.record(z.string(), z.string()).optional(),
+  /** 算哈希时角色和地点的名字（id → 名字和别称）：改名并且替换了正文里的旧名字，不算上游改过。 */
+  names: z.record(z.string(), z.array(z.string())).optional(),
 });
 export type GenesisStepState = z.infer<typeof GenesisStepState>;
 
