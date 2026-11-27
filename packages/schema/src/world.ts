@@ -7,6 +7,13 @@ export const GenesisStepState = z.object({
   status: z.enum(['pending', 'running', 'done', 'failed']),
   error: z.string().optional(),
   updatedAt: z.string().optional(),
+  /**
+   * 这一步生成时读到的上游内容的哈希（20.4"过期"），按来源分开：`brief`、`worldview`、`characters`……
+   * 现在算出来的对不上，就说明上游改过，这一步是按改之前写的。
+   */
+  inputs: z.record(z.string(), z.string()).optional(),
+  /** 算哈希时角色和地点的名字（id → 名字和别称）：改名并且替换了正文里的旧名字，不算上游改过。 */
+  names: z.record(z.string(), z.array(z.string())).optional(),
 });
 export type GenesisStepState = z.infer<typeof GenesisStepState>;
 
@@ -32,6 +39,11 @@ export const WorldManifest = z.object({
     .default({ seed: '', options: {}, steps: {} }),
   /** 生成过程中用到的模型，仅作记录。 */
   models: z.array(z.string()).default([]),
+  /**
+   * 不带 `_meta` 的几块内容的锁（20.4）：`title`、`logline`（世界名、一句话简介）、`worldview`（世界观正文）、
+   * `variables`（数值表）。重抽时锁住的不覆盖。
+   */
+  locked: z.array(z.string()).default([]),
 });
 export type WorldManifest = z.infer<typeof WorldManifest>;
 

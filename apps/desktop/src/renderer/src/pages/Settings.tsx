@@ -7,6 +7,7 @@ import {
   comfyUsesModel,
   type CustomApi,
   DEFAULT_MOODS,
+  type EditorSettings,
   MEDIA_ROLE_APIS,
   MEDIA_ROLE_LABELS,
   type MediaRoleId,
@@ -25,7 +26,7 @@ import { AssetSettingsForm } from './AssetSettingsForm.tsx';
 import { ComfyEditor } from './ComfyEditor.tsx';
 import { CustomApiEditor, defaultCustomApi } from './CustomApiEditor.tsx';
 
-type Tab = 'endpoints' | 'roles' | 'assets' | 'about';
+type Tab = 'endpoints' | 'roles' | 'assets' | 'editor' | 'about';
 
 export function SettingsPage() {
   const [tab, setTab] = useState<Tab>('endpoints');
@@ -42,6 +43,7 @@ export function SettingsPage() {
               { value: 'endpoints', label: '模型接入点' },
               { value: 'roles', label: '职责路由' },
               { value: 'assets', label: '素材' },
+              { value: 'editor', label: '编辑器' },
               { value: 'about', label: '关于' },
             ]}
           />
@@ -51,6 +53,7 @@ export function SettingsPage() {
         {tab === 'endpoints' && <EndpointsTab />}
         {tab === 'roles' && <RolesTab />}
         {tab === 'assets' && <AssetsSettingsTab />}
+        {tab === 'editor' && <EditorSettingsTab />}
         {tab === 'about' && <AboutTab />}
       </div>
     </div>
@@ -929,6 +932,113 @@ function AssetsSettingsTab() {
       </p>
       <Card className="p-5" data-testid="asset-settings-global">
         <AssetSettingsForm mode="global" global={settings.assets} value={settings.assets} onSave={save} />
+      </Card>
+    </div>
+  );
+}
+
+// ───────────── 编辑器（20.11） ─────────────
+
+const EDITOR_DEFAULTS: EditorSettings = { autoLock: true, historyLimit: 20, downstream: 'prompt', rename: 'ask' };
+
+function EditorSettingsTab() {
+  const { settings, refresh } = useSettings();
+  const toast = useToast();
+  const [draft, setDraft] = useState<EditorSettings | null>(null);
+  useEffect(() => {
+    if (settings) setDraft(settings.editor);
+  }, [settings]);
+  if (!settings || !draft) return <Spinner />;
+  const save = async (v: EditorSettings) => {
+    try {
+      await engine.call('saveEditorSettings', { settings: v });
+      await refresh();
+      toast('ok', '已保存编辑器设置');
+    } catch (err) {
+      toast('err', errorMessage(err));
+    }
+  };
+  const changed = JSON.stringify(draft) !== JSON.stringify(settings.editor);
+  return (
+    <div className="mx-auto max-w-4xl space-y-3">
+      <p className="text-sm text-muted">在世界页里改世界的内容时的做法。</p>
+      <Card className="space-y-5 p-5" data-testid="editor-settings">
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">手改的字段自动锁住</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">
+              改过的字段旁边出现一把锁，之后重抽这一步或者这个角色时不会被冲掉。关掉以后要锁哪个自己点。
+            </p>
+          </div>
+          <label className="flex h-9 shrink-0 items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={draft.autoLock}
+              onChange={(e) => setDraft({ ...draft, autoLock: e.target.checked })}
+              data-testid="editor-autolock"
+            />
+            自动锁住
+          </label>
+        </div>
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">每个文件留几个历史版本</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">保存、重新生成、删除之前把原来的存一份，可以对照、退回去。0 不留。</p>
+          </div>
+          <Input
+            type="number"
+            min={0}
+            max={200}
+            className="w-24 shrink-0"
+            value={draft.historyLimit}
+            onChange={(e) => setDraft({ ...draft, historyLimit: Math.max(0, Math.min(200, Math.round(Number(e.target.value) || 0))) })}
+            data-testid="editor-history-limit"
+          />
+        </div>
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">上游改了以后</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">
+              比如改了角色，剧情图、设定集、开场还是按改之前写的。提示：世界页顶上说一声，点了才重写；自动：马上重写这几步（锁住的保留，会用掉额度）；不管：只在创世步骤里标"过期"。
+            </p>
+          </div>
+          <Select
+            className="w-32 shrink-0"
+            value={draft.downstream}
+            onChange={(e) => setDraft({ ...draft, downstream: e.target.value as EditorSettings['downstream'] })}
+            data-testid="editor-downstream"
+          >
+            <option value="prompt">提示</option>
+            <option value="auto">自动重写</option>
+            <option value="ignore">不管</option>
+          </Select>
+        </div>
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">改名时替换正文里的旧名字</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">
+              角色、地点改了名字，世界观、别的角色的经历、剧情图、开场里还写着旧名字。问：列出来让你勾；总是：全部换掉；从不：不换（引用不会断，只是文字里还是旧名字）。
+            </p>
+          </div>
+          <Select
+            className="w-32 shrink-0"
+            value={draft.rename}
+            onChange={(e) => setDraft({ ...draft, rename: e.target.value as EditorSettings['rename'] })}
+            data-testid="editor-rename"
+          >
+            <option value="ask">问我</option>
+            <option value="always">总是替换</option>
+            <option value="never">从不替换</option>
+          </Select>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-line pt-4">
+          <Button variant="ghost" onClick={() => setDraft(EDITOR_DEFAULTS)} disabled={JSON.stringify(draft) === JSON.stringify(EDITOR_DEFAULTS)}>
+            恢复默认
+          </Button>
+          <Button variant="primary" disabled={!changed} onClick={() => void save(draft)} data-testid="editor-settings-save">
+            保存
+          </Button>
+        </div>
       </Card>
     </div>
   );

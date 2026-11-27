@@ -147,6 +147,8 @@ describe('应用里的临时人物', () => {
     const owner = world.characters.find((c) => c.name === '码头老板');
     expect(owner).toMatchObject({ role: 'npc', gender: '男', appearance: { imagePrompt: '男性，50 多岁，矮胖，花白短发，帆布围裙，挽起的袖子' } });
     expect(server.requests.filter((r) => JSON.stringify(r).includes('extra_character'))).toHaveLength(1);
+    // 玩出来的角色不算改了上游：创世步骤不标过期
+    expect((await client.call('getWorld', { id: ref.worldId })).stale).toEqual([]);
     // 下一拍他开口时认得出是这个角色
     v = await askOwner(ref, v);
     const next = v.path.at(-1) as PlayEvent;

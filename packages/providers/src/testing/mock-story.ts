@@ -264,6 +264,8 @@ export function storyReply(info: MockRequestInfo): string | undefined {
         musicStyle: '钢琴和大提琴，慢节奏，带一点海风般的回响',
       });
     case 'world_cast': {
+      // 重抽角色这一步、有锁住的角色（M5，20.4）：要补全的照填 id，另外写几个新的
+      if (firstUser.includes('# 已经定了的角色')) return castReroll(firstUser, info.count);
       const n = Number(/加上 (\d+) 个其他角色/.exec(firstUser)?.[1] ?? 3);
       const pName = /名字是「(.+?)」/.exec(firstUser)?.[1] ?? '沈默';
       const npcs = NPC_NAMES.slice(0, n);
@@ -305,12 +307,51 @@ export function storyReply(info: MockRequestInfo): string | undefined {
       });
     }
     case 'world_locations':
+      if (firstUser.includes('# 已经定了的地点')) return locationsReroll(firstUser, info.count);
       return JSON.stringify({
         locations: LOCATIONS.map((l, i) => ({
           ...l,
           connections: [LOCATIONS[(i + 1) % LOCATIONS.length]?.name],
         })),
       });
+    case 'world_character': {
+      const fixedName = /- 名字：(.+)/.exec(firstUser)?.[1]?.trim();
+      const was = /# 要重写的角色（原来的样子）\n## ([^\s（\n]+)/.exec(firstUser)?.[1] ?? '';
+      const name = fixedName ?? `${was || '无名'}·改`;
+      return JSON.stringify({
+        name,
+        role: firstUser.includes('这是主角') ? 'protagonist' : 'npc',
+        gender: '女',
+        age: '27',
+        summary: `${name}，重写过的角色（模拟 #${info.count}）`,
+        appearance: '换了一身深色的长外套',
+        imagePrompt: '黑色长发，灰色眼睛，深色长外套',
+        traits: ['冷静', '多疑'],
+        speechStyle: '话很少，句尾常带问号',
+        speechExamples: ['你确定？'],
+        background: `${name}的经历被重新写过一遍（模拟 #${info.count}）。`,
+        goals: ['弄清灯塔的秘密'],
+        secret: `${name}藏着一封没寄出的信`,
+        relationships: [],
+      });
+    }
+    case 'world_location': {
+      const fixedName = /- 名字：(.+)/.exec(firstUser)?.[1]?.trim();
+      return JSON.stringify({
+        name: fixedName ?? `新码头（模拟 #${info.count}）`,
+        description: `重写过的地点：潮水拍打着新修的石阶（模拟 #${info.count}）。`,
+        connections: [],
+      });
+    }
+    case 'world_lore_entry': {
+      const fixedTitle = /- 条目名：(.+)/.exec(firstUser)?.[1]?.trim();
+      return JSON.stringify({
+        title: fixedTitle ?? `重写的设定 #${info.count}`,
+        category: '传说',
+        content: `重写过的设定正文（模拟 #${info.count}）。`,
+        keys: ['传说'],
+      });
+    }
     case 'world_lore':
       return JSON.stringify({
         entries: [
@@ -381,6 +422,10 @@ export function storyReply(info: MockRequestInfo): string | undefined {
       });
     }
   }
+
+  // 只重写一个字段（M5，20.4）：直接给新的文字
+  const field = /请只重写「(.+?)」这一项/.exec(lastUser);
+  if (field) return `重写过的${(field[1] ?? '').replace(/（.*$/, '')}（模拟 #${info.count}）`;
 
   if (lastUser.includes('世界观正文')) {
     return [
@@ -454,4 +499,55 @@ export function storyReply(info: MockRequestInfo): string | undefined {
   }
 
   return undefined;
+}
+
+/** 重抽角色这一步、有锁住的角色：要补全的照填 id，新角色用没出现过的名字。 */
+function castReroll(prompt: string, count: number): string {
+  const partial = [...prompt.matchAll(/## 要补全的角色（id：(\w+)）\n[^\n]*\n((?:- .+\n?)*)/g)].map((m) => ({
+    id: m[1] as string,
+    name: /- 名字：(.+)/.exec(m[2] ?? '')?.[1]?.trim(),
+  }));
+  const fresh = Number(/另外再写 (\d+) 个新角色/.exec(prompt)?.[1] ?? 0);
+  const used = new Set([...prompt.matchAll(/^## ([^\s（\n]+)/gm)].map((m) => m[1]));
+  const pool = NPC_NAMES.filter((n) => !used.has(n));
+  const pick = (i: number) => pool[(count + i) % Math.max(1, pool.length)] ?? `新角色${i}`;
+  const one = (name: string, i: number, id = '') => ({
+    id,
+    name,
+    role: prompt.includes('主角已经定了') ? 'npc' : i === 0 && !id ? 'protagonist' : 'npc',
+    gender: i % 2 ? '男' : '女',
+    age: String(22 + i * 5),
+    summary: `${name}，重抽出来的角色（模拟 #${count}）`,
+    appearance: '雨衣和旧靴子',
+    imagePrompt: '短发，深色雨衣，旧靴子',
+    traits: ['沉默'],
+    speechStyle: '说话很慢',
+    speechExamples: ['……雾又来了。'],
+    background: `${name}在雾港长大（模拟 #${count}）。`,
+    goals: ['找到失踪的人'],
+    secret: '',
+    relationships: [],
+  });
+  return JSON.stringify({
+    characters: [
+      ...partial.map((p, i) => one(p.name ?? pick(100 + i), i + 1, p.id)),
+      ...Array.from({ length: fresh }, (_, i) => one(pick(i), i)),
+    ],
+  });
+}
+
+/** 重抽地点这一步、有锁住的地点。 */
+function locationsReroll(prompt: string, count: number): string {
+  const partial = [...prompt.matchAll(/## 要补全的地点（id：(\w+)）\n[^\n]*\n((?:- .+\n?)*)/g)].map((m) => ({
+    id: m[1] as string,
+    name: /- 名字：(.+)/.exec(m[2] ?? '')?.[1]?.trim(),
+  }));
+  const range = /另外再写 (\d+)(?:～(\d+))? 个新地点/.exec(prompt);
+  const fresh = Number(range?.[1] ?? 0);
+  return JSON.stringify({
+    locations: [
+      ...partial.map((p, i) => ({ id: p.id, name: p.name ?? `补全的地点${i}`, description: `补全过的描述（模拟 #${count}）`, connections: [] })),
+      ...Array.from({ length: fresh }, (_, i) => ({ name: `新地点${count}-${i + 1}`, description: `重抽出来的地点（模拟 #${count}）`, connections: [] })),
+    ],
+  });
 }

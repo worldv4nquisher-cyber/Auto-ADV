@@ -31,6 +31,11 @@ export class SettingsStore {
     return this.current;
   }
 
+  /** 已经读进来的设置（还没读过时为 null），给不能等的地方用。 */
+  peek(): AppSettings | null {
+    return this.current;
+  }
+
   /** 基于最新设置做修改并保存。修改函数返回新设置。 */
   update(mutator: (s: AppSettings) => AppSettings): Promise<AppSettings> {
     return this.queue.run(async () => {

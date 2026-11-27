@@ -73,6 +73,19 @@ export const RoleRoute = z.object({
 });
 export type RoleRoute = z.infer<typeof RoleRoute>;
 
+/** 世界编辑器的设置（20.11）。 */
+export const EditorSettings = z.object({
+  /** 手改过的字段自动锁住，之后重抽不会冲掉（20.4）。 */
+  autoLock: z.boolean().default(true),
+  /** 每个文件留几个历史版本（20.5），0 不留。 */
+  historyLimit: z.number().int().min(0).max(200).default(20),
+  /** 上游改了以后（20.4）：prompt 提示、点了才重算；auto 自动重算过期的步骤；ignore 不提示（创世步骤里仍标过期）。 */
+  downstream: z.enum(['prompt', 'auto', 'ignore']).default('prompt'),
+  /** 角色、地点改名时替换正文里的旧名字（20.4）：ask 列出来问、always 总是全部替换、never 从不替换。 */
+  rename: z.enum(['ask', 'always', 'never']).default('ask'),
+});
+export type EditorSettings = z.infer<typeof EditorSettings>;
+
 /** settings.json：应用设置（不含任何密钥，密钥单独加密保存）。 */
 export const AppSettings = z.object({
   formatVersion: z.number().int().default(0),
@@ -84,5 +97,7 @@ export const AppSettings = z.object({
     .prefault({}),
   /** 素材管线的全局设置（18.11）。 */
   assets: AssetSettings.prefault({}),
+  /** 世界编辑器（M5）。 */
+  editor: EditorSettings.prefault({}),
 });
 export type AppSettings = z.infer<typeof AppSettings>;

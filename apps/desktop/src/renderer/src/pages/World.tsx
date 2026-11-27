@@ -1,6 +1,6 @@
-import type { PlaythroughInfo, PlotCheckResult, StartPlaythroughParams, WorldDetail } from '@auto-adv/engine/api';
-import { type Character, GENESIS_STEPS, type GenesisStepId, type ObserverSettings } from '@auto-adv/schema';
-import { useCallback, useEffect, useState } from 'react';
+import type { PlaythroughInfo, PlotCheckResult, StartPlaythroughParams, StepInput, WorldDetail } from '@auto-adv/engine/api';
+import { GENESIS_DEPS, GENESIS_STEPS, type GenesisStepId, type ObserverSettings } from '@auto-adv/schema';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -10,7 +10,6 @@ import {
   Empty,
   Field,
   Input,
-  Markdown,
   PageHeader,
   Select,
   Spinner,
@@ -21,11 +20,36 @@ import { engine, errorMessage } from '../lib/engine.ts';
 import { formatTime, formatTokens } from '../lib/format.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
-import { AssetsProvider, BgImage, useAssetsContext } from '../lib/assets.tsx';
+import { useSettings } from '../lib/settings.tsx';
+import { AssetsProvider, useAssetsContext } from '../lib/assets.tsx';
 import { AssetsTab } from './Assets.tsx';
 import { CollectionView } from './Collection.tsx';
+import {
+  CharactersTab,
+  EditProvider,
+  IssuesCard,
+  LocationsTab,
+  LoreTab,
+  Modal,
+  OpeningTab,
+  OverviewTab,
+  RerollDialog,
+  tabOfKey,
+  VariablesTab,
+  WorldviewTab,
+} from './WorldEditor.tsx';
 
-type Tab = 'overview' | 'characters' | 'locations' | 'plot' | 'collection' | 'assets' | 'lore' | 'opening';
+type Tab =
+  | 'overview'
+  | 'worldview'
+  | 'characters'
+  | 'locations'
+  | 'plot'
+  | 'variables'
+  | 'collection'
+  | 'assets'
+  | 'lore'
+  | 'opening';
 
 export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab?: Tab }) {
   const { navigate } = useRouter();
@@ -38,6 +62,30 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
   const [starting, setStarting] = useState(false);
   const [dialog, setDialog] = useState(false);
   const job = genesis.jobs[worldId];
+  // 编辑器里没保存的修改：切标签、离开前先问（20.5）
+  const dirty = useRef(new Set<string>());
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const setDirty = useCallback((id: string, d: boolean) => {
+    if (d) dirty.current.add(id);
+    else dirty.current.delete(id);
+  }, []);
+  const guard = (go: () => void) => {
+    if (dirty.current.size) setLeaving(() => go);
+    else go();
+  };
+  const { settings } = useSettings();
+  const downstream = settings?.editor.downstream ?? 'prompt';
+  const [rerollStep, setRerollStep] = useState<GenesisStepId | null>(null);
+  const [cascade, setCascade] = useState(false);
+  // 保存以后：设置成"自动重写"时，马上重写过期的步骤（锁住的保留，20.4）
+  const onSaved = useCallback(
+    (w: WorldDetail) => {
+      setWorld(w);
+      if (downstream === 'auto' && w.stale.length && !genesis.jobs[worldId]) genesis.run(worldId, { steps: w.stale.map((x) => x.step) });
+    },
+    [downstream, genesis, worldId],
+  );
+  const editCtx = useMemo(() => (world ? { world, onSaved, setDirty } : null), [world, onSaved, setDirty]);
 
   const load = useCallback(async () => {
     try {
@@ -117,7 +165,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
         subtitle={world.manifest.logline || (running ? '正在生成……' : '')}
         actions={
           <>
-            <Button variant="ghost" onClick={() => navigate({ page: 'home' })}>
+            <Button variant="ghost" onClick={() => guard(() => navigate({ page: 'home' }))}>
               返回
             </Button>
             <ConfirmButton size="md" variant="ghost" onConfirm={remove} confirmText="确认删除？" testId="delete-world">
@@ -130,52 +178,42 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
         }
       />
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto grid max-w-6xl grid-cols-[1fr_300px] gap-6 px-8 py-6">
+        <div className="mx-auto grid max-w-6xl grid-cols-[1fr_280px] gap-6 px-8 py-6">
           <div className="min-w-0 space-y-4">
+            {world.stale.length > 0 && downstream === 'prompt' && !running && (
+              <StaleBanner world={world} onUpdate={() => genesis.run(worldId, { steps: world.stale.map((x) => x.step) })} onDismiss={() =>
+                engine.call('acceptStale', { worldId }).then(setWorld, (err) => toast('err', errorMessage(err)))
+              } />
+            )}
             <Tabs
               value={tab}
-              onChange={setTab}
+              onChange={(t) => guard(() => setTab(t))}
               items={[
                 { value: 'overview', label: '概览' },
+                { value: 'worldview', label: '世界观' },
                 { value: 'characters', label: `角色 ${world.characters.length || ''}` },
                 { value: 'locations', label: `地点 ${world.locations.length || ''}` },
                 { value: 'plot', label: '剧情图' },
+                { value: 'variables', label: '数值' },
                 ...(world.graph ? [{ value: 'collection' as const, label: '收集' }] : []),
                 { value: 'assets', label: <AssetsTabLabel /> },
                 { value: 'lore', label: `设定集 ${world.lore.length || ''}` },
                 { value: 'opening', label: '开场' },
               ]}
             />
-            {tab === 'overview' && <Overview world={world} />}
-            {tab === 'characters' && (
-              <div className="grid gap-3">
-                {world.characters.length === 0 && <Empty title="角色还没有生成" />}
-                {world.characters.map((c) => (
-                  <CharacterCard key={c.id} c={c} all={world.characters} />
-                ))}
-              </div>
-            )}
-            {tab === 'locations' && (
-              <div className="grid grid-cols-2 gap-3">
-                {world.locations.length === 0 && <Empty title="地点还没有生成" />}
-                {world.locations.map((l) => (
-                  <Card key={l.id} className="overflow-hidden">
-                    <div className="relative aspect-video w-full overflow-hidden bg-black" style={{ containerType: 'inline-size' }}>
-                      <BgImage id={l.id} />
-                    </div>
-                    <div className="p-4">
-                    <div className="font-medium">{l.name}</div>
-                    <p className="mt-1.5 text-sm leading-relaxed text-muted">{l.description}</p>
-                    {l.connections.length > 0 && (
-                      <div className="mt-2 text-xs text-faint">
-                        通往：
-                        {l.connections.map((id) => world.locations.find((x) => x.id === id)?.name ?? id).join('、')}
-                      </div>
-                    )}
-                    </div>
-                  </Card>
-                ))}
-              </div>
+            {editCtx && (
+              <EditProvider value={editCtx}>
+                {!world.editable && (
+                  <p className="text-xs text-faint">正在生成，生成完才能编辑。</p>
+                )}
+                {tab === 'overview' && <OverviewTab />}
+                {tab === 'worldview' && <WorldviewTab />}
+                {tab === 'characters' && <CharactersTab />}
+                {tab === 'locations' && <LocationsTab />}
+                {tab === 'variables' && <VariablesTab />}
+                {tab === 'lore' && <LoreTab />}
+                {tab === 'opening' && <OpeningTab />}
+              </EditProvider>
             )}
             {tab === 'plot' &&
               (world.graph ? (
@@ -185,49 +223,6 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
               ))}
             {tab === 'collection' && <CollectionView worldId={worldId} />}
             {tab === 'assets' && <AssetsTab worldId={worldId} />}
-            {tab === 'lore' && (
-              <div className="grid gap-2">
-                {world.lore.length === 0 && <Empty title="设定集还没有生成" />}
-                {world.lore.map((e) => (
-                  <Card key={e.id} className="p-4">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{e.title}</span>
-                      <Badge>{e.category}</Badge>
-                      {e.activation === 'always' && <Badge tone="accent">常驻</Badge>}
-                    </div>
-                    <p className="mt-1.5 text-sm leading-relaxed text-muted">{e.content}</p>
-                    {e.activation === 'keyword' && (
-                      <div className="mt-2 text-xs text-faint">触发词：{e.keys.join('、')}</div>
-                    )}
-                  </Card>
-                ))}
-              </div>
-            )}
-            {tab === 'opening' && (
-              <Card className="p-5">
-                {!world.opening ? (
-                  <Empty title="开场还没有生成" />
-                ) : (
-                  <div className="space-y-3 text-sm leading-relaxed">
-                    <div className="text-xs text-faint">
-                      地点：{world.locations.find((l) => l.id === world.opening?.locationId)?.name ?? '未指定'} · 在场：
-                      {world.opening.presentCharacterIds
-                        .map((id) => world.characters.find((c) => c.id === id)?.name ?? id)
-                        .join('、')}
-                    </div>
-                    <Markdown text={world.opening.narration} className="text-fg" />
-                    {world.opening.lines.map((l, i) => (
-                      <p key={`${l.characterId}${i}`}>
-                        <span className="font-medium text-accent-strong">
-                          {world.characters.find((c) => c.id === l.characterId)?.name}
-                        </span>
-                        ：{l.text}
-                      </p>
-                    ))}
-                  </div>
-                )}
-              </Card>
-            )}
           </div>
 
           <div className="space-y-4">
@@ -276,6 +271,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
               </Card>
             )}
 
+            <IssuesCard issues={world.issues} world={world} onJump={(key) => guard(() => setTab(tabOfKey(key)))} />
             {handmade && (
               <Card className="p-4 text-xs leading-relaxed text-muted">
                 这是一个手写的世界（不是一键创世生成的）。
@@ -302,23 +298,34 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
                 {GENESIS_STEPS.map((s) => {
                   const st = steps[s.id];
                   const chars = job?.progress[s.id];
+                  const stale = !running && world.stale.some((x) => x.step === s.id);
                   return (
-                    <li key={s.id} className="group" data-step={s.id} data-status={st?.status ?? 'pending'}>
+                    <li key={s.id} className="group" data-step={s.id} data-status={st?.status ?? 'pending'} data-stale={stale ? 'true' : undefined}>
                       <div className="flex h-8 items-center gap-2 text-sm">
                         <StepIcon status={st?.status} />
                         <span className={cx(st?.status === 'done' ? 'text-fg' : 'text-muted')}>{s.name}</span>
+                        {stale && (
+                          <span title="上游改过，这一步还是按改之前写的" className="text-[11px] text-warn">
+                            过期
+                          </span>
+                        )}
                         {st?.status === 'running' && chars ? (
                           <span className="text-xs text-faint">{chars} 字</span>
                         ) : null}
-                        {st?.status === 'done' && !running && (
-                          <ConfirmButton
+                        {st?.status === 'done' && !running && world.editable && (
+                          <Button
+                            size="sm"
                             variant="ghost"
-                            confirmText="连同下游一起重抽？"
-                            title="重新生成这一步，依赖它的步骤也会一起重新生成"
-                            onConfirm={() => genesis.run(worldId, s.id as GenesisStepId)}
+                            className="ml-auto opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+                            title="重新生成这一步，锁住的内容留下"
+                            data-testid={`reroll-step-${s.id}`}
+                            onClick={() => {
+                              setCascade(downstream === 'auto');
+                              setRerollStep(s.id as GenesisStepId);
+                            }}
                           >
-                            <span className="opacity-0 transition-opacity group-hover:opacity-100">重抽</span>
-                          </ConfirmButton>
+                            重抽
+                          </Button>
                         )}
                       </div>
                       {st?.status === 'failed' && st.error && (
@@ -343,6 +350,49 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
           </div>
         </div>
       </div>
+      {leaving && (
+        <Modal onClose={() => setLeaving(null)} testId="unsaved-dialog">
+          <div className="mb-2 text-base font-semibold">有没保存的修改</div>
+          <p className="text-sm text-muted">离开以后，这次改的内容就没了。</p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button
+              variant="danger"
+              data-testid="discard-changes"
+              onClick={() => {
+                dirty.current.clear();
+                const go = leaving;
+                setLeaving(null);
+                go();
+              }}
+            >
+              不要了
+            </Button>
+            <Button variant="primary" onClick={() => setLeaving(null)}>
+              接着改
+            </Button>
+          </div>
+        </Modal>
+      )}
+      {rerollStep && (
+        <RerollDialog
+          testId="reroll-step-dialog"
+          title={`重抽「${GENESIS_STEPS.find((x) => x.id === rerollStep)?.name ?? rerollStep}」这一步`}
+          detail={<StepRerollText world={world} step={rerollStep} />}
+          extra={
+            downstreamOf(rerollStep).length > 0 && (
+              <label className="mt-3 flex items-start gap-2 text-sm text-muted">
+                <input type="checkbox" className="mt-1" checked={cascade} onChange={(e) => setCascade(e.target.checked)} data-testid="reroll-cascade" />
+                <span>
+                  下游的{downstreamOf(rerollStep).map((id) => GENESIS_STEPS.find((x) => x.id === id)?.name).join('、')}也一起重写
+                  <span className="block text-xs text-faint">不勾的话，它们会标成"过期"，之后可以一起更新。</span>
+                </span>
+              </label>
+            )
+          }
+          onClose={() => setRerollStep(null)}
+          onConfirm={(note) => genesis.run(worldId, { ...(cascade ? { from: rerollStep } : { steps: [rerollStep] }), ...(note ? { note } : {}) })}
+        />
+      )}
       {dialog && (
         <StartDialog
           hasPlot={!!world.graph}
@@ -498,89 +548,6 @@ function StepIcon({ status }: { status: string | undefined }) {
   );
 }
 
-function Overview({ world }: { world: WorldDetail }) {
-  const b = world.brief;
-  return (
-    <div className="space-y-4">
-      {b && (
-        <Card className="grid grid-cols-2 gap-x-6 gap-y-3 p-5 text-sm">
-          <Info label="题材" value={b.genre} />
-          <Info label="基调" value={b.tone} />
-          <Info label="时代" value={b.era} />
-          <Info label="主题" value={b.themes.join('、')} />
-          {world.style?.prose.description && (
-            <Info label="文风" value={world.style.prose.description} className="col-span-2" />
-          )}
-        </Card>
-      )}
-      <Card className="p-5">
-        {world.worldview ? <Markdown text={world.worldview} /> : <Empty title="世界观还没有生成" />}
-      </Card>
-      {world.manifest.models.length > 0 && (
-        <p className="text-xs text-faint">生成所用模型：{world.manifest.models.join('、')}</p>
-      )}
-    </div>
-  );
-}
-
-function Info({ label, value, className }: { label: string; value: string; className?: string }) {
-  if (!value) return null;
-  return (
-    <div className={className}>
-      <div className="text-xs text-faint">{label}</div>
-      <div className="mt-0.5 leading-relaxed">{value}</div>
-    </div>
-  );
-}
-
-const ROLE_NAMES: Record<string, string> = {
-  protagonist: '主角（你）',
-  heroine: '女主角',
-  hero: '男主角',
-  rival: '对手',
-  antagonist: '反派',
-  mentor: '导师',
-  npc: '配角',
-};
-
-function CharacterCard({ c, all }: { c: Character; all: Character[] }) {
-  return (
-    <Card className="p-5">
-      <div className="flex items-center gap-2">
-        <span className="text-base font-semibold">{c.name}</span>
-        <Badge tone={c.role === 'protagonist' ? 'accent' : 'neutral'}>{ROLE_NAMES[c.role] ?? c.role}</Badge>
-        <span className="text-xs text-faint">{[c.gender, c.age].filter(Boolean).join(' · ')}</span>
-      </div>
-      {c.summary && <p className="mt-1.5 text-sm text-muted">{c.summary}</p>}
-      <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2.5 text-sm">
-        <Info label="外貌" value={c.appearance.text} />
-        <Info label="性格" value={c.personality.traits.join('、')} />
-        <Info label="说话方式" value={c.speech.style} />
-        <Info label="目标" value={c.goals.map((g) => g.text).join('；')} />
-        <Info label="经历" value={c.background} className="col-span-2" />
-        {c.speech.examples.length > 0 && (
-          <Info label="台词" value={c.speech.examples.map((e) => `「${e}」`).join(' ')} className="col-span-2" />
-        )}
-        {c.relationships.length > 0 && (
-          <Info
-            label="关系"
-            value={c.relationships
-              .map((r) => `${all.find((x) => x.id === r.to)?.name ?? r.to}：${r.type}`)
-              .join('；')}
-            className="col-span-2"
-          />
-        )}
-        {c.secrets.length > 0 && (
-          <details className="col-span-2 text-sm">
-            <summary className="cursor-pointer text-xs text-faint select-none">秘密（剧透）</summary>
-            <p className="mt-1 text-muted">{c.secrets.map((s) => s.text).join('；')}</p>
-          </details>
-        )}
-      </div>
-    </Card>
-  );
-}
-
 function PlotCheckSummary({ check, className }: { check: PlotCheckResult | null; className?: string }) {
   if (!check) return null;
   const issues = [...check.errors.map((e) => ({ ...e, err: true })), ...check.warnings.map((w) => ({ ...w, err: false }))];
@@ -670,5 +637,96 @@ function GraphView({ world }: { world: WorldDetail }) {
         </Card>
       ))}
     </div>
+  );
+}
+
+const INPUT_NAMES: Record<StepInput, string> = {
+  seed: '世界选项',
+  brief: '简报',
+  worldview: '世界观',
+  characters: '角色',
+  locations: '地点',
+  plot: '剧情图',
+};
+
+const stepName = (id: GenesisStepId) => GENESIS_STEPS.find((x) => x.id === id)?.name ?? id;
+
+/** 依赖某一步的所有步骤（不含它自己）。 */
+function downstreamOf(step: GenesisStepId): GenesisStepId[] {
+  const out = new Set<GenesisStepId>([step]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const { id } of GENESIS_STEPS) {
+      if (!out.has(id) && GENESIS_DEPS[id].some((d) => out.has(d))) {
+        out.add(id);
+        grew = true;
+      }
+    }
+  }
+  out.delete(step);
+  return [...out];
+}
+
+/** 上游改过的提示（20.4"过期"）：「更新这几步」按新的上游重写（锁住的保留），「不用了」接受现状。 */
+function StaleBanner({ world, onUpdate, onDismiss }: { world: WorldDetail; onUpdate: () => void; onDismiss: () => void }) {
+  const changed = [...new Set(world.stale.flatMap((x) => x.changed))].map((k) => INPUT_NAMES[k]);
+  return (
+    <Card className="flex items-center gap-3 border-warn/30 p-3 text-sm" data-testid="stale-banner">
+      <span className="flex-1 leading-relaxed text-muted">
+        <span className="text-fg">{changed.join('、')}</span>改过了，{world.stale.map((x) => stepName(x.step)).join('、')}还是按改之前写的。世界照样能玩。
+      </span>
+      <Button size="sm" variant="ghost" onClick={onDismiss} data-testid="stale-dismiss">
+        不用了
+      </Button>
+      <Button size="sm" variant="primary" onClick={onUpdate} title="按新的内容重写这几步，锁住的留下" data-testid="stale-update">
+        更新这几步
+      </Button>
+    </Card>
+  );
+}
+
+/** 重抽一整步时说明哪些会留下（20.4 的表）。 */
+function StepRerollText({ world, step }: { world: WorldDetail; step: GenesisStepId }) {
+  const count = (list: { _meta: { locked: string[] } }[]) => {
+    const kept = list.filter((x) => x._meta.locked.length);
+    return { kept: kept.length, full: kept.filter((x) => x._meta.locked.includes('*')).length };
+  };
+  let keep = '';
+  switch (step) {
+    case 'brief': {
+      const n = (world.brief?._meta.locked.length ?? 0) + (world.style?._meta.locked.length ?? 0) + world.manifest.locked.filter((x) => x === 'title' || x === 'logline').length;
+      keep = n ? `简报和风格里锁住的 ${n} 项原样留下。` : '';
+      break;
+    }
+    case 'worldview':
+      keep = world.manifest.locked.includes('worldview') ? '世界观整篇锁着，不会重写。' : '';
+      break;
+    case 'cast':
+    case 'locations':
+    case 'lore': {
+      const list = step === 'cast' ? world.characters : step === 'locations' ? world.locations : world.lore;
+      const noun = step === 'cast' ? '角色' : step === 'locations' ? '地点' : '设定';
+      const c = count(list);
+      keep = c.kept
+        ? `有锁的 ${c.kept} 个${noun}留下，id 不变${c.full ? `（整个锁住的 ${c.full} 个原样不动）` : ''}；其余的换成新的。`
+        : `没有锁住的${noun}，全部换成新的。想留下哪个，先在${noun}那一页点它的锁。`;
+      break;
+    }
+    case 'plot':
+      keep = world.graph?._meta.locked.includes('*')
+        ? '剧情图整张锁着，不会重写。'
+        : world.manifest.locked.includes('variables')
+          ? '数值表锁着，新的剧情图只用这些数值。'
+          : '';
+      break;
+    case 'opening':
+      keep = world.opening?._meta.locked.length ? `开场里锁住的 ${world.opening._meta.locked.length} 项原样留下。` : '';
+      break;
+  }
+  return (
+    <>
+      重新生成这一步，可以附一句要求。{keep}换下来的内容进历史版本，不满意可以退回去。
+    </>
   );
 }
