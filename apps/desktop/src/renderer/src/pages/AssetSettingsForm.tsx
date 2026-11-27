@@ -44,6 +44,7 @@ type Key =
   | 'templates.expression'
   | 'transparency'
   | 'keyColor'
+  | 'checkFraming'
   | 'spriteProtagonist'
   | 'spriteSets.main'
   | 'spriteSets.other'
@@ -502,6 +503,12 @@ export function AssetSettingsForm({
             <option value="white">白色</option>
             <option value="green">绿色</option>
           </Select>,
+        )}
+        {row(
+          'checkFraming',
+          '检查构图',
+          '基础立绘要是膝盖以上的半身像，一个世界的立绘在舞台上才一样大。画成全身像或者只画了上半身时换一张再画一次（多花一张），第二张还不对就先用第一张，在素材页标"要看一下"。改了模板里的构图时关掉。',
+          toggle('checkFraming', '检查基础立绘的构图', 'asset-toggle-framing'),
         )}
         {row(
           'expressions',

@@ -41,21 +41,31 @@ export function mockImage(prompt: string, width: number, height: number): Buffer
  * 脸上按表情画一道不同颜色的"嘴"，一眼能看出是不同的差分。
  * backdrop：white / green 纯色底；transparent 透明底（模拟支持透明输出的服务）；noisy 杂乱的底（抠图检查不通过）。
  */
-export function mockSprite(prompt: string, width: number, height: number, backdrop: 'white' | 'green' | 'transparent' | 'noisy', mouth = ''): Buffer {
+export function mockSprite(
+  prompt: string,
+  width: number,
+  height: number,
+  backdrop: 'white' | 'green' | 'transparent' | 'noisy',
+  mouth = '',
+  /** 构图：knee 膝上半身（画到底边），full 全身像（又细又长，脚下留空），bust 只画了上半身（悬在画面中间）。 */
+  framing: 'knee' | 'full' | 'bust' = 'knee',
+): Buffer {
   const [r, g, b] = colorOf(prompt.replace(/表情.*$/m, ''));
   const [mr, mg, mb] = colorOf(mouth || 'neutral');
   const cx = width / 2;
-  const headY = height * 0.26;
-  const headR = Math.min(width, height) * 0.16;
+  const shape = { knee: { head: 0.26, r: 0.16, end: 1, w0: 0.18, w1: 0.14 }, full: { head: 0.1, r: 0.07, end: 0.94, w0: 0.08, w1: 0.04 }, bust: { head: 0.4, r: 0.16, end: 0.72, w0: 0.3, w1: 0.1 } }[framing];
+  const headY = height * shape.head;
+  const headR = Math.min(width, height) * shape.r;
   const bodyTop = headY + headR * 0.9;
+  const bodyEnd = height * shape.end;
   return encodePng(width, height, (x, y) => {
     const dx = x + 0.5 - cx;
     const dy = y + 0.5 - headY;
     const inHead = dx * dx + dy * dy <= headR * headR;
-    // 身子：从肩到底边越来越宽，但左右离边缘留空
-    const t = (y - bodyTop) / (height - bodyTop);
-    const half = width * (0.18 + 0.14 * Math.max(0, t));
-    const inBody = y >= bodyTop && Math.abs(dx) <= half;
+    // 身子：从肩往下越来越宽，但左右离边缘留空
+    const t = (y - bodyTop) / (bodyEnd - bodyTop);
+    const half = width * (shape.w0 + shape.w1 * Math.max(0, t));
+    const inBody = y >= bodyTop && y < bodyEnd && Math.abs(dx) <= half;
     const inMouth = inHead && Math.abs(dx) < headR * 0.4 && dy > headR * 0.3 && dy < headR * 0.55;
     if (inMouth) return [mr, mg, mb, 255];
     if (inHead || inBody) return [r, g, b, 255];

@@ -10,7 +10,7 @@ import { encodePng, type MockServer, type MockServerOptions, mockMusic, mockSpri
 import { AssetIndex, AssetSettings, BgmSettings, ComfySettings, CUSTOM_API_PRESETS, type CustomApi } from '@auto-adv/schema';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type AssetsView, createPortPair, Engine, type EngineContract, MemorySecretStore, RpcClient, serveRpc } from '../src/index.ts';
-import { checkAlpha, hasTransparentBackdrop, keyOut } from '../src/assets/cutout.ts';
+import { anchorBottom, checkAlpha, checkFraming, figureBox, hasTransparentBackdrop, keyOut } from '../src/assets/cutout.ts';
 import { type PlannedSlot, planAssets, priorityOf } from '../src/assets/plan.ts';
 import { BUILTIN_TEMPLATES, DEFAULT_ART_STYLE, renderTemplate } from '../src/assets/templates.ts';
 import { WorldStore } from '../src/world/store.ts';
@@ -529,6 +529,26 @@ describe('内置抠图和透明度检查', () => {
     expect(checkAlpha(holed).ok).toBe(true);
     expect(checkAlpha(holed, { holes: true }).reason).toBe('人物身上有大块透明的洞');
   });
+
+  it('构图：膝上半身画到底边算对；全身像、只画了上半身不对；没画到底边的挪到底边', () => {
+    const cut = (framing: 'knee' | 'full' | 'bust') => keyOut(rgba(mockSprite('角色立绘', 64, 96, 'white', '', framing)));
+    expect(checkFraming(cut('knee'))).toBeNull();
+    expect(checkFraming(cut('full'))).toMatch(/^画成了全身像/);
+    expect(checkFraming(cut('bust'))).toMatch(/^只画了上半身/);
+    // 真图量出来的几种（宽 x 高、人物外框）：H3 画的膝上半身两张、全身像、悬在半空的上半身
+    const box = (w: number, h: number, l: number, t: number, r: number, b: number) =>
+      rgba(encodePng(w, h, (x, y) => (x >= l && x <= r && y >= t && y <= b ? [10, 10, 10, 255] : [0, 0, 0, 0])));
+    expect(checkFraming(box(1024 / 8, 1536 / 8, 26, 19, 104, 191))).toBeNull(); // 高宽比 2.2，碰到底边
+    expect(checkFraming(box(1024 / 8, 1536 / 8, 20, 20, 108, 191))).toBeNull(); // 1.95，拄着拐杖
+    expect(checkFraming(box(1024 / 8, 1536 / 8, 39, 12, 89, 183))).toMatch(/^画成了全身像/); // 3.4，脚下留了 4%
+    expect(checkFraming(box(1024 / 8, 1536 / 8, 22, 44, 106, 144))).toMatch(/^只画了上半身/); // 1.2，上下都空
+    // 挪到底边：外框不变，底下没有空白
+    const floating = box(40, 60, 10, 10, 30, 40);
+    const moved = anchorBottom(floating);
+    expect(figureBox(moved)).toEqual({ top: 29, bottom: 59, left: 10, right: 30 });
+    const knee = cut('knee');
+    expect(anchorBottom(knee)).toBe(knee);
+  });
 });
 
 describe('立绘的素材清单', () => {
@@ -591,8 +611,9 @@ describe('立绘的素材清单', () => {
     expect(pr('sprite/char_lin/neutral', focus)).toBe(1);
     expect(pr('sprite/char_zhou/neutral', focus)).toBe(2); // sc_01 → sc_02 有老周
     expect(pr('sprite/char_lin/smile', focus)).toBe(3);
-    expect(pr('sprite/char_zhou/smile', focus)).toBe(4);
+    // 其余角色的基础立绘排在其余表情前面：开场写好之前，每个人先有一张
     expect(pr('sprite/char_01/neutral', focus)).toBe(4);
+    expect(pr('sprite/char_zhou/smile', focus)).toBe(5);
     // 没在玩：开场没写在场角色，就按起始幕的出场角色
     expect(pr('sprite/char_lin/neutral', null)).toBe(1);
   });
@@ -705,6 +726,50 @@ describe('立绘管线', () => {
     expect(slot(v, 'sprite/char_lin/neutral').review).toBeNull();
     const index = AssetIndex.parse(JSON.parse(await readFile(path.join(dir, 'worlds', id, 'assets', 'index.json'), 'utf8')));
     expect(index.generated).toBe(4); // 老周画了两张
+  });
+
+  it('构图不对（全身像、只画了上半身）：换一张再画一次，提示词里再强调构图；第二张对了就用第二张', async () => {
+    const id = await setup({
+      sprites: true,
+      mock: { spriteFraming: { if: '花白短发', framing: 'full', times: 1 } },
+      assets: { enabled: { background: false, expression: false } as AssetSettings['enabled'] },
+    });
+    const v = await idle(id);
+    const zhou = slot(v, 'sprite/char_zhou/neutral');
+    expect(zhou).toMatchObject({ status: 'done', review: null });
+    const tries = server.imageRequests.filter((r) => String(r.prompt).includes('花白短发'));
+    expect(tries).toHaveLength(2);
+    expect(String(tries[0]?.prompt)).not.toContain('构图一定要是膝盖以上的半身像');
+    expect(String(tries[1]?.prompt)).toContain('构图一定要是膝盖以上的半身像');
+    expect(checkFraming(rgba(await assetFile(id, zhou.file ?? '')))).toBeNull();
+    expect(slot(v, 'sprite/char_lin/neutral').review).toBeNull();
+  });
+
+  it('构图两次都不对：用第一张（挪到底边），标"要看一下"；表情差分照样画；关掉检查就不重画', async () => {
+    let id = await setup({
+      sprites: true,
+      mock: { spriteFraming: { if: '花白短发', framing: 'bust' } },
+      assets: { enabled: { background: false } as AssetSettings['enabled'], spriteProtagonist: false },
+    });
+    let v = await idle(id);
+    const zhou = slot(v, 'sprite/char_zhou/neutral');
+    expect(zhou.status).toBe('done');
+    expect(zhou.review).toMatch(/^只画了上半身/);
+    expect(server.imageRequests.filter((r) => !r.edit && String(r.prompt).includes('花白短发'))).toHaveLength(2);
+    // 抠好的图挪到了底边，原图不动
+    const cut = rgba(await assetFile(id, zhou.file ?? ''));
+    expect(figureBox(cut)?.bottom).toBe(cut.height - 1);
+    expect(slot(v, 'sprite/char_zhou/smile').status).toBe('done');
+    expect(figureBox(rgba(await assetFile(id, slot(v, 'sprite/char_zhou/smile').file ?? '')))?.bottom).toBe(cut.height - 1);
+
+    id = await setup({
+      sprites: true,
+      mock: { spriteFraming: { if: '花白短发', framing: 'bust' } },
+      assets: { enabled: { background: false, expression: false } as AssetSettings['enabled'], spriteProtagonist: false, checkFraming: false },
+    });
+    v = await idle(id);
+    expect(slot(v, 'sprite/char_zhou/neutral').review).toBeNull();
+    expect(server.imageRequests.filter((r) => String(r.prompt).includes('花白短发'))).toHaveLength(1);
   });
 
   it('重抽基础立绘：表情差分自动跟着重画；换成自己的图也一样；锁定的表情只提示上游改过', async () => {

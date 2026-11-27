@@ -42,7 +42,7 @@ import {
   resolveBgm,
   scanLibrary,
 } from './bgm.ts';
-import { checkAlpha, hasTransparentBackdrop, keyOut } from './cutout.ts';
+import { anchorBottom, checkAlpha, checkFraming, hasTransparentBackdrop, keyOut } from './cutout.ts';
 import { type AssetFocus, inputHashOf, type PlannedSlot, planAssets, priorityOf, slotState, wantsWork } from './plan.ts';
 
 export type { AssetFocus } from './plan.ts';
@@ -79,6 +79,8 @@ interface WorldAssets {
 }
 
 const MAX_HISTORY = 10;
+/** 基础立绘构图不对、重画一次时补在提示词后面的话（19.8）。 */
+const FRAMING_HINT = '\n构图一定要是膝盖以上的半身像：从头顶画到膝盖，膝盖以下出画；不要画成全身像，也不要只画到腰。';
 const UPLOAD_LIMIT = 30 * 1024 * 1024;
 const AUDIO_UPLOAD_LIMIT = 200 * 1024 * 1024;
 /** 一次最多让文本模型挑多少个文件名。 */
@@ -645,31 +647,42 @@ export class AssetService {
       return;
     }
 
-    // 立绘：抠图 → 检查透明度，不合格换一张再试一次，还不合格先用没抠的原图，标成"需要看一下"（18.5）
+    // 立绘：抠图 → 检查透明度，不合格换一张再试一次，还不合格先用没抠的原图，标成"需要看一下"（18.5）。
+    // 基础立绘抠好以后再看构图（19.8）：画成全身像或者只画了上半身，也换一张再试一次，第二张对了才换
+    const framing = (c: { image: RgbaImage | null; reason: string | null }) =>
+      c.image && !c.reason && slot.params.mode !== 'edit' && w.settings.checkFraming ? checkFraming(c.image) : null;
     let cut = await this.cutout(slot, r, signal);
-    if (cut.reason && cut.retry && !signal.aborted) {
-      const again = await this.call(w, h, slot, reference, signal);
+    let badFrame = framing(cut);
+    if (((cut.reason && cut.retry) || badFrame) && !signal.aborted) {
+      const again = await this.call(w, h, slot, reference, signal, badFrame ? FRAMING_HINT : '');
       if (!again) return;
       if (!('error' in again)) {
         count += 1;
-        r = again;
-        cut = await this.cutout(slot, r, signal);
+        const cut2 = await this.cutout(slot, again, signal);
+        const bad2 = framing(cut2);
+        if (cut.reason || (!cut2.reason && !bad2)) {
+          r = again;
+          cut = cut2;
+          badFrame = bad2;
+        }
       }
     }
     if (signal.aborted) return;
+    const review = badFrame ?? undefined;
     if (cut.image && !cut.reason && cut.native) {
-      // 服务直接给了透明图：原图就是成品
+      // 服务直接给了透明图：原图就是成品（人物没画到底边时挪到底边）
       const rel = `${base}.png`;
-      await writeFileAtomic(this.store.assetPath(w.id, rel), r.data);
-      if (!signal.aborted) await this.commit(w, slot, input, { file: rel, generated: meta() });
+      const anchored = anchorBottom(cut.image);
+      await writeFileAtomic(this.store.assetPath(w.id, rel), anchored === cut.image ? r.data : encodeRgbaPng(anchored));
+      if (!signal.aborted) await this.commit(w, slot, input, { file: rel, review, generated: meta() });
       return;
     }
     const raw = `${base}.raw.${IMAGE_EXT[r.mime] ?? 'png'}`;
     await writeFileAtomic(this.store.assetPath(w.id, raw), r.data);
     if (cut.image && !cut.reason) {
       const rel = `${base}.png`;
-      await writeFileAtomic(this.store.assetPath(w.id, rel), encodeRgbaPng(cut.image));
-      if (!signal.aborted) await this.commit(w, slot, input, { file: rel, rawFile: raw, generated: meta() });
+      await writeFileAtomic(this.store.assetPath(w.id, rel), encodeRgbaPng(anchorBottom(cut.image)));
+      if (!signal.aborted) await this.commit(w, slot, input, { file: rel, rawFile: raw, review, generated: meta() });
     } else if (!signal.aborted) {
       await this.commit(w, slot, input, { file: raw, rawFile: raw, review: cut.reason ?? '抠图失败', generated: meta() });
     }
@@ -710,9 +723,11 @@ export class AssetService {
     slot: PlannedSlot,
     reference: { data: Uint8Array; mime: string } | undefined,
     signal: AbortSignal,
+    /** 重画时补在提示词后面的话（构图不对时再强调一遍）。 */
+    extra = '',
   ): Promise<ImageResult | { error: string } | null> {
     const transparent = slot.params.transparency === 'auto' || slot.params.transparency === 'native';
-    const req = { model: h.model, prompt: slot.params.prompt, size: slot.params.size, transparent };
+    const req = { model: h.model, prompt: slot.params.prompt + extra, size: slot.params.size, transparent };
     return this.withRetries(w, signal, (sig) => (reference ? h.client.edit({ ...req, image: reference }, sig) : h.client.generate(req, sig)));
   }
 
