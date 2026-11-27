@@ -46,6 +46,75 @@ export function assertWorldId(id: string): void {
 
 const json = (v: unknown) => `${JSON.stringify(v, null, 2)}\n`;
 
+/** 一块内容的键（20.5）：`brief`、`style`、`worldview`、`variables`、`opening`、`plot`、`character:<id>`、`location:<id>`、`lore:<id>`。 */
+export type WorldPartKey =
+  | 'brief'
+  | 'style'
+  | 'worldview'
+  | 'variables'
+  | 'opening'
+  | 'plot'
+  | `character:${string}`
+  | `location:${string}`
+  | `lore:${string}`;
+
+/** 历史版本是为什么留下的：你改之前、重新生成之前、删掉之前。 */
+export type HistoryReason = 'edit' | 'genesis' | 'delete';
+export const HISTORY_REASONS: readonly HistoryReason[] = ['edit', 'genesis', 'delete'];
+
+export interface HistoryEntry {
+  /** 历史文件名，读取时原样传回来。 */
+  name: string;
+  /** 被替换下来的时间。 */
+  at: string;
+  reason: HistoryReason;
+}
+
+/** 内容键对应的文件（相对世界目录）。 */
+export function partFile(key: WorldPartKey): string {
+  const [kind, id] = key.split(':') as [string, string | undefined];
+  if (id !== undefined && !/^[a-z][a-z0-9_]*$/.test(id)) throw new Error('id 不合法');
+  switch (kind) {
+    case 'brief':
+      return 'brief.json';
+    case 'style':
+      return 'style/style.json';
+    case 'worldview':
+      return 'setting/worldview.md';
+    case 'variables':
+      return 'systems/variables.json';
+    case 'opening':
+      return 'story/opening.json';
+    case 'plot':
+      return 'plot/outline.json';
+    case 'character':
+      return `characters/${id}/character.json`;
+    case 'location':
+      return `locations/${id}.json`;
+    case 'lore':
+      return `setting/lore/${id}.json`;
+  }
+  throw new Error(`不认识的内容：${key}`);
+}
+
+const ENTITY_DIRS = { character: 'characters', location: 'locations', lore: 'setting/lore' } as const;
+const HISTORY_DIR = '.history';
+const HISTORY_NAME = /^(\d{8}T\d{9}Z)(?:_(\d+))?-(edit|genesis|delete)\.(json|md)$/;
+
+function stamp(d: Date): string {
+  return d.toISOString().replace(/[-:.]/g, '');
+}
+
+function stampTime(s: string): string {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(\d{3})Z$/.exec(s);
+  return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}.${m[7]}Z` : s;
+}
+
+export interface WorldStoreOptions {
+  /** 每个文件留几个历史版本（20.5），不给就是 20；0 不留。 */
+  historyLimit?: () => number;
+}
+
 /**
  * 世界文件夹读写。一个世界 = <root>/<id>/ 下的一组 JSON / Markdown 文件，格式见 docs/ARCHITECTURE.md 5.2。
  * 同一个世界的写操作串行执行，避免创世时并行的步骤互相覆盖清单。
@@ -53,9 +122,11 @@ const json = (v: unknown) => `${JSON.stringify(v, null, 2)}\n`;
 export class WorldStore {
   readonly root: string;
   private readonly queues = new Map<string, SerialQueue>();
+  private readonly historyLimit: () => number;
 
-  constructor(root: string) {
+  constructor(root: string, opts: WorldStoreOptions = {}) {
     this.root = root;
+    this.historyLimit = opts.historyLimit ?? (() => 20);
   }
 
   dir(id: string): string {
@@ -240,42 +311,117 @@ export class WorldStore {
     }
   }
 
-  writeBrief(id: string, brief: WorldBrief) {
-    return writeFileAtomic(this.file(id, 'brief.json'), json(WorldBrief.parse(brief)));
+  // ───────────── 写入和历史版本（20.5） ─────────────
+
+  /** 写一个内容文件；原来有、而且内容不一样时，先把原来的存进历史。 */
+  private async put(id: string, rel: string, content: string, reason: HistoryReason): Promise<void> {
+    await this.snapshot(id, rel, reason, content);
+    await writeFileAtomic(path.join(this.dir(id), rel), content);
   }
 
-  writeStyle(id: string, style: StyleGuide) {
-    return writeFileAtomic(this.file(id, 'style', 'style.json'), json(StyleGuide.parse(style)));
+  /** 把现在的文件存进 .history/<相对路径>/；next 和现在一样时不存。 */
+  private async snapshot(id: string, rel: string, reason: HistoryReason, next?: string): Promise<void> {
+    const limit = this.historyLimit();
+    if (limit <= 0) return;
+    let old: string;
+    try {
+      old = await fs.readFile(path.join(this.dir(id), rel), 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw err;
+    }
+    if (next !== undefined && old === next) return;
+    const dir = path.join(this.dir(id), HISTORY_DIR, rel);
+    await fs.mkdir(dir, { recursive: true });
+    const ext = rel.endsWith('.md') ? 'md' : 'json';
+    const base = stamp(new Date());
+    const taken = new Set(await fs.readdir(dir));
+    let name = `${base}-${reason}.${ext}`;
+    for (let i = 2; taken.has(name); i++) name = `${base}_${i}-${reason}.${ext}`;
+    await writeFileAtomic(path.join(dir, name), old);
+    const all = (await fs.readdir(dir)).filter((n) => HISTORY_NAME.test(n)).sort();
+    for (const n of all.slice(0, Math.max(0, all.length - limit))) await fs.rm(path.join(dir, n), { force: true });
   }
 
-  writeWorldview(id: string, text: string) {
-    return writeFileAtomic(this.file(id, 'setting', 'worldview.md'), text.endsWith('\n') ? text : `${text}\n`);
+  /** 一块内容的历史版本，新的在前。 */
+  async listHistory(id: string, key: WorldPartKey): Promise<HistoryEntry[]> {
+    const dir = path.join(this.dir(id), HISTORY_DIR, partFile(key));
+    let names: string[];
+    try {
+      names = await fs.readdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw err;
+    }
+    return names
+      .flatMap((name) => {
+        const m = HISTORY_NAME.exec(name);
+        return m ? [{ name, at: stampTime(m[1] as string), reason: m[3] as HistoryReason }] : [];
+      })
+      .sort((a, b) => b.name.localeCompare(a.name));
   }
 
-  writePlot(id: string, graph: PlotGraph) {
-    return writeFileAtomic(this.file(id, 'plot', 'outline.json'), json(PlotGraph.parse(graph)));
+  /** 读一个历史版本的原文。 */
+  async readHistory(id: string, key: WorldPartKey, name: string): Promise<string> {
+    if (!HISTORY_NAME.test(name)) throw new Error('历史版本的文件名不合法');
+    return fs.readFile(path.join(this.dir(id), HISTORY_DIR, partFile(key), name), 'utf8');
   }
 
-  writeVariables(id: string, variables: VariableDef[]) {
-    return writeFileAtomic(this.file(id, 'systems', 'variables.json'), json(VariablesFile.parse({ variables })));
+  writeBrief(id: string, brief: WorldBrief, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile('brief'), json(WorldBrief.parse(brief)), reason);
   }
 
-  writeOpening(id: string, opening: StoryOpening) {
-    return writeFileAtomic(this.file(id, 'story', 'opening.json'), json(StoryOpening.parse(opening)));
+  writeStyle(id: string, style: StyleGuide, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile('style'), json(StyleGuide.parse(style)), reason);
   }
 
-  /** 整体替换某一类实体：先删旧目录再逐个写入。 */
+  writeWorldview(id: string, text: string, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile('worldview'), text.endsWith('\n') ? text : `${text}\n`, reason);
+  }
+
+  writePlot(id: string, graph: PlotGraph, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile('plot'), json(PlotGraph.parse(graph)), reason);
+  }
+
+  writeVariables(id: string, variables: VariableDef[], reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile('variables'), json(VariablesFile.parse({ variables })), reason);
+  }
+
+  writeOpening(id: string, opening: StoryOpening, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile('opening'), json(StoryOpening.parse(opening)), reason);
+  }
+
+  /** 整体替换某一类实体（重新生成这一步）：要去掉的、内容变了的先存进历史，再删旧目录逐个写入。 */
   private async replaceAll<T extends { id: string }>(
-    dir: string,
+    id: string,
+    kind: 'character' | 'location' | 'lore',
     items: T[],
     schema: z.ZodType<T>,
-    fileName?: string,
   ): Promise<void> {
-    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5 });
-    for (const item of items) {
-      const file = fileName ? path.join(dir, item.id, fileName) : path.join(dir, `${item.id}.json`);
-      await writeFileAtomic(file, json(schema.parse(item)));
+    const dir = path.join(this.dir(id), ENTITY_DIRS[kind]);
+    const next = new Map(items.map((item) => [partFile(`${kind}:${item.id}`), json(schema.parse(item))]));
+    let existing: string[] = [];
+    try {
+      existing = await fs.readdir(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     }
+    for (const name of existing) {
+      const eid = name.replace(/\.json$/, '');
+      if (!/^[a-z][a-z0-9_]*$/.test(eid)) continue;
+      const rel = partFile(`${kind}:${eid}`);
+      await this.snapshot(id, rel, next.has(rel) ? 'genesis' : 'delete', next.get(rel));
+    }
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5 });
+    for (const [rel, content] of next) await writeFileAtomic(path.join(this.dir(id), rel), content);
+  }
+
+  /** 删掉一个角色、地点或设定条目（先存进历史）。 */
+  async deleteEntity(id: string, key: `character:${string}` | `location:${string}` | `lore:${string}`): Promise<void> {
+    const rel = partFile(key);
+    await this.snapshot(id, rel, 'delete');
+    const target = key.startsWith('character:') ? path.dirname(rel) : rel;
+    await fs.rm(path.join(this.dir(id), target), { recursive: true, force: true, maxRetries: 5 });
   }
 
   // ───────────── 素材（18.2） ─────────────
@@ -318,19 +464,27 @@ export class WorldStore {
   }
 
   writeCharacters(id: string, items: Character[]) {
-    return this.replaceAll(this.file(id, 'characters'), items, Character, 'character.json');
+    return this.replaceAll(id, 'character', items, Character);
   }
 
   /** 新建或改写一个角色（只动这个角色的文件）。 */
-  writeCharacter(id: string, c: Character) {
-    return writeFileAtomic(this.file(id, 'characters', c.id, 'character.json'), json(Character.parse(c)));
+  writeCharacter(id: string, c: Character, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile(`character:${c.id}`), json(Character.parse(c)), reason);
   }
 
   writeLocations(id: string, items: Location[]) {
-    return this.replaceAll(this.file(id, 'locations'), items, Location);
+    return this.replaceAll(id, 'location', items, Location);
+  }
+
+  writeLocation(id: string, l: Location, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile(`location:${l.id}`), json(Location.parse(l)), reason);
   }
 
   writeLore(id: string, items: LoreEntry[]) {
-    return this.replaceAll(this.file(id, 'setting', 'lore'), items, LoreEntry);
+    return this.replaceAll(id, 'lore', items, LoreEntry);
+  }
+
+  writeLoreEntry(id: string, e: LoreEntry, reason: HistoryReason = 'genesis') {
+    return this.put(id, partFile(`lore:${e.id}`), json(LoreEntry.parse(e)), reason);
   }
 }

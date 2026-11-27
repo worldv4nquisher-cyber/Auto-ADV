@@ -73,6 +73,15 @@ export const RoleRoute = z.object({
 });
 export type RoleRoute = z.infer<typeof RoleRoute>;
 
+/** 世界编辑器的设置（20.11）。 */
+export const EditorSettings = z.object({
+  /** 手改过的字段自动锁住，之后重抽不会冲掉（20.4）。 */
+  autoLock: z.boolean().default(true),
+  /** 每个文件留几个历史版本（20.5），0 不留。 */
+  historyLimit: z.number().int().min(0).max(200).default(20),
+});
+export type EditorSettings = z.infer<typeof EditorSettings>;
+
 /** settings.json：应用设置（不含任何密钥，密钥单独加密保存）。 */
 export const AppSettings = z.object({
   formatVersion: z.number().int().default(0),
@@ -84,5 +93,7 @@ export const AppSettings = z.object({
     .prefault({}),
   /** 素材管线的全局设置（18.11）。 */
   assets: AssetSettings.prefault({}),
+  /** 世界编辑器（M5）。 */
+  editor: EditorSettings.prefault({}),
 });
 export type AppSettings = z.infer<typeof AppSettings>;

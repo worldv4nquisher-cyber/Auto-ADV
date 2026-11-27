@@ -1,6 +1,6 @@
 import type { PlaythroughInfo, PlotCheckResult, StartPlaythroughParams, WorldDetail } from '@auto-adv/engine/api';
-import { type Character, GENESIS_STEPS, type GenesisStepId, type ObserverSettings } from '@auto-adv/schema';
-import { useCallback, useEffect, useState } from 'react';
+import { GENESIS_STEPS, type GenesisStepId, type ObserverSettings } from '@auto-adv/schema';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Badge,
   Button,
@@ -10,7 +10,6 @@ import {
   Empty,
   Field,
   Input,
-  Markdown,
   PageHeader,
   Select,
   Spinner,
@@ -21,11 +20,34 @@ import { engine, errorMessage } from '../lib/engine.ts';
 import { formatTime, formatTokens } from '../lib/format.ts';
 import { useGenesis } from '../lib/genesis.tsx';
 import { useRouter } from '../lib/router.tsx';
-import { AssetsProvider, BgImage, useAssetsContext } from '../lib/assets.tsx';
+import { AssetsProvider, useAssetsContext } from '../lib/assets.tsx';
 import { AssetsTab } from './Assets.tsx';
 import { CollectionView } from './Collection.tsx';
+import {
+  CharactersTab,
+  EditProvider,
+  IssuesCard,
+  LocationsTab,
+  LoreTab,
+  Modal,
+  OpeningTab,
+  OverviewTab,
+  tabOfKey,
+  VariablesTab,
+  WorldviewTab,
+} from './WorldEditor.tsx';
 
-type Tab = 'overview' | 'characters' | 'locations' | 'plot' | 'collection' | 'assets' | 'lore' | 'opening';
+type Tab =
+  | 'overview'
+  | 'worldview'
+  | 'characters'
+  | 'locations'
+  | 'plot'
+  | 'variables'
+  | 'collection'
+  | 'assets'
+  | 'lore'
+  | 'opening';
 
 export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab?: Tab }) {
   const { navigate } = useRouter();
@@ -38,6 +60,18 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
   const [starting, setStarting] = useState(false);
   const [dialog, setDialog] = useState(false);
   const job = genesis.jobs[worldId];
+  // 编辑器里没保存的修改：切标签、离开前先问（20.5）
+  const dirty = useRef(new Set<string>());
+  const [leaving, setLeaving] = useState<(() => void) | null>(null);
+  const setDirty = useCallback((id: string, d: boolean) => {
+    if (d) dirty.current.add(id);
+    else dirty.current.delete(id);
+  }, []);
+  const guard = (go: () => void) => {
+    if (dirty.current.size) setLeaving(() => go);
+    else go();
+  };
+  const editCtx = useMemo(() => (world ? { world, onSaved: setWorld, setDirty } : null), [world, setDirty]);
 
   const load = useCallback(async () => {
     try {
@@ -117,7 +151,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
         subtitle={world.manifest.logline || (running ? '正在生成……' : '')}
         actions={
           <>
-            <Button variant="ghost" onClick={() => navigate({ page: 'home' })}>
+            <Button variant="ghost" onClick={() => guard(() => navigate({ page: 'home' }))}>
               返回
             </Button>
             <ConfirmButton size="md" variant="ghost" onConfirm={remove} confirmText="确认删除？" testId="delete-world">
@@ -130,52 +164,37 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
         }
       />
       <div className="flex-1 overflow-y-auto">
-        <div className="mx-auto grid max-w-6xl grid-cols-[1fr_300px] gap-6 px-8 py-6">
+        <div className="mx-auto grid max-w-6xl grid-cols-[1fr_280px] gap-6 px-8 py-6">
           <div className="min-w-0 space-y-4">
             <Tabs
               value={tab}
-              onChange={setTab}
+              onChange={(t) => guard(() => setTab(t))}
               items={[
                 { value: 'overview', label: '概览' },
+                { value: 'worldview', label: '世界观' },
                 { value: 'characters', label: `角色 ${world.characters.length || ''}` },
                 { value: 'locations', label: `地点 ${world.locations.length || ''}` },
                 { value: 'plot', label: '剧情图' },
+                { value: 'variables', label: '数值' },
                 ...(world.graph ? [{ value: 'collection' as const, label: '收集' }] : []),
                 { value: 'assets', label: <AssetsTabLabel /> },
                 { value: 'lore', label: `设定集 ${world.lore.length || ''}` },
                 { value: 'opening', label: '开场' },
               ]}
             />
-            {tab === 'overview' && <Overview world={world} />}
-            {tab === 'characters' && (
-              <div className="grid gap-3">
-                {world.characters.length === 0 && <Empty title="角色还没有生成" />}
-                {world.characters.map((c) => (
-                  <CharacterCard key={c.id} c={c} all={world.characters} />
-                ))}
-              </div>
-            )}
-            {tab === 'locations' && (
-              <div className="grid grid-cols-2 gap-3">
-                {world.locations.length === 0 && <Empty title="地点还没有生成" />}
-                {world.locations.map((l) => (
-                  <Card key={l.id} className="overflow-hidden">
-                    <div className="relative aspect-video w-full overflow-hidden bg-black" style={{ containerType: 'inline-size' }}>
-                      <BgImage id={l.id} />
-                    </div>
-                    <div className="p-4">
-                    <div className="font-medium">{l.name}</div>
-                    <p className="mt-1.5 text-sm leading-relaxed text-muted">{l.description}</p>
-                    {l.connections.length > 0 && (
-                      <div className="mt-2 text-xs text-faint">
-                        通往：
-                        {l.connections.map((id) => world.locations.find((x) => x.id === id)?.name ?? id).join('、')}
-                      </div>
-                    )}
-                    </div>
-                  </Card>
-                ))}
-              </div>
+            {editCtx && (
+              <EditProvider value={editCtx}>
+                {!world.editable && (
+                  <p className="text-xs text-faint">正在生成，生成完才能编辑。</p>
+                )}
+                {tab === 'overview' && <OverviewTab />}
+                {tab === 'worldview' && <WorldviewTab />}
+                {tab === 'characters' && <CharactersTab />}
+                {tab === 'locations' && <LocationsTab />}
+                {tab === 'variables' && <VariablesTab />}
+                {tab === 'lore' && <LoreTab />}
+                {tab === 'opening' && <OpeningTab />}
+              </EditProvider>
             )}
             {tab === 'plot' &&
               (world.graph ? (
@@ -185,49 +204,6 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
               ))}
             {tab === 'collection' && <CollectionView worldId={worldId} />}
             {tab === 'assets' && <AssetsTab worldId={worldId} />}
-            {tab === 'lore' && (
-              <div className="grid gap-2">
-                {world.lore.length === 0 && <Empty title="设定集还没有生成" />}
-                {world.lore.map((e) => (
-                  <Card key={e.id} className="p-4">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{e.title}</span>
-                      <Badge>{e.category}</Badge>
-                      {e.activation === 'always' && <Badge tone="accent">常驻</Badge>}
-                    </div>
-                    <p className="mt-1.5 text-sm leading-relaxed text-muted">{e.content}</p>
-                    {e.activation === 'keyword' && (
-                      <div className="mt-2 text-xs text-faint">触发词：{e.keys.join('、')}</div>
-                    )}
-                  </Card>
-                ))}
-              </div>
-            )}
-            {tab === 'opening' && (
-              <Card className="p-5">
-                {!world.opening ? (
-                  <Empty title="开场还没有生成" />
-                ) : (
-                  <div className="space-y-3 text-sm leading-relaxed">
-                    <div className="text-xs text-faint">
-                      地点：{world.locations.find((l) => l.id === world.opening?.locationId)?.name ?? '未指定'} · 在场：
-                      {world.opening.presentCharacterIds
-                        .map((id) => world.characters.find((c) => c.id === id)?.name ?? id)
-                        .join('、')}
-                    </div>
-                    <Markdown text={world.opening.narration} className="text-fg" />
-                    {world.opening.lines.map((l, i) => (
-                      <p key={`${l.characterId}${i}`}>
-                        <span className="font-medium text-accent-strong">
-                          {world.characters.find((c) => c.id === l.characterId)?.name}
-                        </span>
-                        ：{l.text}
-                      </p>
-                    ))}
-                  </div>
-                )}
-              </Card>
-            )}
           </div>
 
           <div className="space-y-4">
@@ -276,6 +252,7 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
               </Card>
             )}
 
+            <IssuesCard issues={world.issues} world={world} onJump={(key) => guard(() => setTab(tabOfKey(key)))} />
             {handmade && (
               <Card className="p-4 text-xs leading-relaxed text-muted">
                 这是一个手写的世界（不是一键创世生成的）。
@@ -343,6 +320,29 @@ export function WorldPage({ worldId, initialTab }: { worldId: string; initialTab
           </div>
         </div>
       </div>
+      {leaving && (
+        <Modal onClose={() => setLeaving(null)} testId="unsaved-dialog">
+          <div className="mb-2 text-base font-semibold">有没保存的修改</div>
+          <p className="text-sm text-muted">离开以后，这次改的内容就没了。</p>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button
+              variant="danger"
+              data-testid="discard-changes"
+              onClick={() => {
+                dirty.current.clear();
+                const go = leaving;
+                setLeaving(null);
+                go();
+              }}
+            >
+              不要了
+            </Button>
+            <Button variant="primary" onClick={() => setLeaving(null)}>
+              接着改
+            </Button>
+          </div>
+        </Modal>
+      )}
       {dialog && (
         <StartDialog
           hasPlot={!!world.graph}
@@ -495,89 +495,6 @@ function StepIcon({ status }: { status: string | undefined }) {
     >
       {status === 'done' ? '✓' : status === 'failed' ? '✕' : '○'}
     </span>
-  );
-}
-
-function Overview({ world }: { world: WorldDetail }) {
-  const b = world.brief;
-  return (
-    <div className="space-y-4">
-      {b && (
-        <Card className="grid grid-cols-2 gap-x-6 gap-y-3 p-5 text-sm">
-          <Info label="题材" value={b.genre} />
-          <Info label="基调" value={b.tone} />
-          <Info label="时代" value={b.era} />
-          <Info label="主题" value={b.themes.join('、')} />
-          {world.style?.prose.description && (
-            <Info label="文风" value={world.style.prose.description} className="col-span-2" />
-          )}
-        </Card>
-      )}
-      <Card className="p-5">
-        {world.worldview ? <Markdown text={world.worldview} /> : <Empty title="世界观还没有生成" />}
-      </Card>
-      {world.manifest.models.length > 0 && (
-        <p className="text-xs text-faint">生成所用模型：{world.manifest.models.join('、')}</p>
-      )}
-    </div>
-  );
-}
-
-function Info({ label, value, className }: { label: string; value: string; className?: string }) {
-  if (!value) return null;
-  return (
-    <div className={className}>
-      <div className="text-xs text-faint">{label}</div>
-      <div className="mt-0.5 leading-relaxed">{value}</div>
-    </div>
-  );
-}
-
-const ROLE_NAMES: Record<string, string> = {
-  protagonist: '主角（你）',
-  heroine: '女主角',
-  hero: '男主角',
-  rival: '对手',
-  antagonist: '反派',
-  mentor: '导师',
-  npc: '配角',
-};
-
-function CharacterCard({ c, all }: { c: Character; all: Character[] }) {
-  return (
-    <Card className="p-5">
-      <div className="flex items-center gap-2">
-        <span className="text-base font-semibold">{c.name}</span>
-        <Badge tone={c.role === 'protagonist' ? 'accent' : 'neutral'}>{ROLE_NAMES[c.role] ?? c.role}</Badge>
-        <span className="text-xs text-faint">{[c.gender, c.age].filter(Boolean).join(' · ')}</span>
-      </div>
-      {c.summary && <p className="mt-1.5 text-sm text-muted">{c.summary}</p>}
-      <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2.5 text-sm">
-        <Info label="外貌" value={c.appearance.text} />
-        <Info label="性格" value={c.personality.traits.join('、')} />
-        <Info label="说话方式" value={c.speech.style} />
-        <Info label="目标" value={c.goals.map((g) => g.text).join('；')} />
-        <Info label="经历" value={c.background} className="col-span-2" />
-        {c.speech.examples.length > 0 && (
-          <Info label="台词" value={c.speech.examples.map((e) => `「${e}」`).join(' ')} className="col-span-2" />
-        )}
-        {c.relationships.length > 0 && (
-          <Info
-            label="关系"
-            value={c.relationships
-              .map((r) => `${all.find((x) => x.id === r.to)?.name ?? r.to}：${r.type}`)
-              .join('；')}
-            className="col-span-2"
-          />
-        )}
-        {c.secrets.length > 0 && (
-          <details className="col-span-2 text-sm">
-            <summary className="cursor-pointer text-xs text-faint select-none">秘密（剧透）</summary>
-            <p className="mt-1 text-muted">{c.secrets.map((s) => s.text).join('；')}</p>
-          </details>
-        )}
-      </div>
-    </Card>
   );
 }
 

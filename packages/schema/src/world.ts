@@ -32,6 +32,11 @@ export const WorldManifest = z.object({
     .default({ seed: '', options: {}, steps: {} }),
   /** 生成过程中用到的模型，仅作记录。 */
   models: z.array(z.string()).default([]),
+  /**
+   * 不带 `_meta` 的几块内容的锁（20.4）：`title`、`logline`（世界名、一句话简介）、`worldview`（世界观正文）、
+   * `variables`（数值表）。重抽时锁住的不覆盖。
+   */
+  locked: z.array(z.string()).default([]),
 });
 export type WorldManifest = z.infer<typeof WorldManifest>;
 

@@ -10,7 +10,8 @@
  *   → 剧情 ADV 舞台上换成真背景（M4 第 1 步）
  *   → 每个角色的基础立绘和表情差分画好、抠成透明 → 给一个角色多加一个表情 → 舞台上换成真立绘（M4 第 2 步）
  *   → BGM：内置曲库、音乐模型、本地曲库（M4 第 3 步）→ 图像职责改成自定义接口
- *   → 配音：语音职责、拉取音色表 → 素材页的配音表（试听、换音色锁定、重新分配）→ 舞台上念台词、回想里重播、缓存（M4 第 4 步）。
+ *   → 配音：语音职责、拉取音色表 → 素材页的配音表（试听、换音色锁定、重新分配）→ 舞台上念台词、回想里重播、缓存（M4 第 4 步）
+ * → 世界编辑器：改角色（自动加锁）、没保存先问、历史版本、加角色、删地点连引用、关掉自动锁、JSON 视图（M5 第 1 步）。
  *
  * 用法：先 `pnpm build`，再 `pnpm e2e`。Linux 无显示环境用 `xvfb-run -a pnpm e2e`。
  * 设置 E2E_SCREENSHOTS=目录 可以保存各步骤截图。
@@ -991,6 +992,79 @@ try {
   await page.locator('[data-testid="asset-slot"][data-slot="sprite/char_lin/smile"]').scrollIntoViewIfNeeded();
   await shot(page, '43-assets-comfy');
   step('素材页重抽背景和表情差分都走 ComfyUI：背景用文生图工作流，表情差分上传基础立绘后用改图工作流');
+
+  // ── M5 第 1 步：世界编辑器（还在「旧书库的约定」）
+  const libDir = path.join(dataDir, 'worlds', 'old_library');
+  const libJson = async (rel: string) => JSON.parse(await readFile(path.join(libDir, rel), 'utf8'));
+  await page.click('[data-testid="tab-characters"]');
+  const linForm = '[data-testid="editing-character:char_lin"]';
+  await page.hover('[data-panel="character:char_lin"]');
+  await page.click('[data-testid="edit-character:char_lin"]');
+  await page.fill(`${linForm} [data-testid="field-summary"]`, '在旧书库里找一本不存在的书。');
+  // 改过的字段旁边的锁：保存时会自动锁上
+  assert.equal(await page.getAttribute(`${linForm} [data-testid="lock-summary"]`, 'data-state'), 'pending');
+  await shot(page, '44-editor-character');
+  // 没保存就切标签：先问
+  await page.click('[data-testid="tab-locations"]');
+  await page.waitForSelector('[data-testid="unsaved-dialog"]');
+  await page.click('[data-testid="unsaved-dialog"] >> text=接着改');
+  await page.click(`${linForm} [data-testid="save-edit"]`);
+  await page.waitForSelector('[data-panel="character:char_lin"] >> text=在旧书库里找一本不存在的书。');
+  assert.deepEqual((await libJson('characters/char_lin/character.json'))._meta.locked, ['summary']);
+  await page.hover('[data-panel="character:char_lin"]');
+  await page.click('[data-testid="history-character:char_lin"]');
+  await page.click('[data-testid="history-item"] >> nth=0');
+  await page.waitForSelector('[data-testid="history-dialog"] pre');
+  await shot(page, '45-editor-history');
+  await page.click('[data-testid="history-dialog"] >> text=关闭');
+  step('世界编辑器：改角色的简介，改过的字段自动锁住；没保存就切标签先问；历史里有改之前的版本');
+
+  // 加一个角色：分配 id，填了的字段锁住，素材页里马上有他的立绘槽
+  await page.click('[data-testid="add-character"]');
+  const newForm = '[data-testid="editing-character-new"]';
+  await page.fill(`${newForm} [data-testid="field-name"]`, '守夜人');
+  await page.fill(`${newForm} [data-testid="field-summary"]`, '夜里看管旧书库的人');
+  await page.click(`${newForm} [data-testid="save-edit"]`);
+  await page.waitForSelector('[data-panel="character:char_02"] >> text=守夜人');
+  assert.deepEqual((await libJson('characters/char_02/character.json'))._meta.locked, ['name', 'summary']);
+  await page.click('[data-testid="tab-assets"]');
+  await page.waitForSelector('[data-testid="asset-character"][data-character="char_02"]');
+  step('加一个角色「守夜人」：写进世界，素材页里有了他的立绘');
+
+  // 删一个地点：先列出用到它的地方（剧情图的幕），一起去掉
+  await page.click('[data-testid="tab-locations"]');
+  await page.hover('[data-panel="location:loc_seaside"]');
+  await page.click('[data-testid="edit-location:loc_seaside"]');
+  await page.click('[data-testid="editing-location:loc_seaside"] [data-testid="delete-entity"]');
+  await page.waitForSelector('[data-testid="delete-dialog"] >> text=剧情图');
+  await shot(page, '46-editor-delete');
+  await page.click('[data-testid="delete-confirm"]');
+  await page.waitForSelector('text=已删除「海堤」');
+  const outlineAfter = (await libJson('plot/outline.json')) as { scenes: { location?: string }[] };
+  assert.ok(!outlineAfter.scenes.some((x) => x.location === 'loc_seaside'), '剧情图里不该再有海堤');
+  assert.equal((await readdir(path.join(libDir, '.history', 'locations', 'loc_seaside.json'))).length, 1);
+  step('删掉地点「海堤」：列出剧情图里用到它的幕，一起去掉；删掉的文件留在历史里');
+
+  // 设置里关掉自动锁；在 JSON 里改世界的简介，保存后不加锁
+  await page.click('[data-nav="settings"]');
+  await page.click('[data-testid="tab-editor"]');
+  await page.uncheck('[data-testid="editor-autolock"]');
+  await page.click('[data-testid="editor-settings-save"]');
+  await page.waitForSelector('text=已保存编辑器设置');
+  assert.equal(JSON.parse(await readFile(path.join(dataDir, 'settings.json'), 'utf8')).editor.autoLock, false);
+  await page.click('[data-nav="home"]');
+  await page.click('[data-testid="world-card"] >> text=旧书库的约定');
+  await page.hover('[data-panel="manifest"]');
+  await page.click('[data-testid="edit-manifest"]');
+  await page.click('[data-testid="toggle-json"]');
+  const manifestJson = JSON.parse(await page.inputValue('[data-testid="json-editor"]')) as Record<string, unknown>;
+  await page.fill('[data-testid="json-editor"]', JSON.stringify({ ...manifestJson, logline: '改过的简介' }, null, 2));
+  await page.click('[data-testid="save-edit"]');
+  await page.waitForSelector('[data-panel="manifest"] >> text=改过的简介');
+  const libManifest = await libJson('world.json');
+  assert.equal(libManifest.logline, '改过的简介');
+  assert.deepEqual(libManifest.locked, []);
+  step('设置里关掉自动锁；在 JSON 里改世界的简介，保存后不加锁');
 
   console.log('✓ 端到端冒烟测试通过');
 } finally {

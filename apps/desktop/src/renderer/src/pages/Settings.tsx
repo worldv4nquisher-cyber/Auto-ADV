@@ -7,6 +7,7 @@ import {
   comfyUsesModel,
   type CustomApi,
   DEFAULT_MOODS,
+  type EditorSettings,
   MEDIA_ROLE_APIS,
   MEDIA_ROLE_LABELS,
   type MediaRoleId,
@@ -25,7 +26,7 @@ import { AssetSettingsForm } from './AssetSettingsForm.tsx';
 import { ComfyEditor } from './ComfyEditor.tsx';
 import { CustomApiEditor, defaultCustomApi } from './CustomApiEditor.tsx';
 
-type Tab = 'endpoints' | 'roles' | 'assets' | 'about';
+type Tab = 'endpoints' | 'roles' | 'assets' | 'editor' | 'about';
 
 export function SettingsPage() {
   const [tab, setTab] = useState<Tab>('endpoints');
@@ -42,6 +43,7 @@ export function SettingsPage() {
               { value: 'endpoints', label: '模型接入点' },
               { value: 'roles', label: '职责路由' },
               { value: 'assets', label: '素材' },
+              { value: 'editor', label: '编辑器' },
               { value: 'about', label: '关于' },
             ]}
           />
@@ -51,6 +53,7 @@ export function SettingsPage() {
         {tab === 'endpoints' && <EndpointsTab />}
         {tab === 'roles' && <RolesTab />}
         {tab === 'assets' && <AssetsSettingsTab />}
+        {tab === 'editor' && <EditorSettingsTab />}
         {tab === 'about' && <AboutTab />}
       </div>
     </div>
@@ -929,6 +932,77 @@ function AssetsSettingsTab() {
       </p>
       <Card className="p-5" data-testid="asset-settings-global">
         <AssetSettingsForm mode="global" global={settings.assets} value={settings.assets} onSave={save} />
+      </Card>
+    </div>
+  );
+}
+
+// ───────────── 编辑器（20.11） ─────────────
+
+const EDITOR_DEFAULTS: EditorSettings = { autoLock: true, historyLimit: 20 };
+
+function EditorSettingsTab() {
+  const { settings, refresh } = useSettings();
+  const toast = useToast();
+  const [draft, setDraft] = useState<EditorSettings | null>(null);
+  useEffect(() => {
+    if (settings) setDraft(settings.editor);
+  }, [settings]);
+  if (!settings || !draft) return <Spinner />;
+  const save = async (v: EditorSettings) => {
+    try {
+      await engine.call('saveEditorSettings', { settings: v });
+      await refresh();
+      toast('ok', '已保存编辑器设置');
+    } catch (err) {
+      toast('err', errorMessage(err));
+    }
+  };
+  const changed = JSON.stringify(draft) !== JSON.stringify(settings.editor);
+  return (
+    <div className="mx-auto max-w-4xl space-y-3">
+      <p className="text-sm text-muted">在世界页里改世界的内容时的做法。</p>
+      <Card className="space-y-5 p-5" data-testid="editor-settings">
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">手改的字段自动锁住</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">
+              改过的字段旁边出现一把锁，之后重抽这一步或者这个角色时不会被冲掉。关掉以后要锁哪个自己点。
+            </p>
+          </div>
+          <label className="flex h-9 shrink-0 items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={draft.autoLock}
+              onChange={(e) => setDraft({ ...draft, autoLock: e.target.checked })}
+              data-testid="editor-autolock"
+            />
+            自动锁住
+          </label>
+        </div>
+        <div className="flex items-start justify-between gap-6">
+          <div>
+            <div className="text-sm font-medium">每个文件留几个历史版本</div>
+            <p className="mt-1 text-xs leading-relaxed text-faint">保存、重新生成、删除之前把原来的存一份，可以对照、退回去。0 不留。</p>
+          </div>
+          <Input
+            type="number"
+            min={0}
+            max={200}
+            className="w-24 shrink-0"
+            value={draft.historyLimit}
+            onChange={(e) => setDraft({ ...draft, historyLimit: Math.max(0, Math.min(200, Math.round(Number(e.target.value) || 0))) })}
+            data-testid="editor-history-limit"
+          />
+        </div>
+        <div className="flex justify-end gap-2 border-t border-line pt-4">
+          <Button variant="ghost" onClick={() => setDraft(EDITOR_DEFAULTS)} disabled={JSON.stringify(draft) === JSON.stringify(EDITOR_DEFAULTS)}>
+            恢复默认
+          </Button>
+          <Button variant="primary" disabled={!changed} onClick={() => void save(draft)} data-testid="editor-settings-save">
+            保存
+          </Button>
+        </div>
       </Card>
     </div>
   );

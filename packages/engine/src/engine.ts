@@ -15,6 +15,7 @@ import {
   checkComfy,
   ComfySettings,
   comfyUsesModel,
+  EditorSettings,
   type Endpoint,
   type GenesisStepId,
   checkCustomApi,
@@ -23,7 +24,10 @@ import {
   MEDIA_ROLE_IDS,
   MediaRoleId,
   type MediaRoute,
+  migrate,
+  PlotGraph,
   RoleId,
+  VariablesFile,
 } from '@auto-adv/schema';
 import type {
   AssetsChunk,
@@ -39,6 +43,8 @@ import type {
   PlaygroundResult,
   ProbeChunk,
   SaveEndpointParams,
+  SaveWorldPartParams,
+  SaveWorldPartResult,
   SettingsView,
 } from './api.ts';
 import { AssetService } from './assets/service.ts';
@@ -57,7 +63,23 @@ import { GenesisRunner } from './genesis/pipeline.ts';
 import { ModelGateway } from './llm/gateway.ts';
 import { PlayService } from './play/runtime.ts';
 import { checkWorldPlot } from './plot/session.ts';
-import { assertWorldId, type WorldData, WorldStore } from './world/store.ts';
+import { assertWorldId, type WorldData, type WorldPartKey, WorldStore } from './world/store.ts';
+import {
+  allRevs,
+  changedPaths,
+  checkWorld,
+  defaultsOf,
+  type EntityKind,
+  ID_PREFIX,
+  mergeLocks,
+  nextId,
+  PART_SCHEMAS,
+  parsePart,
+  referencesTo,
+  type RevKey,
+  revOf,
+  withoutReferences,
+} from './world/edit.ts';
 import type { CallContext, Handlers } from './rpc/index.ts';
 import { endpointKeyId, type SecretStore } from './secrets.ts';
 import { SettingsStore } from './settings-store.ts';
@@ -110,7 +132,9 @@ export class Engine {
       fetch: this.fetchImpl,
       timeoutMs: this.timeoutMs,
     });
-    this.worlds = new WorldStore(path.join(opts.dataDir, 'worlds'));
+    this.worlds = new WorldStore(path.join(opts.dataDir, 'worlds'), {
+      historyLimit: () => this.settings.peek()?.editor.historyLimit ?? 20,
+    });
     this.genesis = new GenesisRunner(this.worlds, this.gateway);
     this.play = new PlayService(this.worlds, this.gateway);
     this.assets = new AssetService(this.worlds, this.settings, this.gateway, {
@@ -164,6 +188,7 @@ export class Engine {
       roles: s.roles,
       media: s.media,
       assets: s.assets,
+      editor: s.editor,
       assetDefaults: {
         templates: BUILTIN_TEMPLATES,
         artStyle: DEFAULT_ART_STYLE,
@@ -293,6 +318,11 @@ export class Engine {
     const parsed = AssetSettings.parse(settings);
     await this.settings.update((s) => ({ ...s, assets: parsed }));
     await this.assets.refreshAll();
+  }
+
+  async saveEditorSettings(settings: EditorSettings): Promise<void> {
+    const parsed = EditorSettings.parse(settings);
+    await this.settings.update((s) => ({ ...s, editor: parsed }));
   }
 
   /** 画一张小图试试图像职责。 */
@@ -454,7 +484,201 @@ export class Engine {
   async getWorld(id: string): Promise<WorldDetail> {
     const world = await this.worlds.load(id);
     const { scripts: _scripts, ...d } = world;
-    return { ...d, plotCheck: checkWorldPlot(world), summary: this.summarize(d) };
+    return {
+      ...d,
+      plotCheck: checkWorldPlot(world),
+      summary: this.summarize(d),
+      revs: allRevs(world),
+      issues: checkWorld(world),
+      editable: !this.genesis.isRunning(id),
+    };
+  }
+
+  // ───────────── 世界编辑器（20.5） ─────────────
+
+  private async editableWorld(worldId: string): Promise<WorldData> {
+    assertWorldId(worldId);
+    if (this.genesis.isRunning(worldId)) {
+      throw Object.assign(new Error('这个世界正在生成，等生成完再改'), { code: 'busy' });
+    }
+    return this.worlds.load(worldId);
+  }
+
+  /** 保存一块内容：校验、检查版本号、手改的字段自动锁住、旧版本进历史，然后重算素材清单。 */
+  async saveWorldPart(p: SaveWorldPartParams): Promise<SaveWorldPartResult> {
+    const world = await this.editableWorld(p.worldId);
+    const { autoLock } = (await this.settings.get()).editor;
+    const unlocked = new Set(p.unlocked ?? []);
+    const now = new Date().toISOString();
+    const check = (key: RevKey) => {
+      if (p.base && p.base !== revOf(world, key)) {
+        throw Object.assign(new Error('这块内容在你打开以后被改过（可能是创世或者另一个窗口），请重新打开再改'), { code: 'conflict' });
+      }
+    };
+    /** 实体：手改的字段加进 _meta.locked，改过内容的记成你写的。 */
+    const stamp = <T extends { _meta: { locked: string[]; generatedBy?: string; updatedAt?: string } }>(
+      before: T | null,
+      next: T,
+      part: Parameters<typeof defaultsOf>[0],
+    ): T => {
+      const changed = changedPaths(before ?? defaultsOf(part, (next as { id?: string }).id), next);
+      const locked = autoLock ? mergeLocks(next._meta.locked, changed.filter((x) => !unlocked.has(x))) : next._meta.locked;
+      return {
+        ...next,
+        _meta: { ...next._meta, locked, ...(changed.length ? { generatedBy: 'user', updatedAt: now } : {}) },
+      };
+    };
+    /** 没有 _meta 的几块：锁记在 world.json 的 locked 里。 */
+    const lockPart = async (name: string, changed: boolean) => {
+      const want = p.lock ?? (autoLock && changed && !unlocked.has(name) ? true : undefined);
+      if (want === undefined) return;
+      await this.worlds.updateManifest(p.worldId, (m) => ({
+        ...m,
+        locked: want ? [...new Set([...m.locked, name])] : m.locked.filter((x) => x !== name),
+      }));
+    };
+    let key: RevKey;
+    switch (p.part) {
+      case 'manifest': {
+        key = 'manifest';
+        check(key);
+        const title = p.data.title.trim();
+        if (!title) throw Object.assign(new Error('世界名不能为空'), { code: 'invalid' });
+        const logline = p.data.logline.trim();
+        const m = world.manifest;
+        const changed = [...(title !== m.title ? ['title'] : []), ...(logline !== m.logline ? ['logline'] : [])];
+        await this.worlds.updateManifest(p.worldId, (x) => {
+          const base = p.data.locked ?? x.locked;
+          const locked = autoLock ? mergeLocks(base, changed.filter((c) => !unlocked.has(c))) : base;
+          return { ...x, title, logline, locked };
+        });
+        break;
+      }
+      case 'brief': {
+        key = 'brief';
+        check(key);
+        const next = stamp(world.brief, parsePart(PART_SCHEMAS.brief, p.data, '世界简报'), 'brief');
+        await this.worlds.writeBrief(p.worldId, next, 'edit');
+        break;
+      }
+      case 'style': {
+        key = 'style';
+        check(key);
+        const next = stamp(world.style, parsePart(PART_SCHEMAS.style, p.data, '风格'), 'style');
+        await this.worlds.writeStyle(p.worldId, next, 'edit');
+        break;
+      }
+      case 'worldview': {
+        key = 'worldview';
+        check(key);
+        const text = String(p.data ?? '');
+        await this.worlds.writeWorldview(p.worldId, text, 'edit');
+        await lockPart('worldview', text.trim() !== world.worldview.trim());
+        break;
+      }
+      case 'variables': {
+        key = 'variables';
+        check(key);
+        const vars = parsePart(PART_SCHEMAS.variables, p.data, '数值表');
+        const dup = vars.find((v, i) => vars.findIndex((x) => x.id === v.id) !== i);
+        if (dup) throw Object.assign(new Error(`数值表里的 ${dup.id} 重复了`), { code: 'invalid' });
+        await this.worlds.writeVariables(p.worldId, vars, 'edit');
+        await lockPart('variables', JSON.stringify(vars) !== JSON.stringify(world.variables));
+        break;
+      }
+      case 'opening': {
+        key = 'opening';
+        check(key);
+        const next = stamp(world.opening, parsePart(PART_SCHEMAS.opening, p.data, '开场'), 'opening');
+        await this.worlds.writeOpening(p.worldId, next, 'edit');
+        break;
+      }
+      case 'character':
+      case 'location':
+      case 'lore': {
+        const kind = p.part;
+        const list: { id: string }[] =
+          kind === 'character' ? world.characters : kind === 'location' ? world.locations : world.lore;
+        const id = p.data.id || nextId(ID_PREFIX[kind], list.map((x) => x.id));
+        key = `${kind}:${id}`;
+        check(key);
+        const label = { character: '角色', location: '地点', lore: '设定条目' }[kind];
+        if (kind === 'character') {
+          const parsed = parsePart(PART_SCHEMAS.character, { ...p.data, id }, label);
+          // 自己的秘密自己总是知道（新角色在保存前还没有 id，界面上没法勾自己）
+          parsed.secrets = parsed.secrets.map((x) =>
+            Array.isArray(x.knownBy) && !x.knownBy.includes(id) ? { ...x, knownBy: [id, ...x.knownBy] } : x,
+          );
+          const next = stamp(world.characters.find((c) => c.id === id) ?? null, parsed, kind);
+          await this.worlds.writeCharacter(p.worldId, next, 'edit');
+        } else if (kind === 'location') {
+          const next = stamp(world.locations.find((l) => l.id === id) ?? null, parsePart(PART_SCHEMAS.location, { ...p.data, id }, label), kind);
+          await this.worlds.writeLocation(p.worldId, next, 'edit');
+        } else {
+          const next = stamp(world.lore.find((e) => e.id === id) ?? null, parsePart(PART_SCHEMAS.lore, { ...p.data, id }, label), kind);
+          await this.worlds.writeLoreEntry(p.worldId, next, 'edit');
+        }
+        break;
+      }
+      default:
+        throw Object.assign(new Error('不认识的内容'), { code: 'invalid' });
+    }
+    await this.worlds.updateManifest(p.worldId, (m) => m);
+    void this.assets.refresh(p.worldId).catch(() => {});
+    return { key, world: await this.getWorld(p.worldId) };
+  }
+
+  /** 删掉一个角色、地点或设定条目；removeRefs 时先把别处能去掉的引用去掉（20.5"删除"）。 */
+  async deleteWorldPart(p: { worldId: string; kind: EntityKind; id: string; removeRefs: boolean }): Promise<WorldDetail> {
+    const world = await this.editableWorld(p.worldId);
+    const key = `${p.kind}:${p.id}` as const;
+    const list: { id: string }[] =
+      p.kind === 'character' ? world.characters : p.kind === 'location' ? world.locations : world.lore;
+    if (!list.some((x) => x.id === p.id)) throw new Error('要删的内容不存在，可能已经删掉了');
+    if (p.removeRefs) {
+      const patch = withoutReferences(world, p.kind, p.id);
+      const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+      for (const c of patch.characters ?? []) {
+        if (!same(c, world.characters.find((x) => x.id === c.id))) await this.worlds.writeCharacter(p.worldId, c, 'edit');
+      }
+      for (const l of patch.locations ?? []) {
+        if (!same(l, world.locations.find((x) => x.id === l.id))) await this.worlds.writeLocation(p.worldId, l, 'edit');
+      }
+      for (const e of patch.lore ?? []) {
+        if (!same(e, world.lore.find((x) => x.id === e.id))) await this.worlds.writeLoreEntry(p.worldId, e, 'edit');
+      }
+      if (patch.graph) await this.worlds.writePlot(p.worldId, patch.graph, 'edit');
+      if (patch.opening) await this.worlds.writeOpening(p.worldId, patch.opening, 'edit');
+    }
+    await this.worlds.deleteEntity(p.worldId, key);
+    await this.worlds.updateManifest(p.worldId, (m) => m);
+    void this.assets.refresh(p.worldId).catch(() => {});
+    return this.getWorld(p.worldId);
+  }
+
+  async worldReferences(p: { worldId: string; kind: EntityKind; id: string }) {
+    assertWorldId(p.worldId);
+    return referencesTo(await this.worlds.load(p.worldId), p.kind, p.id);
+  }
+
+  /** 读一个历史版本，顺带转成能直接保存的内容（数值表只要列表）。 */
+  async worldHistoryRead(p: { worldId: string; key: WorldPartKey; name: string }): Promise<{ text: string; data: unknown }> {
+    assertWorldId(p.worldId);
+    const text = await this.worlds.readHistory(p.worldId, p.key, p.name);
+    if (p.key === 'worldview') return { text, data: text };
+    // 按现在的格式补全默认值（旧版本、手写的文件可能缺字段）；读不懂的给 null，界面上只能看不能用
+    let raw: unknown;
+    try {
+      raw = migrate(JSON.parse(text));
+    } catch {
+      return { text, data: null };
+    }
+    const kind = p.key.split(':')[0] as string;
+    const schema =
+      kind === 'variables' ? VariablesFile : kind === 'plot' ? PlotGraph : PART_SCHEMAS[kind as keyof typeof PART_SCHEMAS];
+    const r = schema?.safeParse(raw);
+    if (!r?.success) return { text, data: null };
+    return { text, data: kind === 'variables' ? (r.data as VariablesFile).variables : r.data };
   }
 
   /** 从文件夹导入世界。 */
@@ -520,6 +744,7 @@ export class Engine {
       setRole: (p) => this.setRole(p.role, p.route),
       setMediaRole: (p) => this.setMediaRole(p.role, p.route),
       saveAssetSettings: (p) => this.saveAssetSettings(p.settings),
+      saveEditorSettings: (p) => this.saveEditorSettings(p.settings),
       testImage: (p, ctx) => this.testImage(p.route, ctx),
       testMusic: (p, ctx) => this.testMusic(p.route, ctx),
       testCutout: (p, ctx) => this.testCutout(p.route, ctx),
@@ -541,6 +766,11 @@ export class Engine {
       getWorld: (p) => this.getWorld(p.id),
       deleteWorld: (p) => this.deleteWorld(p.id),
       importWorld: (p) => this.importWorld(p.path),
+      saveWorldPart: (p) => this.saveWorldPart(p),
+      deleteWorldPart: (p) => this.deleteWorldPart(p),
+      worldReferences: (p) => this.worldReferences(p),
+      worldHistory: (p) => (assertWorldId(p.worldId), this.worlds.listHistory(p.worldId, p.key)),
+      worldHistoryRead: (p) => this.worldHistoryRead(p),
       createWorld: (p, ctx) => this.createWorld(p, ctx),
       estimateAssets: async (p) => {
         const [s, image, music, voice] = await Promise.all([

@@ -169,7 +169,7 @@ export function Tabs<T extends string>({
   items: { value: T; label: ReactNode }[];
 }) {
   return (
-    <div className="flex gap-1 rounded-lg bg-panel-2 p-1">
+    <div className="flex flex-wrap gap-1 rounded-lg bg-panel-2 p-1">
       {items.map((it) => (
         <button
           key={it.value}
@@ -177,7 +177,7 @@ export function Tabs<T extends string>({
           data-testid={`tab-${it.value}`}
           onClick={() => onChange(it.value)}
           className={cx(
-            'h-7 rounded-md px-3 text-sm transition-colors',
+            'h-7 rounded-md px-2.5 text-sm transition-colors',
             value === it.value ? 'bg-panel-3 text-fg shadow-sm' : 'text-muted hover:text-fg',
           )}
         >
